@@ -1,6 +1,6 @@
 [package]
 name = "candyriya-permissions-config"
-description = "Config-file backed permission provider (TOML) for the default setup."
+description = "Default config-backed permission provider for candyriya-permissions."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,8 +9,6 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-toml = { workspace = true }
-serde = { workspace = true }
 thiserror = { workspace = true }
 candyriya-permissions = { version = "0.1.0", path = "../candyriya-permissions" }
 

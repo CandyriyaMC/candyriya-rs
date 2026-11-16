@@ -450,9 +450,7 @@ name = "candyriya-permissions-config"
 version = "0.1.0"
 dependencies = [
  "candyriya-permissions",
- "serde",
  "thiserror 2.0.21",
- "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]
