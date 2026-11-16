@@ -406,6 +406,7 @@ dependencies = [
 name = "candyriya-messaging-bungeecord"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "candyriya-messaging",
  "thiserror 2.0.21",
 ]
