@@ -9,10 +9,14 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+bytes = { workspace = true }
+candyriya-player = { version = "0.1.0", path = "../../player/candyriya-player" }
+candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
 hmac = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
+uuid = { workspace = true }
 
 [lints]
 workspace = true
