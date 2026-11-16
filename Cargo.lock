@@ -470,10 +470,12 @@ dependencies = [
 name = "candyriya-player-store"
 version = "0.1.0"
 dependencies = [
- "serde",
+ "candyriya-player",
+ "chrono",
+ "parking_lot",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
- "tokio",
  "uuid",
 ]
 
