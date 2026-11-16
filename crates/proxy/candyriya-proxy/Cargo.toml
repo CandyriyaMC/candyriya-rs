@@ -1,0 +1,42 @@
+[package]
+name = "candyriya-proxy"
+description = "Proxy core: accept loop, handshake and login pipelines, packet middleware and bidirectional forwarding."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+socket2 = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+arc-swap = { workspace = true }
+candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
+candyriya-protocol-registry = { version = "0.1.0", path = "../../protocol/candyriya-protocol-registry" }
+candyriya-compression = { version = "0.1.0", path = "../../protocol/candyriya-compression" }
+candyriya-encryption = { version = "0.1.0", path = "../../protocol/candyriya-encryption" }
+candyriya-auth = { version = "0.1.0", path = "../../auth/candyriya-auth" }
+candyriya-config = { version = "0.1.0", path = "../../config/candyriya-config" }
+candyriya-route = { version = "0.1.0", path = "../../network/candyriya-route" }
+candyriya-ratelimit = { version = "0.1.0", path = "../../network/candyriya-ratelimit" }
+candyriya-forwarding = { version = "0.1.0", path = "../../network/candyriya-forwarding" }
+candyriya-messaging = { version = "0.1.0", path = "../../messaging/candyriya-messaging" }
+candyriya-messaging-bungeecord = { version = "0.1.0", path = "../../messaging/candyriya-messaging-bungeecord" }
+candyriya-messaging-velocity = { version = "0.1.0", path = "../../messaging/candyriya-messaging-velocity" }
+candyriya-messaging-candyriya = { version = "0.1.0", path = "../../messaging/candyriya-messaging-candyriya" }
+candyriya-player = { version = "0.1.0", path = "../../player/candyriya-player" }
+candyriya-permissions = { version = "0.1.0", path = "../../permissions/candyriya-permissions" }
+candyriya-plugin = { version = "0.1.0", path = "../../plugin/candyriya-plugin" }
+candyriya-eventbus = { version = "0.1.0", path = "../../common/candyriya-eventbus" }
+candyriya-cache = { version = "0.1.0", path = "../../common/candyriya-cache" }
+candyriya-metrics = { version = "0.1.0", path = "../../common/candyriya-metrics" }
+candyriya-telemetry = { version = "0.1.0", path = "../../common/candyriya-telemetry" }
+
+[lints]
+workspace = true

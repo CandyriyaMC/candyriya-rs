@@ -1,0 +1,21 @@
+[package]
+name = "candyriya-command"
+description = "Brigadier command wiring and built-in commands (/candyriya, /server, /glist, /goto and friends)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+azalea-brigadier = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+candyriya-proxy = { version = "0.1.0", path = "../../proxy/candyriya-proxy" }
+candyriya-player = { version = "0.1.0", path = "../../player/candyriya-player" }
+candyriya-permissions = { version = "0.1.0", path = "../../permissions/candyriya-permissions" }
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "candyriya-compression"
+description = "Zlib compression manager for the Minecraft protocol (SetCompression, threshold handling)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+flate2 = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

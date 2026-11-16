@@ -1,0 +1,18 @@
+[package]
+name = "candyriya-protocol"
+description = "Minecraft Java Edition protocol primitives: VarInt and VarLong coding, packet framing and buffer codec."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio-util = { workspace = true }
+
+[lints]
+workspace = true

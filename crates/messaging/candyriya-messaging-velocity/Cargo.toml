@@ -1,0 +1,17 @@
+[package]
+name = "candyriya-messaging-velocity"
+description = "Velocity-style plugin messaging: registrar, events and forward results."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+candyriya-messaging = { version = "0.1.0", path = "../candyriya-messaging" }
+
+[lints]
+workspace = true

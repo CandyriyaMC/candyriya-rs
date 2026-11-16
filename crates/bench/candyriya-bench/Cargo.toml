@@ -1,0 +1,20 @@
+[package]
+name = "candyriya-bench"
+description = "Criterion benchmarks for hot protocol paths."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
+candyriya-compression = { version = "0.1.0", path = "../../protocol/candyriya-compression" }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[lints]
+workspace = true

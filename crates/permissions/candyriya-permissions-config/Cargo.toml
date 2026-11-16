@@ -1,0 +1,19 @@
+[package]
+name = "candyriya-permissions-config"
+description = "Config-file backed permission provider (TOML) for the default setup."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+toml = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+candyriya-permissions = { version = "0.1.0", path = "../candyriya-permissions" }
+
+[lints]
+workspace = true

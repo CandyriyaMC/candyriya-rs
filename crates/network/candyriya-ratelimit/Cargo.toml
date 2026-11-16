@@ -1,0 +1,18 @@
+[package]
+name = "candyriya-ratelimit"
+description = "Token-bucket rate limiting and connection limiting for inbound traffic."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
