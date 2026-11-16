@@ -9,7 +9,6 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-tokio = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 
