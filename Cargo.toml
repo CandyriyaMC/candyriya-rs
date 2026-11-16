@@ -75,7 +75,8 @@ sha1 = "0.10"
 reqwest = { version = "0.12" }
 sha2 = "0.10"
 md5 = "0.8"
-flate2 = "1"
+# pure safe-Rust backend only (miniz_oxide); never libz/zlib/zlib-sys
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 indexmap = "2"
 lobsterchat = { version = "0.4", features = ["minimessage"] }
 azalea-brigadier = "0.16"
