@@ -8,5 +8,12 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[dependencies]
+thiserror = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true
