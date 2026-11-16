@@ -1,0 +1,18 @@
+[package]
+name = "candyriya-cache"
+description = "Namespaced caches and buffer pools with per-consumer quotas (cachegirl based)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+cachegirl = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

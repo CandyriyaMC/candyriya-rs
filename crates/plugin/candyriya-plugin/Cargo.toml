@@ -1,0 +1,23 @@
+[package]
+name = "candyriya-plugin"
+description = "Extism WASM plugin host runtime: metadata, dependency resolution, lifecycle and hot reload."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+extism = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+semver = { workspace = true }
+tokio = { workspace = true }
+indexmap = { workspace = true }
+candyriya-plugin-api = { version = "0.1.0", path = "../candyriya-plugin-api" }
+candyriya-cache = { version = "0.1.0", path = "../../common/candyriya-cache" }
+
+[lints]
+workspace = true

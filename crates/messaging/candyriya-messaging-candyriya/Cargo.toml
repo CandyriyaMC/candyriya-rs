@@ -1,0 +1,18 @@
+[package]
+name = "candyriya-messaging-candyriya"
+description = "Native versioned plugin messaging protocol on the candyriya:main channel."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+candyriya-messaging = { version = "0.1.0", path = "../candyriya-messaging" }
+candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
+
+[lints]
+workspace = true

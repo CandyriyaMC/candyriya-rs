@@ -1,0 +1,17 @@
+[package]
+name = "candyriya-protocol-registry"
+description = "Version-aware registry of protocol tables across Minecraft releases 1.7 and newer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+candyriya-protocol = { version = "0.1.0", path = "../candyriya-protocol" }
+
+[lints]
+workspace = true

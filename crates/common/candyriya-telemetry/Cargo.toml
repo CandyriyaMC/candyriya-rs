@@ -1,0 +1,20 @@
+[package]
+name = "candyriya-telemetry"
+description = "OpenTelemetry pipeline and tracing subscriber setup with OTLP export."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

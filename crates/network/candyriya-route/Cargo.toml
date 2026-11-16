@@ -1,0 +1,18 @@
+[package]
+name = "candyriya-route"
+description = "Forced hosts, wildcard domains, try/fallback routing and the backend registry."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

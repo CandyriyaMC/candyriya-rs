@@ -1,0 +1,18 @@
+[package]
+name = "candyriya-eventbus"
+description = "Typed in-process event bus for proxy-wide events."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

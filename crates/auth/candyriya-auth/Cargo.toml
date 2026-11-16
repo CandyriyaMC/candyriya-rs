@@ -1,0 +1,25 @@
+[package]
+name = "candyriya-auth"
+description = "Offline and online (Mojang/Microsoft) authentication flows backed by azalea-auth."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+azalea-auth = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+md5 = { workspace = true }
+cachegirl = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
