@@ -89,6 +89,9 @@ notify = "8"
 tracing-appender = "0.2"
 semver = "1"
 criterion = "0.7"
+num_cpus = "1"
+base64 = "0.22"
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
