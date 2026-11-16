@@ -14,6 +14,7 @@ members = [
     "crates/auth/candyriya-auth",
     "crates/config/candyriya-config",
     "crates/common/candyriya-utils",
+    "crates/common/candyriya-i18n",
     "crates/common/candyriya-metrics",
     "crates/common/candyriya-telemetry",
     "crates/common/candyriya-eventbus",
