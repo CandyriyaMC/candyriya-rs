@@ -1,6 +1,6 @@
 [package]
 name = "candyriya-plugin-api"
-description = "Host-side API types exposed to plugins: players, servers, chat, titles, boss bars and tab list."
+description = "Shared candyriya plugin ABI contract types: proxy version, plugin metadata and events exchanged between the host and WASM plugins."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,8 +9,13 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
+semver = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+toml = { workspace = true }
 
 [lints]
 workspace = true

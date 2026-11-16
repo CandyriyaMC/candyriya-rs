@@ -1,0 +1,23 @@
+# A complete-but-minimal example of a candyriya plugin manifest.
+# Used by the integration tests; keep it honest — if fields are added,
+# this file should exercise them.
+id = "example-plugin"
+version = "1.4.0"
+name = "Example Plugin"
+description = "Demonstrates the plugin ABI contract with every knob turned on."
+authors = ["Example Author <author@example.com>", "Second Author"]
+website = "https://example.com/example-plugin"
+license = "GPL-3.0-only"
+plugin_main = "example_plugin_main"
+plugin_api = "0.1"
+depend = ["example-library"]
+softdepend = ["another-library"]
+permissions = ["players.read", "servers.switch"]
+cache_quota_bytes = 67108864
+cache_quota_resources = 1024
+
+[api]
+exports = [
+    { name = "greet" },
+    { name = "status" },
+]
