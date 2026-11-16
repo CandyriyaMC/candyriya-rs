@@ -9,8 +9,10 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-thiserror = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
 candyriya-messaging = { version = "0.1.0", path = "../candyriya-messaging" }
+candyriya-messaging-bungeecord = { version = "0.1.0", path = "../candyriya-messaging-bungeecord" }
 
 [lints]
 workspace = true

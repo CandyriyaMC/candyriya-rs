@@ -416,8 +416,10 @@ dependencies = [
 name = "candyriya-messaging-velocity"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "candyriya-messaging",
- "thiserror 2.0.21",
+ "candyriya-messaging-bungeecord",
+ "uuid",
 ]
 
 [[package]]
