@@ -455,7 +455,9 @@ dependencies = [
 name = "candyriya-player"
 version = "0.1.0"
 dependencies = [
+ "candyriya-protocol-registry",
  "chrono",
+ "md5",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

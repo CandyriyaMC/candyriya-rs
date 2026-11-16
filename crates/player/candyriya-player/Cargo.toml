@@ -10,10 +10,15 @@ authors.workspace = true
 
 [dependencies]
 uuid = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+# pure Rust, no C dependencies; used for the offline-mode UUID derivation
+md5 = { workspace = true }
+candyriya-protocol-registry = { version = "0.1.0", path = "../../protocol/candyriya-protocol-registry" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
