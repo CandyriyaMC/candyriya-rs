@@ -1,6 +1,6 @@
 [package]
 name = "candyriya-scheduler"
-description = "Cron and interval task scheduling on tokio."
+description = "Central task service: named tasks, cancellation, cron, scoped plugin quotas, graceful drain."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,11 @@ authors.workspace = true
 tokio = { workspace = true }
 tokio-cron-scheduler = { workspace = true }
 thiserror = { workspace = true }
+parking_lot = { workspace = true }
+rayon = { workspace = true }
+num_cpus = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true
