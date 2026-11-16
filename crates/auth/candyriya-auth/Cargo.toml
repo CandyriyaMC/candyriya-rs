@@ -1,6 +1,6 @@
 [package]
 name = "candyriya-auth"
-description = "Offline and online (Mojang session) authentication for the proxy: RSA encryption handshake, AES-CFB8 cipher management and the server-side session join check."
+description = "Server-side Mojang session (hasJoined) verification and offline-mode authentication for the proxy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,21 +9,15 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-reqwest = { workspace = true, default-features = false, features = ["default-tls", "json", "charset", "http2"] }
-rsa = { workspace = true }
-aes = { workspace = true }
-cfb8 = { workspace = true }
-hmac = { workspace = true }
-sha1 = { workspace = true }
-sha2 = { workspace = true }
-zeroize = { workspace = true }
+candyriya-player = { version = "0.1.0", path = "../../player/candyriya-player" }
+reqwest = { workspace = true, default-features = false, features = ["default-tls"] }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 uuid = { workspace = true }
-md5 = { workspace = true }
-cachegirl = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
 
 [lints]
 workspace = true
