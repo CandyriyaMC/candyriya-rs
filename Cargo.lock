@@ -561,9 +561,12 @@ dependencies = [
 name = "candyriya-route"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "candyriya-protocol",
  "thiserror 2.0.21",
  "tokio",
- "url",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
