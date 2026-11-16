@@ -25,10 +25,11 @@ locally:
 
 ```shell
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo doc --no-deps --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 ```
+
+All code must pass these checks before it is considered complete.
 
 ## Style guide
 
@@ -41,6 +42,53 @@ cargo doc --no-deps --workspace
 - Prefer existing workspace crates and public traits over new modules; keep
   dependencies between crates acyclic.
 - Format with `cargo fmt` and keep `cargo clippy` clean.
+
+## Rust coding standards
+
+We follow idiomatic, modern, production-grade Rust, the official Rust API
+Guidelines, and strict Clippy lints.
+
+### General style
+- Follow the official Rust API Guidelines and standard rustfmt formatting.
+- Use descriptive, consistent naming.
+- Prefer explicit, readable and maintainable code.
+- Avoid unnecessary abstractions and excessive generic programming.
+- Prefer composition over complicated type hierarchies.
+
+### Memory management
+- Minimize unnecessary allocations.
+- Avoid unnecessary cloning.
+- Prefer borrowing over ownership transfer when appropriate.
+- Use `Arc` only when shared ownership is actually required.
+- Avoid unnecessary heap allocations.
+
+### Error handling
+- Never use `unwrap()` in production code without a justified, documented reason.
+- Never swallow errors; no ignored `Result`s.
+- Use meaningful error types; prefer `thiserror` for library errors.
+- Propagate errors explicitly.
+- Never use panics for normal control flow.
+
+### Async and concurrency
+- Never block Tokio runtime worker threads.
+- Avoid unnecessary mutexes and shared mutable state.
+- Prefer message passing where it simplifies synchronization.
+- Use bounded channels where backpressure is required.
+- Keep CPU-intensive operations separate from asynchronous networking.
+- Avoid spawning tasks without a clear lifecycle.
+
+### Safety
+- Minimize `unsafe` code; the workspace forbids it.
+- Never bypass Rust's safety guarantees without a technical justification.
+
+### Code quality
+- No dead code.
+- No duplicated logic.
+- No artificial complexity.
+- No placeholder implementations.
+- No ignored errors.
+- No unnecessary dependencies.
+- All public APIs must have meaningful documentation.
 
 ## Pull requests
 
