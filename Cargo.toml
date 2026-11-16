@@ -50,10 +50,11 @@ dashmap = "6"
 parking_lot = "0.12"
 arc-swap = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi", "time"] }
 tracing-opentelemetry = "0.34"
 opentelemetry = "0.33"
-opentelemetry-otlp = "0.33"
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "grpc-tonic"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 thiserror = "2"

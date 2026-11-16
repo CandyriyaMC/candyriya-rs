@@ -1,6 +1,6 @@
 [package]
 name = "candyriya-telemetry"
-description = "OpenTelemetry pipeline and tracing subscriber setup with OTLP export."
+description = "Tracing subscriber setup with console and daily-rotating file logging; optional OTLP export behind the `otlp` feature."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,11 +9,32 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-opentelemetry = { workspace = true }
-opentelemetry-otlp = { workspace = true }
-tracing-opentelemetry = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 thiserror = { workspace = true }
+# OTel is an opt-in, OFF-by-default feature: the proxy builds and runs without it.
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Safe env mutation for tests: in the 2024 edition std::env::set_var is unsafe,
+# which the workspace forbids, so tests go through a crate that encapsulates it.
+temp-env = "0.3"
+
+[features]
+default = []
+# Wires an OTLP/gRPC (tonic) span pipeline on top of the fmt layers.
+# Not verified locally (native/CI concerns); CI covers --all-features.
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
 
 [lints]
 workspace = true
