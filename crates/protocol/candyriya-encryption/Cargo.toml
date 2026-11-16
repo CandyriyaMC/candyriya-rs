@@ -3,7 +3,6 @@ name = "candyriya-encryption"
 description = "Minecraft login encryption: RSA key exchange and AES-128-CFB8 stream cipher."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

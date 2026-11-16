@@ -1,9 +1,8 @@
 [package]
 name = "candyriya-plugin"
-description = "Extism WASM plugin host runtime: metadata, dependency resolution, lifecycle and hot reload."
+description = "Extism WASM plugin host runtime: metadata, dependency resolution, lifecycle, hot reload and proxy-side services for plugins."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

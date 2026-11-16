@@ -3,7 +3,6 @@ name = "candyriya-messaging-candyriya"
 description = "Native versioned plugin messaging protocol on the candyriya:main channel."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

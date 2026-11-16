@@ -1,21 +1,25 @@
 [package]
 name = "candyriya-auth"
-description = "Offline and online (Mojang/Microsoft) authentication flows backed by azalea-auth."
+description = "Offline and online (Mojang session) authentication for the proxy: RSA encryption handshake, AES-CFB8 cipher management and the server-side session join check."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-azalea-auth = { workspace = true }
+reqwest = { workspace = true, default-features = false, features = ["default-tls", "json", "charset", "http2"] }
+rsa = { workspace = true }
+aes = { workspace = true }
+cfb8 = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
-base64 = { workspace = true }
-sha2 = { workspace = true }
 md5 = { workspace = true }
 cachegirl = { workspace = true }
 serde = { workspace = true }

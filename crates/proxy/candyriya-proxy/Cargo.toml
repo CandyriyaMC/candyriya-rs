@@ -3,7 +3,6 @@ name = "candyriya-proxy"
 description = "Proxy core: accept loop, handshake and login pipelines, packet middleware and bidirectional forwarding."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

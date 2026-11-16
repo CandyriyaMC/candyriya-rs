@@ -35,7 +35,6 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
 license = "GPL-3.0-only"
 repository = "https://github.com/bejiihiu/candyriya-rs"
 homepage = "https://github.com/bejiihiu/candyriya-rs"
@@ -71,12 +70,13 @@ uuid = { version = "1", features = ["v4", "v3", "serde"] }
 base64 = "0.22"
 md-5 = "0.11"
 hmac = "0.12"
+sha1 = "0.10"
+reqwest = { version = "0.12" }
 sha2 = "0.10"
 md5 = "0.8"
 flate2 = "1"
 indexmap = "2"
 lobsterchat = { version = "0.4", features = ["minimessage"] }
-azalea-auth = "0.16"
 azalea-brigadier = "0.16"
 extism = "1"
 cachegirl = { version = "1", features = ["memory", "cache", "async", "tokio", "tracing"] }

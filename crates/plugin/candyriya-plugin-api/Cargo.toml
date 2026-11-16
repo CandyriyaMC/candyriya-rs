@@ -3,7 +3,6 @@ name = "candyriya-plugin-api"
 description = "Host-side API types exposed to plugins: players, servers, chat, titles, boss bars and tab list."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

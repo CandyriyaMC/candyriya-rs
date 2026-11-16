@@ -3,7 +3,6 @@ name = "candyriya-player"
 description = "Player and OfflinePlayer models: game profile, properties and offline UUID derivation."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
