@@ -1,0 +1,57 @@
+# Provenance of protocol_ids.json
+
+`protocol_ids.json` (schema 1) was generated on 2026-11-17 from the per-version
+`protocol.json` files of PrismarineJS/minecraft-data. Only the login and status
+sections were extracted; the file holds one entry per unique protocol id
+(52 entries covering all stable releases from 1.7.2 to 26.3).
+
+General rules:
+
+- For every supported release, the per-version data folder was located via
+  data/pc/<key>/protocol, where <key> is the version name or its majorVersion
+  (data/dataPaths.json), and verified against that folder's version.json
+  (its "version" field equals the release's protocol id). Where no folder
+  carried the matching protocol, the nearest available folder was used and the
+  affected releases are listed in the entry's `source_note`.
+- Known gaps are explicit: login-state compression does not exist before 1.8
+  (protocol 47) and login plugin messages do not exist before 1.13 (protocol
+  393). All other login/status packet ids have been stable from 1.7.2
+  through 26.3.
+- Status ids are identical in every supported version:
+  serverbound 0x00 = status request, 0x01 = ping;
+  clientbound 0x00 = status response, 0x01 = pong.
+- Login clientbound ids: 0x00 disconnect, 0x01 encryption_request,
+  0x02 login_success, 0x03 set_compression (1.8+), 0x04 login_plugin_request (1.13+).
+  Login serverbound ids: 0x00 login_start, 0x01 encryption_response,
+  0x02 login_plugin_response (1.13+).
+- Handshake serverbound is constant: 0x00 = set_protocol (handshake packet).
+
+Specific sources:
+
+- 1.7.2, 1.7.4, 1.7.5 (protocol 4): taken from pc/1.7/protocol.json
+  (protocol 5 data, 1.7.10). PrismarineJS ships no protocol.json for protocol 4;
+  the 1.7.6 protocol bump did not touch login/status packet ids.
+- 1.16.3, 1.16.4, 1.16.5 (protocols 753/754) and 1.11.1, 1.11.2 (protocol 316):
+  taken from pc/1.16.2/protocol.json (751) and pc/1.11/protocol.json (315)
+  respectively. PrismarineJS master ships no protocol.json for these protocols;
+  login/status ids were identical across the surrounding protocol bumps.
+- 1.14.2 (protocol 485): taken from pc/1.14/protocol.json (477). No protocol.json
+  is published for protocol 485; login/status ids were identical across 1.14.x.
+- 1.9.1 (protocol 108): taken from pc/1.9.1-pre2/protocol.json.
+- 1.9.3/1.9.4 (protocol 110): taken from pc/1.9.4/protocol.json.
+- 1.19.1 (protocol 760), 1.21.2 (protocol 768), 1.21.7 (protocol 772): taken from
+  the closest folder reporting the same protocol (pc/1.19.2, pc/1.21.3, pc/1.21.8).
+- 1.21.10 (protocol 773): pc/1.21.9/protocol.json (shared).
+- 26.2 (protocol 776): https://raw.githubusercontent.com/PrismarineJS/minecraft-data/pc_26_2/data/pc/26.2/protocol.json
+  (unmerged PR branch at fetch time, PR PrismarineJS/minecraft-data#1298 stack).
+- 26.3 (protocol 777): https://raw.githubusercontent.com/PrismarineJS/minecraft-data/pc_26_3/data/pc/26.3/protocol.json
+  (unmerged PR branch at fetch time, PR PrismarineJS/minecraft-data#1300 stack).
+- 26.1, 26.1.1, 26.1.2 (protocol 775): pc/26.1/protocol.json from master.
+- All other versions: pc/<version-or-majorVersion>/protocol.json from master,
+  version.json protocol verified.
+
+Master tree listing confirmed the complete set of protocol.json files present
+at fetch time (59 files). The two 26.x branch files were committed as PR-stack
+data and may drift when the PRs land; the override mechanism in this crate
+(`protocol_ids.json` next to `protocols.json` in the data dir) is the supported
+way to pin refreshed tables without a rebuild.

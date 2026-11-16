@@ -481,7 +481,9 @@ dependencies = [
 name = "candyriya-protocol-registry"
 version = "0.1.0"
 dependencies = [
- "candyriya-protocol",
+ "minreq",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -2367,6 +2369,15 @@ checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "minreq"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "659579df697b372ef9e36f02fcbb41f6d6f157dcec7db9c9618fa0f23cf0fc20"
+dependencies = [
+ "native-tls",
 ]
 
 [[package]]

@@ -1,0 +1,1194 @@
+{
+  "schema": 1,
+  "generated": "2026-11-17",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/<folder>/protocol.json",
+      "note": "Per-release packet ids for every supported release, from PrismarineJS master @ 2026-11-17 (folder protocol verified against version.json)",
+      "fetched": "2026-11-17"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/pc_26_2/data/pc/26.2/protocol.json",
+      "note": "26.2 (protocol 776) data; branch unmerged at fetch time",
+      "fetched": "2026-11-17"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/PrismarineJS/minecraft-data/pc_26_3/data/pc/26.3/protocol.json",
+      "note": "26.3 (protocol 777) data; branch unmerged at fetch time",
+      "fetched": "2026-11-17"
+    }
+  ],
+  "known_gaps": [
+    {
+      "protocols": [
+        4,
+        5,
+        47,
+        107,
+        108,
+        109,
+        110,
+        210,
+        315,
+        316,
+        335,
+        338,
+        340
+      ],
+      "slot": "login.serverbound.plugin_response",
+      "reason": "Login plugin messages were introduced in Minecraft 1.13 (protocol 393)"
+    },
+    {
+      "protocols": [
+        4,
+        5
+      ],
+      "slot": "login.clientbound.set_compression",
+      "reason": "Login-state compression was introduced in Minecraft 1.8 (protocol 47)"
+    },
+    {
+      "protocols": [
+        4,
+        5,
+        47,
+        107,
+        108,
+        109,
+        110,
+        210,
+        315,
+        316,
+        335,
+        338,
+        340
+      ],
+      "slot": "login.clientbound.plugin_request",
+      "reason": "Login plugin messages were introduced in Minecraft 1.13 (protocol 393)"
+    }
+  ],
+  "protocols": [
+    {
+      "protocol": 4,
+      "names": [
+        "1.7.2",
+        "1.7.4",
+        "1.7.5"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": null,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": "1.7.2, 1.7.4, 1.7.5 ids from pc/1.7/protocol.json (no protocol.json published for protocol 4)"
+    },
+    {
+      "protocol": 5,
+      "names": [
+        "1.7.10",
+        "1.7.6",
+        "1.7.7",
+        "1.7.8",
+        "1.7.9"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": null,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 47,
+      "names": [
+        "1.8",
+        "1.8.1",
+        "1.8.2",
+        "1.8.3",
+        "1.8.4",
+        "1.8.5",
+        "1.8.6",
+        "1.8.7",
+        "1.8.8",
+        "1.8.9"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 107,
+      "names": [
+        "1.9"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 108,
+      "names": [
+        "1.9.1"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 109,
+      "names": [
+        "1.9.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 110,
+      "names": [
+        "1.9.3",
+        "1.9.4"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 210,
+      "names": [
+        "1.10",
+        "1.10.1",
+        "1.10.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 315,
+      "names": [
+        "1.11"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 316,
+      "names": [
+        "1.11.1",
+        "1.11.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": "1.11.1, 1.11.2 ids from pc/1.11/protocol.json (no protocol.json published for protocol 316)"
+    },
+    {
+      "protocol": 335,
+      "names": [
+        "1.12"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 338,
+      "names": [
+        "1.12.1"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 340,
+      "names": [
+        "1.12.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": null,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": null
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 393,
+      "names": [
+        "1.13"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 401,
+      "names": [
+        "1.13.1"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 404,
+      "names": [
+        "1.13.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 477,
+      "names": [
+        "1.14"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 480,
+      "names": [
+        "1.14.1"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 485,
+      "names": [
+        "1.14.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": "1.14.2 ids from pc/1.14/protocol.json (no protocol.json published for protocol 485)"
+    },
+    {
+      "protocol": 490,
+      "names": [
+        "1.14.3"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 498,
+      "names": [
+        "1.14.4"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 573,
+      "names": [
+        "1.15"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 575,
+      "names": [
+        "1.15.1"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 578,
+      "names": [
+        "1.15.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 735,
+      "names": [
+        "1.16"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 736,
+      "names": [
+        "1.16.1"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 751,
+      "names": [
+        "1.16.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 753,
+      "names": [
+        "1.16.3"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": "1.16.3 ids from pc/1.16.2/protocol.json (no protocol.json published for protocol 753)"
+    },
+    {
+      "protocol": 754,
+      "names": [
+        "1.16.4",
+        "1.16.5"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": "1.16.4, 1.16.5 ids from pc/1.16.2/protocol.json (no protocol.json published for protocol 754)"
+    },
+    {
+      "protocol": 755,
+      "names": [
+        "1.17"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 756,
+      "names": [
+        "1.17.1"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 757,
+      "names": [
+        "1.18",
+        "1.18.1"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 758,
+      "names": [
+        "1.18.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 759,
+      "names": [
+        "1.19"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 760,
+      "names": [
+        "1.19.1",
+        "1.19.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 761,
+      "names": [
+        "1.19.3"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 762,
+      "names": [
+        "1.19.4"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 763,
+      "names": [
+        "1.20",
+        "1.20.1"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 764,
+      "names": [
+        "1.20.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 765,
+      "names": [
+        "1.20.3",
+        "1.20.4"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 766,
+      "names": [
+        "1.20.5",
+        "1.20.6"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 767,
+      "names": [
+        "1.21",
+        "1.21.1"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 768,
+      "names": [
+        "1.21.2",
+        "1.21.3"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 769,
+      "names": [
+        "1.21.4"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 770,
+      "names": [
+        "1.21.5"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 771,
+      "names": [
+        "1.21.6"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 772,
+      "names": [
+        "1.21.7",
+        "1.21.8"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 773,
+      "names": [
+        "1.21.10",
+        "1.21.9"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 774,
+      "names": [
+        "1.21.11"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 775,
+      "names": [
+        "26.1",
+        "26.1.1",
+        "26.1.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 776,
+      "names": [
+        "26.2"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    },
+    {
+      "protocol": 777,
+      "names": [
+        "26.3"
+      ],
+      "ids": {
+        "status.serverbound.request": 0,
+        "status.serverbound.ping": 1,
+        "status.clientbound.response": 0,
+        "status.clientbound.pong": 1,
+        "login.serverbound.start": 0,
+        "login.serverbound.encryption_response": 1,
+        "login.serverbound.plugin_response": 2,
+        "login.clientbound.disconnect": 0,
+        "login.clientbound.encryption_request": 1,
+        "login.clientbound.login_success": 2,
+        "login.clientbound.set_compression": 3,
+        "login.clientbound.plugin_request": 4
+      },
+      "source_note": null
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+# Provenance of protocol_versions.json
+
+`protocol_versions.json` is a byte-for-byte, verbatim snapshot of:
+
+    https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/common/protocolVersions.json
+
+- Fetched: 2026-11-17
+- Bytes: 126570
+- SHA-256: 3F4E05E02E1F6FC24FA0F77843852521EA35B3DEBC0003BB057D9CF382700756
+- Entries in the file: 844 (releases, release candidates, pre-releases and snapshots, newest first)
+- The registry keeps only stable releases from 1.7.2 (protocol 4) through 26.3 (protocol 777),
+  i.e. 83 entries; everything else in the snapshot is ignored by the loader.
+- The 26.x line exists in the snapshot: 26.1 = 775, 26.2 = 776, 26.3 = 777
+  (26.4-snapshot-7 = 1073742169 is a snapshot and is not a supported release).
+
+When refreshing this file (https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/common/protocolVersions.json),
+keep it verbatim — the loader validates it on every read.

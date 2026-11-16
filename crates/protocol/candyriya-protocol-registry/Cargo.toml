@@ -1,6 +1,6 @@
 [package]
 name = "candyriya-protocol-registry"
-description = "Version-aware registry of protocol tables across Minecraft releases 1.7 and newer."
+description = "Data-driven registry of Minecraft Java Edition protocol tables (1.7.2 through the latest release), with packet-id classification for the login and status states."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,21 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+# refresh: enables Registry::load_or_refresh's actual HTTP fetch.
+# Default off because the schannel/openssl native TLS chains do not build
+# everywhere (e.g. bare windows-gnu boxes without a mingw toolchain); the
+# refresh *logic* - validation, atomic persistence, fallbacks - is compiled
+# and tested regardless, only the thin fetch shim is gated. CI (ubuntu)
+# builds all features.
+[features]
+default = []
+refresh = ["dep:minreq"]
+
 [dependencies]
 thiserror = { workspace = true }
-candyriya-protocol = { version = "0.1.0", path = "../candyriya-protocol" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+minreq = { version = "3", default-features = false, features = ["https-native-tls"], optional = true }
 
 [lints]
 workspace = true
