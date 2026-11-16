@@ -25,6 +25,7 @@ const EMBEDDED_IDS: &[u8] = include_bytes!("../protocol_ids.json");
 const MAX_REFRESH_BYTES: usize = 4 * 1024 * 1024;
 
 /// minreq takes whole seconds; sub-second timeouts are rounded up to one.
+#[cfg(feature = "refresh")]
 const MIN_REFRESH_TIMEOUT_SECS: u64 = 1;
 
 const VERSIONS_FILE: &str = "protocols.json";

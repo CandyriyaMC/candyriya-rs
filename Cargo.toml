@@ -38,7 +38,7 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/bejiihiu/candyriya-rs"
-homepage = "https://github.com/bejiihiu/candyriya-rs"
+homepage = "https://bejiihiu.github.io/candyriya-rs"
 authors = ["bejiihiu"]
 
 [workspace.dependencies]
@@ -46,11 +46,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 socket2 = "0.6"
-crossbeam = "0.8"
-crossbeam-utils = "0.8"
-crossbeam-channel = "0.5"
 dashmap = "6"
-rayon = "1"
 parking_lot = "0.12"
 arc-swap = "1"
 tracing = "0.1"
@@ -68,8 +64,6 @@ figment = { version = "0.10", features = ["toml"] }
 toml = "1"
 validator = { version = "0.20", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "v3", "serde"] }
-base64 = "0.22"
-md-5 = "0.11"
 hmac = "0.12"
 sha1 = "0.10"
 reqwest = { version = "0.12" }
@@ -85,8 +79,6 @@ cachegirl = { version = "1", features = ["memory", "cache", "async", "tokio", "t
 tokio-cron-scheduler = "0.15"
 anyhow = "1"
 url = "2"
-fastrand = "2"
-smallvec = "1"
 zeroize = "1"
 aes = "0.8"
 cfb8 = "0.9"
