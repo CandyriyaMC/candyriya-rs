@@ -543,12 +543,16 @@ dependencies = [
 name = "candyriya-proxy"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "candyriya-config",
+ "candyriya-protocol",
+ "candyriya-protocol-registry",
  "candyriya-ratelimit",
  "candyriya-scheduler",
  "socket2",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

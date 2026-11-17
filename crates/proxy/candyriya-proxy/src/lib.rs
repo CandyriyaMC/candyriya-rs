@@ -17,6 +17,12 @@
 //!   holds the socket open and drains inbound bytes until EOF — a valid
 //!   checkpoint that later slices replace with the handshake/login
 //!   pipeline.
+//! - [`read_handshake`] — reading and validating the client's first frame:
+//!   framing through [`candyriya_protocol::PacketCodec`], the frame-size
+//!   cap, the packet id and intent checks, and the `server_address`
+//!   validation. [`HandshakeRead`] is the incremental state machine behind
+//!   it; the routing of a validated [`HandshakeResult`] to status or login
+//!   is a later slice.
 //!
 //! Everything is audited-library-backed (`socket2`, `tokio`,
 //! `candyriya-ratelimit`); nothing here re-implements protocol work it
@@ -44,10 +50,14 @@
 use std::io;
 
 mod accept;
+mod handshake;
 mod limit;
 mod socket;
 
 pub use crate::accept::{ProxyState, accept_loop, handle_connection, serve};
+pub use crate::handshake::{
+    DEFAULT_MAX_ADDRESS_LEN, HandshakeLimits, HandshakeRead, HandshakeResult, read_handshake,
+};
 pub use crate::limit::{ConnectionSlot, DEFAULT_PER_IP_MAX, SlotAcquireError, try_acquire_slot};
 pub use crate::socket::{ProxySocket, REUSE_PORT_SUPPORTED, SocketConfig};
 
@@ -91,4 +101,36 @@ pub enum ProxyError {
     /// Querying the bound local address of the listener failed.
     #[error("failed to read the listener local address: {0}")]
     LocalAddr(#[source] io::Error),
+
+    /// The peer sent a frame larger than the maximum frame size
+    /// ([`candyriya_protocol::MAX_PACKET_SIZE`]). The connection is dropped
+    /// without reading any further bytes.
+    #[error("handshake frame exceeds the maximum frame size")]
+    HandshakeTooLarge,
+
+    /// The first frame was malformed: bad framing, a truncated payload, or
+    /// a packet id other than the handshake id.
+    #[error("malformed handshake: {0}")]
+    BadPacket(String),
+
+    /// The handshake intent was not one of `1` (status), `2` (login) or
+    /// `3` (transfer) and `allow_legacy_intents` was not set.
+    #[error("unsupported handshake intent: {0}")]
+    BadIntent(i32),
+
+    /// The `server_address` field failed validation: over the configured
+    /// length cap, or containing characters outside the safe hostname set
+    /// (an address can smuggle control bytes or MOTD markup into logs and
+    /// forced-host matching).
+    #[error("illegal handshake server address: {0}")]
+    IllegalAddress(String),
+
+    /// The client did not finish the handshake within the configured
+    /// timeout.
+    #[error("handshake timed out")]
+    Timeout,
+
+    /// Socket I/O failed while reading the handshake.
+    #[error("handshake I/O failed: {0}")]
+    Io(#[from] io::Error),
 }
