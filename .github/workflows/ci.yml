@@ -2,16 +2,44 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Same trick as GitHub's native [skip ci], done at job level on purpose:
+  # a workflow that never starts leaves required checks "Pending" forever and
+  # blocks the merge, while a job skipped by a condition reports success and
+  # unblocks it. Put `[ci ignore]` in the commit message (push) or the PR
+  # title (pull_request) to skip CI for docs/metadata-only changes.
+  # Do not use it to sneak unreviewed changes past the gate.
+  gate:
+    name: ci gate
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        shell: bash
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}
+        run: |
+          MSG="${COMMIT_MESSAGE}${PR_TITLE}"
+          if echo "$MSG" | grep -qF '[ci ignore]'; then
+            echo "[ci ignore] found — skipping CI jobs"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   fmt:
     name: rustfmt
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +51,8 @@ jobs:
 
   clippy:
     name: clippy
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +65,8 @@ jobs:
 
   test:
     name: test
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +77,8 @@ jobs:
 
   fuzz-check:
     name: fuzz targets (check)
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +89,8 @@ jobs:
 
   doc:
     name: rustdoc
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTDOCFLAGS: -D warnings
@@ -67,6 +103,8 @@ jobs:
 
   security:
     name: security
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -94,6 +132,8 @@ jobs:
 
   audit-check:
     name: audit-check
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     # audit-check creates a check run; without this the annotations are lost.
     # (forked PRs fall back to stdout, as documented by the action)

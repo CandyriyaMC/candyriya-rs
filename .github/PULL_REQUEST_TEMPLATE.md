@@ -20,6 +20,7 @@
 - [ ] `cargo test --workspace` passes
 - [ ] Commits are squashed/edited so the PR lands as a single commit (squash-merge only)
 - [ ] I linked any related issue(s), e.g. `Closes #123`
+- [ ] This PR targets `dev` (unless the maintainers asked for a direct `main` fix); docs-only PRs may use `[ci ignore]` in the title
 
 ## Notes for reviewers
 
