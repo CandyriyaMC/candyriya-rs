@@ -58,6 +58,7 @@ mod library_plugin;
 mod limits;
 mod locales;
 mod manifest;
+mod metrics;
 mod plugin_loader;
 mod plugin_set;
 mod service_registry;
