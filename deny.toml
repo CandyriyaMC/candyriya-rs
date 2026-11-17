@@ -9,7 +9,13 @@
 # No advisory, yanked crate, or unmaintained/unsound crate is exempt.
 # If an exception is ever needed it goes in `ignore` with a reason and an
 # expiry, and it must be argued in the PR.
-ignore = []
+# RUSTSEC-2026-0543 (chrono unmaintained, published 2026-11): the crate is
+# used only for RFC 3339 first_seen/last_seen timestamps, with no
+# vulnerable code path. jiff migration is scheduled after 0.1.0; this
+# exception expires with that plan rather than living forever.
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained-only advisory, no known vulnerability; used for RFC 3339 timestamps only; jiff migration planned for 0.2.0", expiry = "2027-01-01" },
+]
 unmaintained = "all"
 unsound = "all"
 
