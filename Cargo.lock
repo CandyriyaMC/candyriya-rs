@@ -306,10 +306,8 @@ version = "0.1.0"
 dependencies = [
  "azalea-brigadier",
  "candyriya-permissions",
- "candyriya-player",
- "candyriya-proxy",
  "thiserror 2.0.21",
- "tokio",
+ "uuid",
 ]
 
 [[package]]

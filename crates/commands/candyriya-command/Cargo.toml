@@ -9,11 +9,10 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+# the brigadier port this crate wires up; never re-exported wholesale
 azalea-brigadier = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-candyriya-proxy = { version = "0.1.0", path = "../../proxy/candyriya-proxy" }
-candyriya-player = { version = "0.1.0", path = "../../player/candyriya-player" }
+uuid = { workspace = true }
 candyriya-permissions = { version = "0.1.0", path = "../../permissions/candyriya-permissions" }
 
 [lints]
