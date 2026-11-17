@@ -2,8 +2,9 @@
 //!
 //! Brigadier command wiring for the proxy: the [`CommandSource`] type Azalea
 //! Brigadier dispatches with, the console source, the `CandyCommand` trait,
-//! and [`Dispatcher`] — a thin adapter over `azalea_brigadier` that builds the
-//! command tree from command implementations.
+//! [`Dispatcher`] — a thin adapter over `azalea_brigadier` that builds the
+//! command tree from command implementations — and the player-facing
+//! commands in [`player_commands`].
 //!
 //! ## What this crate is
 //!
@@ -18,12 +19,20 @@
 //!   permission node get a `requires` clause on their root literal, backed by
 //!   the `candyriya-permissions` engine — no per-handler after-the-fact
 //!   checking.
+//! - **The player command set.** [`player_commands`] builds `/glist`,
+//!   `/send <target> <server>` and its `/server` / `/goto` sender-switch
+//!   aliases as [`CandyCommand`]s over a [`CommandState`] the proxy injects
+//!   (i18n tables, read-only server/online-player view, effects sink). No
+//!   network, no async, no I/O inside this crate — parsing and tree building
+//!   are pure, effects are calls into whatever the proxy wires in.
 //!
 //! ## What this crate is not
 //!
-//! - No command implementations yet — they land in follow-up work built on
-//!   this core.
-//! - No network, no async, no I/O. Parsing and tree building are pure.
+//! - No network, no async, no I/O. Commands never touch sockets; the effects
+//!   sink ([`ProxyEffects`]) and the directory ([`NetworkDirectory`]) are
+//!   implemented elsewhere.
+//! - No other command implementations. Admin and introspection commands live
+//!   in their own work, not here.
 //! - No Java-like class hierarchies. Brigadier's literal/argument builders
 //!   are the hierarchy; the adapter stays thin.
 //!
@@ -54,11 +63,23 @@ mod context;
 mod dispatcher;
 mod error;
 mod source;
+mod state;
+mod text;
+
+pub mod commands;
 
 pub use azalea_brigadier::builder::argument_builder::ArgumentBuilder;
 
 pub use command::{CandyCommand, argument_with_suggestions};
+pub use commands::{
+    GlistCommand, GlistReport, GlistServerEntry, SendCommand, SendMode, player_commands,
+};
 pub use context::CommandContext;
 pub use dispatcher::{Dispatcher, build};
 pub use error::CommandError;
 pub use source::{CommandOrigin, CommandSource, PlayerRef, SourceKind};
+pub use state::{
+    CommandState, NetworkDirectory, OnlinePlayer, ProxyEffects, ServerInfo, SwitchRequest,
+    SwitchTarget,
+};
+pub use text::escape_minimessage;

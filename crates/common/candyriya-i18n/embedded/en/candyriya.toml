@@ -64,3 +64,13 @@
 "candyriya.server.status_online" = " <green>(online)<reset>"
 "candyriya.server.status_offline" = " <red>(offline)<reset>"
 "candyriya.query.started" = "Query listener on <gold>{address}<reset>"
+"proxy.glist.total" = "players online: <gold>{count}<reset>"
+"proxy.glist.backend.first" = "  <green>{server}<reset>: <gold>{count}<reset>"
+"proxy.glist.backend.second" = "  <gold>{server}<reset>: <gold>{count}<reset>"
+"proxy.glist.backend.rest" = "  <gray>{server}<reset>: <gold>{count}<reset>"
+"proxy.send.unknown_server" = "<red>Unknown server: <gold>{server}<reset>"
+"proxy.send.player_not_online" = "<red>Player <gold>{player}<reset> is not online"
+"proxy.send.transferring" = "Switching <gold>{player}<reset> to <gold>{server}<reset>"
+"proxy.send.transferring_all" = "Switching all players to <gold>{server}<reset>"
+"proxy.send.only_players" = "<red>Only players can switch themselves"
+

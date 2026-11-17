@@ -14,6 +14,7 @@ azalea-brigadier = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 candyriya-permissions = { version = "0.1.0", path = "../../permissions/candyriya-permissions" }
+candyriya-i18n = { version = "0.1.0", path = "../../common/candyriya-i18n" }
 
 [lints]
 workspace = true

@@ -64,3 +64,13 @@
 "candyriya.server.status_online" = " <green>(жив)<reset>"
 "candyriya.server.status_offline" = " <red>(лежит)<reset>"
 "candyriya.query.started" = "Query слушает <gold>{address}<reset>"
+"proxy.glist.total" = "игроков онлайн: <gold>{count}<reset>"
+"proxy.glist.backend.first" = "  <green>{server}<reset>: <gold>{count}<reset>"
+"proxy.glist.backend.second" = "  <gold>{server}<reset>: <gold>{count}<reset>"
+"proxy.glist.backend.rest" = "  <gray>{server}<reset>: <gold>{count}<reset>"
+"proxy.send.unknown_server" = "<red>Сервер <gold>{server}<reset> не существует. Это ответ, нет"
+"proxy.send.player_not_online" = "<red>Игрок <gold>{player}<reset> не в сети. Может, его сначала сюда затащить?"
+"proxy.send.transferring" = "Переселяю <gold>{player}<reset> на <gold>{server}<reset>. Ура, переезд"
+"proxy.send.transferring_all" = "Переселяю вообще всех на <gold>{server}<reset>. Счастливого переезда"
+"proxy.send.only_players" = "<red>Ты не игрок. Пусть игроки сами себя переключают"
+

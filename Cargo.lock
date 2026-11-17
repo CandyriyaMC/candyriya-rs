@@ -305,6 +305,7 @@ name = "candyriya-command"
 version = "0.1.0"
 dependencies = [
  "azalea-brigadier",
+ "candyriya-i18n",
  "candyriya-permissions",
  "thiserror 2.0.21",
  "uuid",
