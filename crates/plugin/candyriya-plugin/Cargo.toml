@@ -18,5 +18,9 @@ indexmap = { workspace = true }
 candyriya-plugin-api = { version = "0.1.0", path = "../candyriya-plugin-api" }
 candyriya-cache = { version = "0.1.0", path = "../../common/candyriya-cache" }
 
+[dev-dependencies]
+wat = "1"
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

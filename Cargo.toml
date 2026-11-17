@@ -76,7 +76,9 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 indexmap = "2"
 lobsterchat = { version = "0.4", features = ["minimessage"] }
 azalea-brigadier = "0.16"
-extism = "1"
+# no http/url-fetch and no filesystem registration: plugins are compiled
+# from bytes the loader reads itself; keeps the audit surface small
+extism = { version = "1", default-features = false, features = ["wasmtime-default-features"] }
 cachegirl = { version = "1", features = ["memory", "cache", "async", "tokio", "tracing"] }
 tokio-cron-scheduler = "0.15"
 anyhow = "1"
