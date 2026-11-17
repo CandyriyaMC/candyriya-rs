@@ -14,15 +14,17 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use candyriya_auth::AuthConfig;
 use candyriya_config::Config;
+use candyriya_init::{CallError, Init, Pid, current_unit};
 use candyriya_plugin_api::{EventDispatcher, EventIdRegistry};
 use candyriya_ratelimit::ConnectionLimiter;
 use candyriya_route::BackendRegistry;
 use candyriya_scheduler::{TaskId, TaskService};
 
+use crate::config_unit;
 use crate::handshake::{HandshakeLimits, read_handshake};
 use crate::limit::{ConnectionSlot, SlotAcquireError, try_acquire_slot};
 use crate::roster::PlayerRoster;
@@ -38,16 +40,18 @@ const ACCEPT_FAILURE_BACKOFF: Duration = Duration::from_millis(50);
 
 /// State shared between the accept loop and the connection tasks.
 ///
-/// Deliberately minimal: the configuration, a monotonic connection
-/// counter, and the connection limiter. Everything else the proxy needs
-/// is registered as its own task on the service — shared state stays
-/// small on purpose.
+/// Deliberately minimal: a monotonic connection counter, the connection
+/// limiter and the handles the composition root wired in. The configuration
+/// is deliberately NOT part of it: no subsystem reads the store directly,
+/// every read goes to the `config` unit through the tree (the reply carries
+/// the same snapshot the store holds, so readers are as cheap as a refcount
+/// bump plus a mailbox round trip).
 pub struct ProxyState {
-    /// The loaded proxy configuration. Live: a `/candyriya reload` swap
-    /// is visible to freshly accepted connections and status/login
-    /// handling without a restart. In-flight connections keep the
-    /// snapshot they started with.
-    pub config: ArcSwap<Config>,
+    /// How to reach the supervision tree; cloned freely.
+    init: Init,
+    /// The `config` unit's pid, granted at spawn (the root is an ancestor of
+    /// it, so the subtree rule authorizes the calls without a grant).
+    config_pid: Pid,
     /// Monotonic connection-id counter. Starts at 0; handed out ids
     /// start at 1.
     pub conn_counter: AtomicU64,
@@ -93,9 +97,8 @@ pub struct ProxyState {
 
 impl core::fmt::Debug for ProxyState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let max_connections = self.config.load().advanced.max_connections;
         f.debug_struct("ProxyState")
-            .field("max_connections", &max_connections)
+            .field("config_pid", &self.config_pid)
             .field("conn_counter", &self.conn_counter.load(Ordering::Relaxed))
             .field(
                 "connection_rejections",
@@ -108,25 +111,27 @@ impl core::fmt::Debug for ProxyState {
 }
 
 impl ProxyState {
-    /// State from the loaded configuration alone.
+    /// State from the tree alone: the proxy learns its configuration from
+    /// the `config` unit, not from anything it was handed at construction.
     ///
     /// The per-IP cap falls back to [`crate::DEFAULT_PER_IP_MAX`]
     /// because `[advanced]` has no per-IP key yet.
-    pub fn new(config: Arc<Config>) -> Self {
-        Self::with_limits(config, crate::DEFAULT_PER_IP_MAX)
+    pub fn new(init: Init, config_pid: Pid) -> Self {
+        Self::with_limits(init, config_pid, crate::DEFAULT_PER_IP_MAX)
     }
 
-    /// State from the configuration with an explicit per-IP cap.
+    /// State with an explicit per-IP cap.
     ///
     /// Split from [`ProxyState::new`] so tests (and, later, a config
     /// key) can pin the per-IP cap without mutating the config crate.
-    pub fn with_limits(config: Arc<Config>, per_ip_max: u64) -> Self {
+    pub fn with_limits(init: Init, config_pid: Pid, per_ip_max: u64) -> Self {
         // The limiter's own global cap is unbounded by design: the
         // semaphore in the accept loop is the single owner of the
         // global cap (see the `limit` module docs).
         let limiter = ConnectionLimiter::with_per_ip_max(u64::MAX, per_ip_max);
         Self {
-            config: ArcSwap::new(config),
+            init,
+            config_pid,
             conn_counter: AtomicU64::new(0),
             limiter,
             favicon_cache: None,
@@ -165,12 +170,37 @@ impl ProxyState {
         self.router.store(Arc::new(router));
     }
 
-    /// The current configuration snapshot.
+    /// The current configuration snapshot, fetched from the `config` unit.
     ///
-    /// Cheap (an atomic load plus a refcount bump). In-flight connections
-    /// keep the snapshot they started with; fresh readers observe a reload.
-    pub fn config(&self) -> Arc<Config> {
-        self.config.load_full()
+    /// Every runtime read goes through the tree: the reply carries the same
+    /// snapshot the store holds right now, so a `/candyriya reload` on the
+    /// other end of the process is visible to the next reader, while a
+    /// reader keeps the version it started with. In-flight connections keep
+    /// the snapshot they fetched; nothing here is cached.
+    ///
+    /// Callers that cannot proceed honestly without the config (the login
+    /// and status paths) turn [`CallError`] into a generic, client-safe
+    /// disconnect; callers that cannot fail (the accept loop at start)
+    /// refuse to serve. See the individual call sites for the policy.
+    ///
+    /// # Errors
+    ///
+    /// [`CallError`] — the unit is down (`NotRunning`), its mailbox is full
+    /// (`Busy`), the round trip exceeded the deadline (`Timeout`), or the
+    /// handler failed (`Panicked`). No path here falls back to a stale
+    /// snapshot.
+    ///
+    /// # Capability
+    ///
+    /// Unit bodies attribute the call to themselves and need a spawn-time
+    /// grant to the config unit (installed on `proxy.accept` by the
+    /// composition root). Code outside a unit body attributes to the root.
+    pub async fn config(&self) -> Result<Arc<Config>, CallError> {
+        // per-connection tasks are not units yet (phase 3); they attribute
+        // to the root, which is an ancestor of every unit, so the subtree
+        // rule authorizes the call. Unit bodies attribute to themselves.
+        let caller = current_unit().unwrap_or(Pid::INIT);
+        config_unit::config(&self.init, caller, self.config_pid).await
     }
 
     /// State with a custom auth endpoint configuration (tests pointing the
@@ -192,6 +222,12 @@ impl ProxyState {
 /// (or the sending half of the watch channel is dropped), and hands each
 /// one to the limit checks and [`handle_connection`].
 ///
+/// The global-connection cap is sized from the `config` unit at loop start.
+/// If the unit cannot produce a snapshot, the loop refuses to serve and
+/// returns `false`; the caller (the supervision unit hosting the loop, or a
+/// test) turns that into a failure — a boot-time configuration outage aborts
+/// the boot rather than serving with an invented cap.
+///
 /// Rejection paths (per-IP cap exhausted, global semaphore exhausted)
 /// close the connection immediately and log a warning — a client that
 /// cannot be served must not be left hanging.
@@ -204,15 +240,22 @@ impl ProxyState {
 /// This is normally driven through [`serve`], which registers the loop
 /// on the task service; it is public so tests and the composition root
 /// can drive it directly.
+///
+/// Returns `true` when the loop ran until the shutdown signal, `false`
+/// when it refused to serve at startup.
 pub async fn accept_loop(
     state: Arc<ProxyState>,
     listener: TcpListener,
     shutdown: watch::Receiver<bool>,
     service: TaskService,
-) {
-    let semaphore = Arc::new(Semaphore::new(
-        usize::try_from(state.config().advanced.max_connections).unwrap_or(usize::MAX),
-    ));
+) -> bool {
+    let semaphore = Arc::new(Semaphore::new(match state.config().await {
+        Ok(config) => usize::try_from(config.advanced.max_connections).unwrap_or(usize::MAX),
+        Err(error) => {
+            error!(%error, "configuration unavailable at accept loop start; refusing to serve");
+            return false;
+        }
+    }));
     let mut shutdown = shutdown;
 
     loop {
@@ -261,7 +304,10 @@ pub async fn accept_loop(
                     }
                     Err(SlotAcquireError::Semaphore) => {
                         state.connection_rejections.fetch_add(1, Ordering::Relaxed);
-                        warn!(conn = conn_id, %peer, max_connections = state.config().advanced.max_connections, "global connection limit reached; closing the connection");
+                        match state.config().await {
+                            Ok(config) => warn!(conn = conn_id, %peer, max_connections = config.advanced.max_connections, "global connection limit reached; closing the connection"),
+                            Err(error) => warn!(conn = conn_id, %peer, %error, "global connection limit reached; closing the connection (limit unavailable)"),
+                        }
                         continue; // stream drops -> close
                     }
                 };
@@ -274,6 +320,7 @@ pub async fn accept_loop(
             }
         }
     }
+    true
 }
 
 /// Register the accept loop on the task service.
@@ -296,10 +343,9 @@ pub fn serve(
     service: &TaskService,
 ) -> TaskId {
     let service_in_task = service.clone();
-    service.spawn_named(
-        "proxy.accept-loop",
-        accept_loop(state, listener, shutdown, service_in_task),
-    )
+    service.spawn_named("proxy.accept-loop", async move {
+        accept_loop(state, listener, shutdown, service_in_task).await;
+    })
 }
 
 /// The per-connection task body.
@@ -332,7 +378,13 @@ pub async fn handle_connection(
         warn!(conn = conn_id, %peer, %error, "failed to set TCP_NODELAY; continuing");
     }
 
-    let limits = HandshakeLimits::from_config(&state.config());
+    let limits = match state.config().await {
+        Ok(config) => HandshakeLimits::from_config(&config),
+        Err(error) => {
+            error!(conn = conn_id, %peer, %error, "configuration unavailable; dropping the connection before the handshake");
+            return;
+        }
+    };
     match read_handshake(&mut stream, &limits).await {
         Ok(handshake) => {
             debug!(
@@ -378,4 +430,41 @@ pub async fn handle_connection(
         connections_in_flight = state.limiter.current_connections(),
         "connection closed"
     );
+}
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    //! Boot-time wiring emulated with the real tree: tests build a live
+    //! `config` unit instead of stubbing the snapshot source, so the
+    //! configuration path is exercised exactly the way the composition
+    //! root wires it.
+    use std::sync::Arc;
+
+    use candyriya_config::Config;
+    use candyriya_init::{Init, Pid};
+    use candyriya_scheduler::TaskService;
+
+    use super::ProxyState;
+
+    /// A state wired to a live config unit over a real tree.
+    pub(crate) fn test_state(config: Config) -> ProxyState {
+        test_state_with_config_unit(config).0
+    }
+
+    /// Like [`test_state`], but also hands back the tree handle and the
+    /// config pid so a test can cancel the unit and observe the failure
+    /// paths (`NotRunning`) the callers are built against.
+    pub(crate) fn test_state_with_config_unit(config: Config) -> (ProxyState, Init, Pid) {
+        let service = TaskService::builder()
+            .handle(tokio::runtime::Handle::current())
+            .blocking_threads(1)
+            .build()
+            .expect("task service builds");
+        let init = Init::new(service);
+        let store = Arc::new(candyriya_config::ConfigStore::new(config));
+        let pid = init
+            .spawn_unit(Pid::INIT, crate::config_unit::config_spec(store))
+            .expect("config unit spawns");
+        (ProxyState::new(init.clone(), pid), init, pid)
+    }
 }

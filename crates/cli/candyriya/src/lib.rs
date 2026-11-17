@@ -9,10 +9,11 @@
 //!    when stdout is a TTY) plus a daily-rotating file log at
 //!    `./logs/candyriya.log`. Installed before anything else happens.
 //! 3. **Configuration** — [`ConfigStore`] owns the live config behind an
-//!    `ArcSwap`; the snapshot flows to every subsystem. Hot reload is
-//!    wired end to end: `/candyriya reload` re-reads the file the proxy
-//!    was started with, swaps atomically and refreshes what it safely
-//!    can (routes, favicon, locales, plugins).
+//!    `ArcSwap`; the boot phase reads it directly (it precedes the tree).
+//!    Once the tree is up, every runtime read goes to the `config` unit
+//!    through capability IPC — through the tree or not at all. Hot reload
+//!    re-reads the file the proxy was started with and swaps the store
+//!    atomically, so the next read through the unit sees the new snapshot.
 //! 4. **Runtime** — tokio multi-thread pool sized from `[runtime] worker-threads`,
 //!    and the central [`TaskService`] with a fixed rayon blocking pool from
 //!    `[runtime] blocking-threads`. Every task in the process is registered
@@ -28,11 +29,12 @@
 //!    the task service existed is adopted into the tree as an
 //!    already-exited unit once the tree is up.
 //! 6. **Lifecycle** — once the loader is done, the phases that keep
-//!    running boot as units in `init`: `proxy.accept` (long-lived, the
-//!    unit body drives the listener), `stats.every-60s` and
-//!    `players.roster-refresh` (periodic), `console` (the interactive
-//!    REPL) and, at shutdown, `cache.shutdown` and `metrics.shutdown`
-//!    (one-shot finalizers, the last units to run, in order). Ctrl-C or
+//!    running boot as units in `init`: `config` (the configuration source
+//!    of truth), `proxy.accept` (long-lived, the unit body drives the
+//!    listener), `stats.every-60s` and `players.roster-refresh`
+//!    (periodic), `console` (the interactive REPL) and, at shutdown,
+//!    `cache.shutdown` and `metrics.shutdown` (one-shot finalizers, the
+//!    last units to run, in order). Ctrl-C or
 //!    `/candyriya end` fires both the shutdown watch and a tree-wide
 //!    cancel sweep; the serving units are waited on through the tree, the
 //!    finalizers run last, the task service drains as the final safety
@@ -72,7 +74,9 @@ use candyriya_plugin::{
     resolve_plugins,
 };
 use candyriya_plugin_api::{EventDispatcher, PlayerRef};
-use candyriya_proxy::{FaviconCache, ProxySocket, ProxyState, SocketConfig, accept_loop};
+use candyriya_proxy::{
+    FaviconCache, ProxySocket, ProxyState, SocketConfig, accept_loop, config_spec,
+};
 use candyriya_route::BackendRegistry;
 use candyriya_scheduler::TaskService;
 use candyriya_telemetry::LogConfig;
@@ -82,7 +86,7 @@ mod directory;
 mod effects;
 mod repl;
 
-use crate::directory::CliDirectory;
+use crate::directory::{CliDirectory, TreeLinks};
 use crate::effects::CliEffects;
 
 /// The `--version` output line.
@@ -543,6 +547,30 @@ async fn run_async(
     adopt_bootstrap(&tree, "config.load", ExitStatus::Success);
     adopt_bootstrap(&tree, "route.resolve", ExitStatus::Success);
 
+    // ---- the config unit: it owns the live store and is the single source
+    // of truth for every runtime read of the configuration — through the
+    // tree or not at all. The store is shared with the reload path
+    // (which is allowed to keep its handle), but nobody reads the snapshot
+    // without going through the unit's mailbox from here on.
+    let config_pid = match tree.spawn_unit(Pid::INIT, config_spec(Arc::clone(&store))) {
+        Ok(pid) => {
+            info!(pid = %pid, "config unit spawned");
+            pid
+        }
+        Err(error) => {
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &[],
+                CliError::Runtime(format!("failed to spawn config: {error}")),
+            )
+            .await);
+        }
+    };
+    // the config unit alone in the first phase of boot: unwinds with the
+    // other early failures so it never outlives an aborted boot
+    let config_unwind = [(config_pid, "config")];
+
     let registry = ServiceRegistry::new();
     // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
     registry.register_service(
@@ -563,7 +591,13 @@ async fn run_async(
                 "cache.manager",
                 ExitStatus::failure(error.to_string()),
             );
-            return Err(boot_abort(&tree, &service, &[], CliError::Cache(error.to_string())).await);
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &config_unwind,
+                CliError::Cache(error.to_string()),
+            )
+            .await);
         }
     };
     // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
@@ -592,7 +626,7 @@ async fn run_async(
                     "metrics.exporter",
                     ExitStatus::failure(error.to_string()),
                 );
-                return Err(boot_abort(&tree, &service, &[], error).await);
+                return Err(boot_abort(&tree, &service, &config_unwind, error).await);
             }
         }
     } else {
@@ -609,9 +643,13 @@ async fn run_async(
                 "metrics.exporter",
                 ExitStatus::failure(error.to_string()),
             );
-            return Err(
-                boot_abort(&tree, &service, &[], CliError::Metrics(error.to_string())).await,
-            );
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &config_unwind,
+                CliError::Metrics(error.to_string()),
+            )
+            .await);
         }
     };
 
@@ -662,14 +700,14 @@ async fn run_async(
         Ok(pair) => pair,
         Err(error) => {
             adopt_bootstrap(&tree, "i18n.build", ExitStatus::failure(error.to_string()));
-            return Err(boot_abort(&tree, &service, &[], error).await);
+            return Err(boot_abort(&tree, &service, &config_unwind, error).await);
         }
     };
     let kick_i18n = match build_kick_i18n(data_dir, &config) {
         Ok(i18n) => i18n,
         Err(error) => {
             adopt_bootstrap(&tree, "i18n.build", ExitStatus::failure(error.to_string()));
-            return Err(boot_abort(&tree, &service, &[], error).await);
+            return Err(boot_abort(&tree, &service, &config_unwind, error).await);
         }
     };
     adopt_bootstrap(&tree, "i18n.build", ExitStatus::Success);
@@ -694,7 +732,7 @@ async fn run_async(
     // ipc-migration: these fields are cross-subsystem handles (Plugins.Dispatch
     // and I18n.T ride them); the IPC conversion gives each its own unit
     let started = Instant::now();
-    let mut proxy_state = ProxyState::new(Arc::clone(&config));
+    let mut proxy_state = ProxyState::new(tree.clone(), config_pid);
     // ipc-migration: Roster/Route/Proxy snapshot — ProxyState carries handles across the subsystem boundary until each is a unit
     proxy_state.auth = auth;
     proxy_state.set_router(router.clone());
@@ -707,8 +745,13 @@ async fn run_async(
     // exists, so `/candyriya reload` can run both phases
     let shutdown = ShutdownHandle::new();
     let directory = Arc::new(CliDirectory::new(
-        Arc::clone(&store),
         Arc::clone(&proxy_state),
+        TreeLinks {
+            runtime: tokio::runtime::Handle::current(),
+            init: tree.clone(),
+            config_pid,
+            boot_fallback: Arc::clone(&config),
+        },
         config_name.to_string(),
         log_level.to_string(),
         started,
@@ -770,14 +813,20 @@ async fn run_async(
         Ok(addr) => addr,
         Err(error) => {
             adopt_bootstrap(&tree, "proxy.bind", ExitStatus::failure(error.to_string()));
-            return Err(boot_abort(&tree, &service, &[], error).await);
+            return Err(boot_abort(&tree, &service, &config_unwind, error).await);
         }
     };
     let socket = match ProxySocket::bind(bind_addr, &SocketConfig::from(&config.advanced)) {
         Ok(socket) => socket,
         Err(error) => {
             adopt_bootstrap(&tree, "proxy.bind", ExitStatus::failure(error.to_string()));
-            return Err(boot_abort(&tree, &service, &[], CliError::Proxy(error.to_string())).await);
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &config_unwind,
+                CliError::Proxy(error.to_string()),
+            )
+            .await);
         }
     };
     adopt_bootstrap(&tree, "proxy.bind", ExitStatus::Success);
@@ -790,8 +839,11 @@ async fn run_async(
     debug!(adopted, "bootstrap steps adopted and reaped");
 
     // ---- spawn the serving units, in boot order; a failure of any of
-    // them unwinds the ones before it in reverse order (fail-fast boot)
-    let mut boot_units: Vec<(Pid, &'static str)> = Vec::with_capacity(4);
+    // them unwinds the ones before it in reverse order (fail-fast boot).
+    // The config unit is already up (spawned before the boot abort
+    // machinery needs it) and rides in the list so a runtime config
+    // collapse is caught by the same watchdog as a serving unit dying.
+    let mut boot_units: Vec<(Pid, &'static str)> = vec![(config_pid, "config")];
 
     // proxy.accept: the unit body drives listener.accept(); connections
     // keep their own kernel tasks until phase 3 turns them into units.
@@ -813,12 +865,23 @@ async fn run_async(
                     debug!("proxy.accept factory ran without a listener; reporting failure");
                     return ExitStatus::failure("accept body rebuilt without a listener");
                 };
-                accept_loop(state, listener, shutdown, service).await;
-                ExitStatus::Success
+                // a refusal to serve (the configuration was not readable
+                // when the loop started) reports as a unit failure, which
+                // the boot watchdog turns into a clean boot abort
+                let served = accept_loop(state, listener, shutdown, service).await;
+                if served {
+                    ExitStatus::Success
+                } else {
+                    ExitStatus::failure("configuration unavailable at accept loop start")
+                }
             }
         }
     })
-    .with_service_kind(ServiceKind::Accept);
+    .with_service_kind(ServiceKind::Accept)
+    // the accept unit reads the configuration; sibling units never reach
+    // it through the subtree rule, so the grant rides its spawn like an
+    // inherited fd
+    .with_grant(config_pid);
     match tree.spawn_unit(Pid::INIT, accept_spec) {
         Ok(pid) => {
             boot_units.push((pid, "proxy.accept"));

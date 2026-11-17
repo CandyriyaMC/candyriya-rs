@@ -30,6 +30,8 @@ use candyriya_it::TestClient;
 use candyriya_protocol::Intent;
 use candyriya_proxy::{ProxySocket, ProxyState, SocketConfig, serve};
 
+mod common;
+
 // ---------------------------------------------------------------------------
 // shared fixtures
 // ---------------------------------------------------------------------------
@@ -46,7 +48,7 @@ fn test_service() -> TaskService {
 }
 
 fn default_state() -> Arc<ProxyState> {
-    Arc::new(ProxyState::new(Arc::new(Config::default())))
+    Arc::new(common::state(Config::default()))
 }
 
 fn default_proxy() -> (
@@ -431,7 +433,7 @@ async fn a_client_that_vanishes_after_the_handshake_times_out() {
         },
         ..Default::default()
     };
-    let state = Arc::new(ProxyState::new(Arc::new(config)));
+    let state = Arc::new(common::state(config));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -461,7 +463,7 @@ async fn a_client_that_vanishes_during_the_status_request_read_times_out() {
         },
         ..Default::default()
     };
-    let state = Arc::new(ProxyState::new(Arc::new(config)));
+    let state = Arc::new(common::state(config));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -492,7 +494,7 @@ async fn a_motd_lobsterchat_would_truncate_is_an_error_not_a_half_message() {
         motd: "<rainbow>Candy</rainbow>".to_owned(),
         ..Default::default()
     };
-    let state = Arc::new(ProxyState::new(Arc::new(config)));
+    let state = Arc::new(common::state(config));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -524,7 +526,7 @@ async fn an_empty_motd_is_an_error_not_a_blank_server_list_entry() {
         motd: "   ".to_owned(),
         ..Default::default()
     };
-    let state = Arc::new(ProxyState::new(Arc::new(config)));
+    let state = Arc::new(common::state(config));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -568,7 +570,7 @@ async fn a_configured_favicon_file_is_served() {
         motd_favicon: icon_path.to_str().expect("utf-8 path").to_owned(),
         ..Default::default()
     };
-    let state = Arc::new(ProxyState::new(Arc::new(config)));
+    let state = Arc::new(common::state(config));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -614,7 +616,7 @@ async fn a_configured_favicon_is_served_from_the_cachegirl_cache() {
         motd_favicon: icon_path.to_str().expect("utf-8 path").to_owned(),
         ..Default::default()
     };
-    let mut state = ProxyState::new(Arc::new(config));
+    let mut state = common::state(config);
     state.favicon_cache = Some(favicon_cache);
     let state = Arc::new(state);
     let service = test_service();
@@ -659,7 +661,7 @@ async fn players_max_reflects_show_max_players() {
         show_max_players: 42,
         ..Default::default()
     };
-    let state = Arc::new(ProxyState::new(Arc::new(config)));
+    let state = Arc::new(common::state(config));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -692,7 +694,7 @@ async fn a_silent_login_client_times_out_and_closes() {
     // so the test does not pay the headroom's default.
     let mut config = Config::default();
     config.advanced.connection_timeout = 100;
-    let state = Arc::new(ProxyState::new(Arc::new(config)));
+    let state = Arc::new(common::state(config));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();

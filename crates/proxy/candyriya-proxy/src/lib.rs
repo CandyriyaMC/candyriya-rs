@@ -75,6 +75,7 @@
 use std::io;
 
 mod accept;
+pub mod config_unit;
 mod events;
 mod handshake;
 mod limit;
@@ -87,6 +88,7 @@ mod status;
 mod wire;
 
 pub use crate::accept::{ProxyState, accept_loop, handle_connection, serve};
+pub use crate::config_unit::{ConfigMsg, ConfigResp, config_spec};
 pub use crate::handshake::{
     DEFAULT_MAX_ADDRESS_LEN, HandshakeLimits, HandshakeRead, HandshakeResult, read_handshake,
 };
@@ -173,6 +175,12 @@ pub enum ProxyError {
     /// to the client.
     #[error("proxy is misconfigured: {0}")]
     Misconfigured(String),
+
+    /// The configuration unit could not produce a snapshot for this call —
+    /// it is down, busy, slow, or crashed. Safe to log; the client only
+    /// ever sees a dropped connection or a generic disconnect.
+    #[error("configuration unavailable: {0}")]
+    ConfigUnavailable(#[from] candyriya_init::CallError),
 
     /// The embedded protocol registry failed to load. This is a build
     /// bug, not a runtime condition: the compiled-in tables are invalid.

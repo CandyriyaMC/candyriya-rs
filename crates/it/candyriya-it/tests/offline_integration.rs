@@ -31,9 +31,12 @@ use base64::Engine as _;
 use tokio::sync::watch;
 
 use candyriya_config::Config;
+use candyriya_init::{Init, Pid};
 use candyriya_it::{BackendFixture, BackendForwarding, FakeBackendConfig, Intent, TestClient};
 use candyriya_player::offline_uuid;
-use candyriya_proxy::{ProxySocket, ProxyState, SocketConfig, registry_from_config, serve};
+use candyriya_proxy::{
+    ProxySocket, ProxyState, SocketConfig, config_spec, registry_from_config, serve,
+};
 use candyriya_scheduler::{ShutdownReport, TaskService};
 
 /// Protocol 767 = 1.21.x, present in the embedded registry tables.
@@ -146,7 +149,14 @@ fn spawn_proxy(config: Config, service: TaskService) -> RunningProxy {
     let socket_config = SocketConfig::from(&config.advanced);
     let bind: SocketAddr = config.bind.parse().expect("config bind is host:port");
     let router = registry_from_config(&config).expect("router builds from config");
-    let state = Arc::new(ProxyState::new(Arc::new(config)).with_router(Arc::new(router)));
+    // the config unit owns the live store; the fixture wires it exactly
+    // the way the composition root does
+    let store = Arc::new(candyriya_config::ConfigStore::new(config));
+    let init = Init::new(service.clone());
+    let config_pid = init
+        .spawn_unit(Pid::INIT, config_spec(store))
+        .expect("config unit spawns");
+    let state = Arc::new(ProxyState::new(init, config_pid).with_router(Arc::new(router)));
     let socket = ProxySocket::bind(bind, &socket_config).expect("proxy socket binds");
     let addr = socket.local_addr();
     let listener = socket.into_listener();

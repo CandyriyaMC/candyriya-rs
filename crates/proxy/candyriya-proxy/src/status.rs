@@ -369,8 +369,9 @@ fn read_favicon_file(path: &str) -> Result<Vec<u8>, &'static str> {
 /// Order: configured cache (if any) → configured path → the embedded
 /// transparent 64x64. Any failure degrades to the embedded icon; the
 /// exchange is never failed over a favicon.
-fn resolve_favicon(state: &ProxyState) -> String {
-    let config = state.config();
+/// The snapshot is fetched once per ping by the caller and passed down by
+/// reference; this function never touches the network or the tree itself.
+fn resolve_favicon(state: &ProxyState, config: &Config) -> String {
     let path = config.motd_favicon.trim();
     if path.is_empty() {
         return embedded_favicon_uri().to_owned();
@@ -524,7 +525,13 @@ where
     let registry = embedded_registry().ok_or_else(|| {
         ProxyError::Registry("embedded protocol snapshot failed to load".to_owned())
     })?;
-    let config = state.config();
+    // no configuration, no answer: the exchange fails before the first
+    // frame is read, and the client sees a dropped connection — the same
+    // shape any pre-handshake failure produces
+    let config = state
+        .config()
+        .await
+        .map_err(ProxyError::ConfigUnavailable)?;
     let protocol = handshake.protocol;
     let ids = status_ids(registry, protocol);
     let deadline = read_deadline(&config);
@@ -545,7 +552,7 @@ where
 
     // 2. answer immediately from configuration; no backend is contacted
     let description = motd_component(&config.motd)?;
-    let favicon = resolve_favicon(state);
+    let favicon = resolve_favicon(state, &config);
     // "players online" is the live play-state roster, not the raw
     // connection counter: a server-list ping is not a player
     let online = state.roster.len() as u64;
@@ -808,8 +815,8 @@ mod tests {
         manager.shutdown().expect("cache shutdown");
     }
 
-    #[test]
-    fn resolve_favicon_reads_a_configured_file_and_caches_it() {
+    #[tokio::test]
+    async fn resolve_favicon_reads_a_configured_file_and_caches_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let icon_path = dir.path().join("icon.png");
         // a PNG-magic file, distinct from the embedded icon
@@ -830,11 +837,12 @@ mod tests {
 
         let mut config = test_config();
         config.motd_favicon = icon_path.to_str().expect("utf-8 path").to_owned();
-        let mut state = ProxyState::new(Arc::new(config));
+        let resolve_config = config.clone();
+        let mut state = crate::accept::test_helpers::test_state(config);
         state.favicon_cache = Some(favicon_cache);
         let state = Arc::new(state);
 
-        let first = resolve_favicon(&state);
+        let first = resolve_favicon(&state, &resolve_config);
         assert_eq!(first, data_uri(&custom_bytes));
 
         // swap the file on disk; the cache must keep serving the old bytes
@@ -844,41 +852,53 @@ mod tests {
             .chain(b"swapped-icon-bytes".iter().cloned())
             .collect();
         std::fs::write(&icon_path, &swapped).unwrap();
-        let second = resolve_favicon(&state);
+        let second = resolve_favicon(&state, &resolve_config);
         assert_eq!(second, first);
 
         manager.shutdown().expect("cache shutdown");
     }
 
-    #[test]
-    fn resolve_favicon_with_a_missing_file_serves_the_embedded_icon() {
+    #[tokio::test]
+    async fn resolve_favicon_with_a_missing_file_serves_the_embedded_icon() {
         let mut config = test_config();
         config.motd_favicon = "definitely/does-not/exist-favicon.png".to_owned();
-        let state = Arc::new(ProxyState::new(Arc::new(config)));
+        let resolve_config = config.clone();
+        let state = crate::accept::test_helpers::test_state(config);
 
-        assert_eq!(resolve_favicon(&state), embedded_favicon_uri());
+        assert_eq!(
+            resolve_favicon(&state, &resolve_config),
+            embedded_favicon_uri()
+        );
     }
 
-    #[test]
-    fn resolve_favicon_with_an_empty_path_serves_the_embedded_icon() {
+    #[tokio::test]
+    async fn resolve_favicon_with_an_empty_path_serves_the_embedded_icon() {
         let mut config = test_config();
         config.motd_favicon = String::new();
-        let state = Arc::new(ProxyState::new(Arc::new(config)));
+        let resolve_config = config.clone();
+        let state = crate::accept::test_helpers::test_state(config);
 
-        assert_eq!(resolve_favicon(&state), embedded_favicon_uri());
+        assert_eq!(
+            resolve_favicon(&state, &resolve_config),
+            embedded_favicon_uri()
+        );
     }
 
-    #[test]
-    fn resolve_favicon_with_a_garbage_file_serves_the_embedded_icon() {
+    #[tokio::test]
+    async fn resolve_favicon_with_a_garbage_file_serves_the_embedded_icon() {
         let dir = tempfile::tempdir().expect("tempdir");
         let icon_path = dir.path().join("garbage.png");
         std::fs::write(&icon_path, b"definitely not a png").unwrap();
 
         let mut config = test_config();
         config.motd_favicon = icon_path.to_str().expect("utf-8 path").to_owned();
-        let state = Arc::new(ProxyState::new(Arc::new(config)));
+        let resolve_config = config.clone();
+        let state = crate::accept::test_helpers::test_state(config);
 
-        assert_eq!(resolve_favicon(&state), embedded_favicon_uri());
+        assert_eq!(
+            resolve_favicon(&state, &resolve_config),
+            embedded_favicon_uri()
+        );
     }
 
     #[test]

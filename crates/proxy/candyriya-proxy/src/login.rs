@@ -86,13 +86,13 @@
 //! early by the login slice itself.
 
 use std::net::SocketAddr;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use candyriya_auth::{
     AuthError, MojangSessionValidator, OfflineSessionValidator, SessionValidator, validate_username,
@@ -151,6 +151,47 @@ pub(crate) const MAX_KICK_REASON_CHARS: usize = 256;
 /// black-holed backend is dropped in favor of the next one in the chain.
 fn attempt_budget(config: &Config) -> Duration {
     Duration::from_millis(u64::from(config.advanced.connection_timeout)) + LOGIN_BUDGET_HEADROOM
+}
+
+/// The client-facing reason used whenever the configuration cannot be
+/// produced mid-login. Deliberately the same vocabulary the other pre-login
+/// failures use; the internal detail (which call refused the snapshot) goes
+/// to the log at the failure site, never to the client.
+const CONFIG_UNAVAILABLE_KICK: &str = "Unable to connect to a server";
+
+/// Fetch the config for the login path, kicking the client with the
+/// generic, client-safe reason on failure.
+///
+/// Returns the snapshot on success; on failure the kick has been delivered
+/// and the caller must end the session. A configuration outage is an
+/// internal failure the client cannot influence and cannot be shown; it
+/// shows up in the operator log, and the player gets the same short reason
+/// any pre-login failure produces.
+async fn config_for_login(
+    state: &ProxyState,
+    stream: &mut TcpStream,
+    client: &mut Wire,
+    handshake: &HandshakeResult,
+    session: &mut events::SessionSummary,
+    conn_id: u64,
+    peer: SocketAddr,
+) -> Option<Arc<Config>> {
+    match state.config().await {
+        Ok(config) => Some(config),
+        Err(error) => {
+            error!(conn = conn_id, %peer, %error, "configuration unavailable during login; disconnecting the client");
+            kick(
+                state,
+                stream,
+                client,
+                handshake.protocol,
+                session,
+                CONFIG_UNAVAILABLE_KICK,
+            )
+            .await;
+            None
+        }
+    }
 }
 
 /// The outcome of one backend attempt.
@@ -256,7 +297,23 @@ async fn login_flow_inner(
 
     // ---- 1. Login Start (the client link is plain at this point)
     let mut client = Wire::new();
-    let per_attempt = attempt_budget(&state.config());
+    // no configuration, no login: the flow has no honest way to budget
+    // itself or speak to the backend, so the client is disconnected with
+    // the generic pre-login reason
+    let per_attempt = match config_for_login(
+        state,
+        stream,
+        &mut client,
+        handshake,
+        session,
+        conn_id,
+        peer,
+    )
+    .await
+    {
+        Some(config) => attempt_budget(&config),
+        None => return Ok(()),
+    };
     let login_start = match timeout(per_attempt, wire::read_packet(stream, &mut client)).await {
         Ok(Ok(packet)) => packet,
         Ok(Err(error)) => return Err(error),
@@ -383,7 +440,20 @@ async fn login_flow_inner(
     // overall budget: the encryption window plus one window per backend,
     // with slack; each attempt is additionally capped by its own window,
     // so a hung backend yields to the next one instead of eating the flow
-    let per_attempt = attempt_budget(&state.config());
+    let per_attempt = match config_for_login(
+        state,
+        stream,
+        &mut client,
+        handshake,
+        session,
+        conn_id,
+        peer,
+    )
+    .await
+    {
+        Some(config) => attempt_budget(&config),
+        None => return Ok(()),
+    };
     let overall = per_attempt.saturating_mul(backends.len() as u32) + Duration::from_secs(1);
     let deadline = Instant::now() + overall;
     let mut last_reason: Option<String> = None;
@@ -463,8 +533,17 @@ async fn login_flow_inner(
                 let _roster_guard = crate::roster::RosterGuard::new(&state.roster, conn_id);
                 slot.mark_play();
                 let mut backend = backend;
-                let write_stall =
-                    Duration::from_millis(u64::from(state.config().advanced.read_timeout));
+                let write_stall = match state.config().await {
+                    Ok(config) => Duration::from_millis(u64::from(config.advanced.read_timeout)),
+                    Err(error) => {
+                        // the Login Success already went out, so the session
+                        // cannot be honestly kicked with a login disconnect;
+                        // it is ended instead — the client sees the
+                        // connection drop and nothing wrong is served
+                        error!(conn = conn_id, %peer, %error, "configuration unavailable entering the play state; dropping the session");
+                        return Err(ProxyError::ConfigUnavailable(error));
+                    }
+                };
                 crate::play::run_play_state(
                     stream,
                     &mut backend,
@@ -570,7 +649,16 @@ async fn resolve_profile(
     handshake: &HandshakeResult,
     name: &str,
 ) -> Result<GameProfile, ProfileError> {
-    if !state.config().online_mode {
+    let online_mode = match state.config().await {
+        Ok(config) => config.online_mode,
+        Err(error) => {
+            error!(conn = conn_id, %error, "configuration unavailable during profile resolution; disconnecting");
+            return Err(ProfileError::Disconnected(
+                CONFIG_UNAVAILABLE_KICK.to_owned(),
+            ));
+        }
+    };
+    if !online_mode {
         let validator = OfflineSessionValidator;
         return validator
             .verify_client(name, "")
@@ -699,7 +787,16 @@ async fn attempt_backend(
     login_start: &Packet,
     client_ip: &str,
 ) -> Attempt {
-    let config = state.config();
+    let config = match state.config().await {
+        Ok(config) => config,
+        Err(error) => {
+            // every backend attempt needs the config (timeouts, forwarding
+            // mode, compression); without it the chain is pointless, so the
+            // attempt fails fast and the flow ends with the generic reason
+            error!(conn = conn_id, %peer, backend = %backend.name(), %error, "configuration unavailable during backend attempt");
+            return Attempt::NotViable(CONFIG_UNAVAILABLE_KICK.to_owned());
+        }
+    };
     let protocol = handshake.protocol;
 
     // ---- 5. connect with [advanced] connection-timeout
@@ -1209,7 +1306,7 @@ mod tests {
             forwarding_secret: ForwardingSecret::new(vec![0x53; 32]),
             ..Config::default()
         };
-        ProxyState::new(Arc::new(config))
+        crate::accept::test_helpers::test_state(config)
     }
 
     #[tokio::test]
@@ -1235,6 +1332,75 @@ mod tests {
         assert_eq!(profile.id, offline_uuid("Steve"));
         assert_eq!(profile.name, "Steve");
         assert!(profile.properties.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_login_without_a_config_is_kicked_with_the_generic_reason() {
+        // once the config unit is down, every fetch is a NotRunning and the
+        // login aborts with the client-safe reason; the internal detail
+        // stays in the log
+        let config = Config {
+            online_mode: false,
+            forwarding_secret: ForwardingSecret::new(vec![0x53; 32]),
+            ..Config::default()
+        };
+        let (state, init, pid) = crate::accept::test_helpers::test_state_with_config_unit(config);
+        init.cancel(pid).expect("the config unit cancels");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let unit_state = init.unit(pid).map(|unit| unit.state);
+            if !matches!(unit_state, Some(candyriya_init::UnitState::Running)) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the config unit did not stop within the deadline"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted, connected) = tokio::join!(listener.accept(), TcpStream::connect(addr));
+        let (mut server_stream, _peer_addr) = accepted.expect("accept");
+        let mut client_stream = connected.expect("connect");
+        let mut wire = Wire::new();
+        let mut session = events::SessionSummary::default();
+        let result = config_for_login(
+            &state,
+            &mut client_stream,
+            &mut wire,
+            &dummy_handshake(),
+            &mut session,
+            1,
+            addr,
+        )
+        .await;
+        assert!(
+            result.is_none(),
+            "the login must not proceed without a config"
+        );
+
+        // the kick reason on the wire is the generic one, never an internal
+        // detail; read the frame and check both properties
+        let mut buf = [0_u8; 512];
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::io::AsyncReadExt::read(&mut server_stream, &mut buf),
+        )
+        .await
+        .expect("the kick arrives within the deadline")
+        .expect("the kick is readable");
+        assert!(read > 0, "the kick carries bytes");
+        let text = String::from_utf8_lossy(&buf[..read]);
+        assert!(
+            text.contains("Unable to connect to a server"),
+            "the client sees the generic reason, got: {text}"
+        );
+        assert!(
+            !text.contains("NotRunning"),
+            "no internal detail may leak into the kick, got: {text}"
+        );
     }
 
     #[test]
@@ -1265,8 +1431,8 @@ mod tests {
         assert_eq!(clamp_reason(&"a".repeat(300)).len(), MAX_KICK_REASON_CHARS);
     }
 
-    #[test]
-    fn route_prefers_forced_hosts_over_the_try_chain() {
+    #[tokio::test]
+    async fn route_prefers_forced_hosts_over_the_try_chain() {
         let addr_a: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
         let addr_b: std::net::SocketAddr = "127.0.0.1:8".parse().unwrap();
         let mut registry = BackendRegistry::new(
@@ -1289,7 +1455,7 @@ mod tests {
             forwarding_secret: ForwardingSecret::new(vec![0x53; 32]),
             ..Config::default()
         };
-        let state = ProxyState::new(Arc::new(config)).with_router(Arc::new(registry));
+        let state = crate::accept::test_helpers::test_state(config).with_router(Arc::new(registry));
 
         let forced = route_backends(&state, "forced.example.com");
         assert_eq!(forced.len(), 1);
@@ -1300,7 +1466,7 @@ mod tests {
         assert_eq!(plain[0].name(), "b");
 
         // no router wired in: the answer is an empty list, never a panic
-        let bare = ProxyState::new(Arc::new(Config::default()));
+        let bare = crate::accept::test_helpers::test_state(Config::default());
         assert!(route_backends(&bare, "forced.example.com").is_empty());
     }
 }

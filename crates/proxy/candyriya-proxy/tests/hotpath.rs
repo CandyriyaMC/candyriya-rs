@@ -32,6 +32,8 @@ use candyriya_scheduler::TaskService;
 
 use candyriya_proxy::{ProxySocket, ProxyState, SocketConfig, registry_from_config, serve};
 
+mod common;
+
 const PROTOCOL: i32 = 767; // 1.21.x, present in the embedded registry tables
 
 /// The 32 bytes the proxy and the modern-forwarding fixtures share.
@@ -67,7 +69,7 @@ fn offline_config() -> Config {
 
 fn start_proxy(config: Config) -> (SocketAddr, watch::Sender<bool>, TaskService) {
     let router = registry_from_config(&config).expect("router from config must build");
-    let state = Arc::new(ProxyState::new(Arc::new(config)).with_router(Arc::new(router)));
+    let state = Arc::new(common::state(config).with_router(Arc::new(router)));
     start_proxy_with_state(state)
 }
 
@@ -557,7 +559,7 @@ async fn online_mode_play_state_keeps_the_cipher_chain() {
     config.servers.servers = HashMap::from([server_addr("lobby", backend.addr())]);
     config.servers.try_servers = vec!["lobby".to_owned()];
     let router = registry_from_config(&config).expect("router from config must build");
-    let state = ProxyState::new(Arc::new(config))
+    let state = common::state(config)
         .with_router(Arc::new(router))
         .with_auth(candyriya_auth::AuthConfig {
             mode: candyriya_auth::AuthMode::Online,
