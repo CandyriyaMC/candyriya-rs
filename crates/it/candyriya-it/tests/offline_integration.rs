@@ -139,6 +139,8 @@ struct RunningProxy {
     addr: SocketAddr,
     shutdown: watch::Sender<bool>,
     service: TaskService,
+    init: Init,
+    config_pid: Pid,
     _state: Arc<ProxyState>,
 }
 
@@ -156,7 +158,7 @@ fn spawn_proxy(config: Config, service: TaskService) -> RunningProxy {
     let config_pid = init
         .spawn_unit(Pid::INIT, config_spec(store))
         .expect("config unit spawns");
-    let state = Arc::new(ProxyState::new(init, config_pid).with_router(Arc::new(router)));
+    let state = Arc::new(ProxyState::new(init.clone(), config_pid).with_router(Arc::new(router)));
     let socket = ProxySocket::bind(bind, &socket_config).expect("proxy socket binds");
     let addr = socket.local_addr();
     let listener = socket.into_listener();
@@ -166,6 +168,8 @@ fn spawn_proxy(config: Config, service: TaskService) -> RunningProxy {
         addr,
         shutdown,
         service,
+        init,
+        config_pid,
         _state: state,
     }
 }
@@ -174,6 +178,11 @@ fn spawn_proxy(config: Config, service: TaskService) -> RunningProxy {
 /// The report and the final stats snapshot go to the caller for assertions.
 async fn finish_proxy(proxy: RunningProxy) -> (ShutdownReport, candyriya_scheduler::TaskStats) {
     let _ = proxy.shutdown.send(true);
+    // the config unit is LongLived by design and never exits on its own;
+    // cancel it so the active count can reach zero
+    if let Err(error) = proxy.init.cancel(proxy.config_pid) {
+        eprintln!("failed to cancel the config unit: {error}");
+    }
     let deadline = Instant::now() + Duration::from_secs(5);
     while proxy.service.stats().active != 0 {
         assert!(
