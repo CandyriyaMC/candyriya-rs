@@ -12,9 +12,13 @@
 //! tree → service. Grant rows (`holder → targets`, mirrored for pruning)
 //! live in the same state behind the same lock.
 //!
-//! Bootstrap units are not implemented here: this module is the tree
-//! mechanics only. The root unit (pid 1) is created eagerly and never
-//! runs a body of its own; its lifecycle is the process's lifecycle.
+//! Bootstrap units are adopted, not spawned: the loader phase runs before
+//! any `Init` exists, so those steps cannot be born as units. They are
+//! adopted via [`Init::adopt_unit`] once the tree is up — born as zombies
+//! carrying their already-decided outcome and harvested by the same
+//! reaping path as everything else. The root unit (pid 1) is created
+//! eagerly and never runs a body of its own; its lifecycle is the
+//! process's lifecycle.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -639,6 +643,103 @@ impl Init {
         for &grant in &spec.grants {
             st.insert_grant(pid, grant);
         }
+        Ok(pid)
+    }
+
+    /// Adopt a unit whose work already completed before the tree existed.
+    ///
+    /// The loader phase — CLI arguments, telemetry, the configuration read,
+    /// address resolution — happens before any [`Init`] exists, so those
+    /// steps can never be [`Init::spawn_unit`]s. Registering them as they
+    /// finish keeps the tree the source of truth for what ran, in what
+    /// order and with what outcome: the unit is born as a `Zombie` carrying
+    /// `status`, and is harvested by the ordinary reaping path
+    /// ([`Init::reap_children`]). Adoption runs no body and never will;
+    /// the outcome is frozen at birth and the ring keeps the record like
+    /// any other exit.
+    ///
+    /// This exists for the bootstrap phase only, by design. A unit adopted
+    /// this way never runs again, cannot be retried and cannot be stopped
+    /// mid-body — adopting work *after* the tree is up would silently
+    /// defeat supervision, so anything the tree can spawn must go through
+    /// [`Init::spawn_unit`] instead. If you reach for this mid-run, you
+    /// want `spawn_unit`.
+    ///
+    /// The adopted unit's `started_at` and `exited_at` are both stamped at
+    /// adoption time: the loader does not track per-step instants, and
+    /// inventing them would fabricate measurements nobody took. The
+    /// adopted unit's restart count is always 0 and its restart policy is
+    /// always `Never`.
+    ///
+    /// # Errors
+    ///
+    /// - [`InitError::NoSuchParent`] — no unit with pid `parent` exists.
+    /// - [`InitError::ParentNotRunning`] — `parent` exists but is not
+    ///   `Running`, so it cannot supervise the adopted unit.
+    /// - [`InitError::InvalidName`] — the name violates the naming contract.
+    pub fn adopt_unit(
+        &self,
+        parent: Pid,
+        name: impl Into<String>,
+        kind: UnitKind,
+        status: ExitStatus,
+    ) -> Result<Pid, InitError> {
+        let name = name.into();
+        validate_name(&name)?;
+        let mut st = self.inner.lock();
+        let parent_node = st
+            .nodes
+            .get(&parent)
+            .ok_or(InitError::NoSuchParent(parent))?;
+        if parent_node.state != UnitState::Running {
+            return Err(InitError::ParentNotRunning(parent));
+        }
+        let pid = Pid::new(st.next_raw_pid);
+        st.next_raw_pid += 1;
+        let now = Instant::now();
+        let record = ExitRecord {
+            pid,
+            ppid: parent,
+            name: name.clone(),
+            kind,
+            status: status.clone(),
+            restart_count: 0,
+            started_at: now,
+            exited_at: now,
+        };
+        // the unit is born as a zombie: the receiver is dropped immediately
+        // (calls fail fast with `NotRunning`, like plain units) and nothing
+        // ever runs against the node
+        let (mailbox, dead_rx) = mpsc::channel(DEFAULT_MAILBOX_CAPACITY);
+        drop(dead_rx);
+        st.zombies_current += 1;
+        st.exits.push(record);
+        st.nodes.insert(
+            pid,
+            UnitNode {
+                pid,
+                ppid: parent,
+                name,
+                kind,
+                state: UnitState::Zombie,
+                started_at: now,
+                restart_count: 0,
+                last_exit: Some(status),
+                exited_at: Some(now),
+                policy: RestartPolicy::Never,
+                factory: Arc::new(|| Box::pin(std::future::pending::<ExitStatus>())),
+                timeout: None,
+                attempts: AttemptWindow::new(),
+                stop_requested: false,
+                service_id: None,
+                mailbox: Some(mailbox),
+                mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
+                service_kind: None,
+                call_timeout: None,
+                service: None,
+            },
+        );
+        st.emit_zombie_metrics();
         Ok(pid)
     }
 

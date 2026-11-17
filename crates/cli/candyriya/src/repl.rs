@@ -7,49 +7,104 @@
 //! errors are printed in red. `/candyriya end` flips the shared shutdown
 //! flag, which the main loop observes to begin graceful shutdown.
 //!
+//! The console is a long-lived unit in the supervision tree (`console`).
+//! Its body spawns the blocking stdin loop on the task service's blocking
+//! pool (rayon) and awaits the oneshot completion signal it fires; a stop
+//! requested through the tree drops the body at that await, which is what
+//! a process exit requires. The blocking stdin thread itself stays as it
+//! was — a rayon worker parked in read(2), detached by design.
+//!
 //! When stdin is not a TTY the REPL never starts: logs go to stdout and
 //! stderr as usual and there is no interactive prompt (services, CI and
-//! pipes must not get one). The read loop is a blocking stdin read, so it
-//! runs on the task service's blocking pool — cancellation flips the
-//! wrapper's token and the loop is no longer tracked, which is what a
-//! process exiting needs.
+//! pipes must not get one). The unit then exits `Success` immediately
+//! instead of parking forever.
 
 use std::io::{BufRead, IsTerminal, LineWriter, Write, stdin, stdout};
 use std::sync::Arc;
 
 use candyriya_command::{CommandSource, Dispatcher, ShutdownHandle};
+use candyriya_init::{ExitStatus, RestartPolicy, ServiceKind, UnitKind, UnitSpec};
 use candyriya_scheduler::{TaskId, TaskService};
 
 use crate::effects::CliEffects;
 
-/// Spawn the interactive console on `service`, if this process has a TTY.
+/// Unregisters the parked stdin thread from the kernel on body drop.
 ///
-/// `shutdown_tx` is flipped instead of [`ShutdownHandle::trigger`] being the
-/// only signal: both paths land in the same `watch` the accept loop and the
-/// main loop wait on. Returns the spawned task id, or `None` when the REPL
-/// was not started (stdin is not a terminal).
-pub fn spawn_if_interactive(
-    service: &TaskService,
+/// A tree stop drops the unit body at the `rx` await point; the rayon
+/// worker parked on `read(2)` cannot be interrupted, so the honest move
+/// is to take its registration off the books here — otherwise the final
+/// `TaskService::drain` waits the full timeout for a thread that can
+/// never finish, and Ctrl-C appears to hang. The thread itself stays
+/// parked (by design, see the module docs) and dies with the process.
+struct ReplCancelGuard(TaskService, Option<TaskId>);
+
+impl Drop for ReplCancelGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.1.take() {
+            let _ = self.0.cancel(id);
+        }
+    }
+}
+
+/// Build the spec for the `console` unit.
+///
+/// The unit is cancel-shaped: on a tree stop it ends at the oneshot
+/// await between the blocking stdin loop and the unit body. The watch it
+/// flips on `/candyriya end` is the bridge the accept loop and the main
+/// loop still wait on; the tree-wide cancel the composition root fires
+/// alongside it is what stops this unit.
+///
+/// `shutdown_tx` is flipped instead of [`ShutdownHandle::trigger`] being
+/// the only signal: both paths land in the same `watch` the accept loop
+/// and the main loop wait on. When stdin is not a terminal the unit body
+/// is a no-op that exits `Success` and logs why.
+// ipc-migration: Init.Shutdown — `/candyriya end` should stop the tree,
+// not just flip this bridge; the watch dies with the accept half of it in phase 3
+pub fn console_spec(
+    service: TaskService,
     dispatcher: Arc<Dispatcher>,
     effects: Arc<CliEffects>,
     shutdown_handle: ShutdownHandle,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     use_ansi: bool,
-) -> Option<TaskId> {
-    if !stdin().is_terminal() {
-        tracing::info!("stdin is not a terminal; interactive console is disabled");
-        return None;
-    }
-    let id = service.spawn_blocking("console.repl", move || {
-        run_loop(
-            &dispatcher,
-            &effects,
-            &shutdown_handle,
-            &shutdown_tx,
-            use_ansi,
-        );
-    });
-    Some(id)
+) -> UnitSpec {
+    UnitSpec::new(
+        "console",
+        UnitKind::LongLived,
+        RestartPolicy::Never,
+        move || {
+            let service = service.clone();
+            let dispatcher = Arc::clone(&dispatcher);
+            let effects = Arc::clone(&effects);
+            let shutdown_handle = shutdown_handle.clone();
+            let shutdown_tx = shutdown_tx.clone();
+            async move {
+                if !stdin().is_terminal() {
+                    tracing::info!("stdin is not a terminal; interactive console is disabled");
+                    return ExitStatus::Success;
+                }
+                // the unit awaits the blocking loop's completion signal; a
+                // tree stop drops the body at this await (Cancelled) and
+                // leaves the parallel stdin thread parked, which is what a
+                // process exit needs
+                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                let repl_id = service.spawn_blocking("console.repl", move || {
+                    run_loop(
+                        &dispatcher,
+                        &effects,
+                        &shutdown_handle,
+                        &shutdown_tx,
+                        use_ansi,
+                    );
+                    let _ = tx.send(());
+                });
+                let _guard = ReplCancelGuard(service.clone(), Some(repl_id));
+                let _ = rx.await;
+                ExitStatus::Success
+            }
+        },
+    )
+    .with_service_kind(ServiceKind::Console)
 }
 
 fn run_loop(
@@ -79,6 +134,7 @@ fn run_loop(
         }
         if shutdown_handle.is_requested() {
             // /candyriya end was issued; wake the accept loop and the main loop
+            // ipc-migration: Init.Shutdown — same bridge flip as pressing Ctrl-C; see console_spec
             let _ = shutdown_tx.send(true);
             break;
         }

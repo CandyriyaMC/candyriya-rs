@@ -284,6 +284,7 @@ dependencies = [
  "candyriya-command",
  "candyriya-config",
  "candyriya-i18n",
+ "candyriya-init",
  "candyriya-metrics",
  "candyriya-plugin",
  "candyriya-plugin-api",

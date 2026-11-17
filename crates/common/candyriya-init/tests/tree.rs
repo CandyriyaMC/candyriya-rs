@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use candyriya_init::{
-    Init, InitError, InitOptions, Pid, ReapOutcome, RestartLimits, RestartPolicy, UnitInfo,
-    UnitKind, UnitSpec, UnitState,
+    ExitStatus, Init, InitError, InitOptions, Pid, ReapOutcome, RestartLimits, RestartPolicy,
+    UnitInfo, UnitKind, UnitSpec, UnitState,
 };
 use candyriya_scheduler::TaskService;
 use tokio::time::Instant;
@@ -744,4 +744,68 @@ async fn stop_during_backoff_folds_into_plain_removal() {
         tree.unit(pid).is_none(),
         "the pending restart must fold into a removal, not respawn the unit"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adopted_unit_is_born_zombie_then_reaped_with_outcome() {
+    let tree = tree();
+    let ok_pid = tree
+        .adopt_unit(
+            Pid::INIT,
+            "bootstrap.ok",
+            UnitKind::Oneshot,
+            ExitStatus::Success,
+        )
+        .expect("adoption succeeds");
+    let failed_pid = tree
+        .adopt_unit(
+            Pid::INIT,
+            "bootstrap.failed",
+            UnitKind::Oneshot,
+            ExitStatus::failure("the loader step did not finish"),
+        )
+        .expect("adoption succeeds");
+    // both are visible as zombies before anyone harvests them, each with
+    // its own outcome, and neither ran against a task service slot
+    for (pid, status) in [
+        (ok_pid, ExitStatus::Success),
+        (
+            failed_pid,
+            ExitStatus::failure("the loader step did not finish"),
+        ),
+    ] {
+        let info = unit(&tree, pid);
+        assert_eq!(info.state, UnitState::Zombie);
+        assert_eq!(info.last_exit.as_ref(), Some(&status));
+        assert_eq!(info.restart_count, 0);
+        assert_eq!(info.ppid, Pid::INIT);
+        assert_eq!(info.kind, UnitKind::Oneshot);
+    }
+    let outcomes = tree.reap_children(Pid::INIT);
+    assert_eq!(outcomes.len(), 2);
+    let mut by_pid: std::collections::HashMap<_, _> = outcomes
+        .into_iter()
+        .map(|outcome| {
+            let ReapOutcome::Reaped(record) = outcome else {
+                panic!("an adopted unit is never re-run or failed terminally, got {outcome:?}")
+            };
+            (record.pid, record)
+        })
+        .collect();
+    assert_eq!(
+        by_pid.remove(&ok_pid).map(|record| record.status),
+        Some(ExitStatus::Success)
+    );
+    assert_eq!(
+        by_pid.remove(&failed_pid).map(|record| record.status),
+        Some(ExitStatus::failure("the loader step did not finish"))
+    );
+    // reaped means gone from the registry; the ring keeps both exits
+    assert!(tree.unit(ok_pid).is_none());
+    assert!(tree.unit(failed_pid).is_none());
+    assert_eq!(tree.zombie_count(), 0);
+    let ring = tree.recent_exits(2);
+    assert_eq!(ring.len(), 2);
+    assert!(ring.iter().any(|record| record.pid == ok_pid));
+    assert!(ring.iter().any(|record| record.pid == failed_pid));
 }

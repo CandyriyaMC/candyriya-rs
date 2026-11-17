@@ -24,9 +24,21 @@
 //!    The plugin-facing host services the `candyriya:*` functions resolve
 //!    through — the plugin dispatcher, the play-state roster snapshot and
 //!    the backend name list — are registered right after the plugin load.
-//! 6. **Lifecycle** — Ctrl-C or `/candyriya end` flips the shared shutdown
-//!    signal; the accept loop stops, the task service drains, the subsystems
-//!    shut down in reverse order of wiring, and the process exits with code 0.
+//!    All of the above is the loader phase: everything that ran before
+//!    the task service existed is adopted into the tree as an
+//!    already-exited unit once the tree is up.
+//! 6. **Lifecycle** — once the loader is done, the phases that keep
+//!    running boot as units in `init`: `proxy.accept` (long-lived, the
+//!    unit body drives the listener), `stats.every-60s` and
+//!    `players.roster-refresh` (periodic), `console` (the interactive
+//!    REPL) and, at shutdown, `cache.shutdown` and `metrics.shutdown`
+//!    (one-shot finalizers, the last units to run, in order). Ctrl-C or
+//!    `/candyriya end` fires both the shutdown watch and a tree-wide
+//!    cancel sweep; the serving units are waited on through the tree, the
+//!    finalizers run last, the task service drains as the final safety
+//!    net, and the process exits with code 0. If a boot unit fails before
+//!    or during serving, the remaining units are unwound in reverse spawn
+//!    order instead and the process exits with code 1.
 //!
 //! Plugins under `plugins/` and `libraries/` are loaded at startup; the
 //! same machinery is exposed through `/candyriya reload` for a restart-free
@@ -51,13 +63,16 @@ use candyriya_cache::CacheManager;
 use candyriya_command::{CommandRegistry, CommandState, ShutdownHandle};
 use candyriya_config::{Config, ConfigStore, DEFAULT_CONFIG_TOML};
 use candyriya_i18n::I18n;
+use candyriya_init::{
+    ExitStatus, Init, Pid, ReapOutcome, RestartPolicy, ServiceKind, UnitKind, UnitSpec,
+};
 use candyriya_plugin::{
     DISPATCHER_SERVICE_KEY, LimitBuilder, PLAYERS_ROSTER_KEY, PluginLoader, PluginReloader,
     PluginSet, ProxyEventDispatcher, SERVERS_NAMES_KEY, ServiceRegistry, SharedLocales,
     resolve_plugins,
 };
 use candyriya_plugin_api::{EventDispatcher, PlayerRef};
-use candyriya_proxy::{FaviconCache, ProxySocket, ProxyState, SocketConfig, serve};
+use candyriya_proxy::{FaviconCache, ProxySocket, ProxyState, SocketConfig, accept_loop};
 use candyriya_route::BackendRegistry;
 use candyriya_scheduler::TaskService;
 use candyriya_telemetry::LogConfig;
@@ -159,7 +174,7 @@ impl From<std::io::Error> for CliError {
 /// Parse arguments, initialize telemetry and run the proxy to shutdown.
 ///
 /// This is the whole process: it never returns until shutdown is complete.
-/// Failures are logged (and printed on stderr by `main`), exit code 1.
+/// Failures are logged, and the exit code is 1.
 pub fn run(args: Args) -> Result<(), CliError> {
     let data_dir = std::env::current_dir()?;
 
@@ -183,6 +198,238 @@ pub fn run(args: Args) -> Result<(), CliError> {
     }
     telemetry.shutdown();
     result
+}
+
+/// Poll cadence for the selection loop's unit-failure watch and for the
+/// bounded waits in the shutdown cascade. Short enough that a failed accept
+/// stops the process without a human noticing, cheap enough to ignore.
+const UNIT_FAILURE_POLL: Duration = Duration::from_millis(100);
+
+/// Budget for a group of units to exit after they were asked to, before
+/// the cascade stops waiting on them and the drain deadline decides.
+const UNIT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Register a bootstrap step that has already run (successfully or not) as
+/// an adopted unit, so the tree stays the source of truth for what ran.
+///
+/// Adoption failures are logged and swallowed on purpose: if the kernel
+/// cannot record the step here the boot must surface the *real* error,
+/// not this one. `status` records what actually happened to the step.
+fn adopt_bootstrap(tree: &Init, name: &str, status: ExitStatus) {
+    if let Err(error) = tree.adopt_unit(Pid::INIT, name, UnitKind::Oneshot, status) {
+        warn!(%error, step = name, "failed to adopt bootstrap step");
+    }
+}
+
+/// Whether an exit status is a failure worth aborting the boot for.
+///
+/// `Cancelled` is excluded on purpose: a unit we stopped ourselves is not
+/// a failure. Mirrors the restart-policy notion of a failure exit.
+fn exit_is_failure(status: &ExitStatus) -> bool {
+    matches!(
+        status,
+        ExitStatus::Failure(_) | ExitStatus::Panicked | ExitStatus::TimedOut
+    )
+}
+
+/// Harvest failure exits among the root's direct children.
+///
+/// Returns a one-line detail of one failure, and nothing when every
+/// harvested unit exited cleanly. Reaping happens as a side effect, which
+/// keeps the stuck-zombie gauge truthful and lets the same helper drive
+/// the boot checks and the mid-run failure watch.
+fn unit_failure_detail(tree: &Init) -> Option<String> {
+    tree.reap_children(Pid::INIT)
+        .into_iter()
+        .find_map(|outcome| {
+            match outcome {
+                ReapOutcome::Reaped(record) | ReapOutcome::Restarting { record, .. }
+                    if exit_is_failure(&record.status) =>
+                {
+                    Some(format!(
+                        "unit {} (pid {}) exited with {}",
+                        record.name, record.pid, record.status
+                    ))
+                }
+                ReapOutcome::Reaped(_) | ReapOutcome::Restarting { .. } => None,
+                // Never-policy units (everything the composition root spawns)
+                // never land here; a restart-limited unit running out of budget
+                // certainly counts as a failure
+                ReapOutcome::FailedTerminal { record } => Some(format!(
+                    "unit {} (pid {}) reached failed-terminal after {}",
+                    record.name, record.pid, record.status
+                )),
+            }
+        })
+}
+
+/// Unwind a boot that is not allowed to continue serving.
+///
+/// Cancels the units already spawned in reverse spawn order (newest
+/// first), harvests whatever already exited, drains the kernel and hands
+/// the reason back for the caller to report. Boot-adopted units cannot
+/// appear here; they are reaped as they adopt. The drain is the same
+/// safety net the normal shutdown uses, so a unit wedged mid-await still
+/// gets bounded by it.
+async fn boot_abort(
+    tree: &Init,
+    service: &TaskService,
+    spawned: &[(Pid, &'static str)],
+    error: CliError,
+) -> CliError {
+    // newest first, mirroring how the shutdown cascade unwinds
+    for (pid, _) in spawned.iter().rev() {
+        if let Err(cancel_error) = tree.cancel(*pid) {
+            debug!(%cancel_error, %pid, "unit already gone while unwinding the boot abort");
+        }
+    }
+    let _ = tree.reap_children(Pid::INIT);
+    let report = service.drain(Duration::from_secs(10)).await;
+    info!(?report, "task service drained after boot abort");
+    error
+}
+
+/// Wait until every pid in `pids` has left the registry (harvested by the
+/// reaper) or the budget runs out. Returns the pids still tracked.
+async fn wait_units_gone(tree: &Init, pids: &[Pid], budget: Duration) -> Vec<Pid> {
+    let start = Instant::now();
+    let mut pending: Vec<Pid> = pids.to_vec();
+    while !pending.is_empty() && start.elapsed() < budget {
+        let _ = tree.reap_children(Pid::INIT);
+        pending.retain(|pid| tree.unit(*pid).is_some());
+        if !pending.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    pending
+}
+
+/// Close the cache subsystem, logging the outcome the way the inline
+/// teardown always did.
+async fn shutdown_cache(cache: &CacheManager) -> ExitStatus {
+    match cache.shutdown() {
+        Ok(report) => {
+            debug!(?report, "cache shut down");
+            ExitStatus::Success
+        }
+        Err(error) => {
+            warn!(%error, "cache shutdown failed");
+            ExitStatus::failure(error.to_string())
+        }
+    }
+}
+
+/// Close the Prometheus exporter installation. In pull mode this is a
+/// no-op beyond the state flag, exactly as when it ran inline.
+async fn shutdown_metrics(handle: candyriya_metrics::MetricsHandle) -> ExitStatus {
+    handle.shutdown();
+    ExitStatus::Success
+}
+
+/// Run one finalizer unit to completion.
+///
+/// Finalizers are the last units to run at shutdown and they run in
+/// order — this function waits for the unit to exit before returning.
+/// If the kernel cannot spawn it (a wedged registry at the end of the
+/// process, practically unreachable), the finalizer runs inline instead:
+/// the teardown must still happen, and the caller has nothing else to
+/// fall back to.
+async fn run_finalizer<F, Fut>(tree: &Init, name: &'static str, service_kind: ServiceKind, make: F)
+where
+    F: Fn() -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = ExitStatus> + Send + 'static,
+{
+    let spec = UnitSpec::new(name, UnitKind::Oneshot, RestartPolicy::Never, make.clone())
+        .with_service_kind(service_kind);
+    match tree.spawn_unit(Pid::INIT, spec) {
+        Ok(pid) => {
+            let _ = wait_units_gone(tree, &[pid], UNIT_STOP_TIMEOUT).await;
+        }
+        Err(error) => {
+            error!(%error, %name, "failed to spawn the finalizer unit; running it inline");
+            let status = make().await;
+            if !status.is_success() {
+                warn!(%status, %name, "finalizer failed via the inline fallback");
+            }
+        }
+    }
+}
+
+/// The cascade: the shutdown cause has already been logged by the caller.
+///
+/// Sequence: flip the watch (bridge for the accept loop and the REPL),
+/// cancel the serving units in reverse spawn order, wait for them through
+/// the tree, run the finalizers in order (`cache.shutdown` then
+/// `metrics.shutdown`), and drain the kernel as the final safety net. The
+/// exit ring keeps every unit exit for the post-mortem.
+async fn cascade_shutdown(
+    tree: &Init,
+    service: &TaskService,
+    shutdown_tx: &tokio::sync::watch::Sender<bool>,
+    boot_units: &[(Pid, &'static str)],
+    cache: Arc<CacheManager>,
+    metrics_handle: candyriya_metrics::MetricsHandle,
+) {
+    // bridge: the accept loop and the REPL still watch the flip
+    let _ = shutdown_tx.send(true);
+
+    // stop the serving units through the tree, newest first: console,
+    // players.roster-refresh, stats.every-60s, proxy.accept
+    for (pid, _) in boot_units.iter().rev() {
+        if let Err(error) = tree.cancel(*pid) {
+            debug!(%error, %pid, "unit already gone in the cancel sweep");
+        }
+    }
+
+    // wait for the serving units to exit; the reaper stays warm
+    let pids: Vec<Pid> = boot_units.iter().map(|(pid, _)| *pid).collect();
+    let pending = wait_units_gone(tree, &pids, UNIT_STOP_TIMEOUT).await;
+    if !pending.is_empty() {
+        let names: Vec<&str> = boot_units
+            .iter()
+            .filter(|(pid, _)| pending.contains(pid))
+            .map(|(_, name)| *name)
+            .collect();
+        warn!(
+            ?names,
+            "serving units did not stop before the cascade deadline; the drain deadline applies"
+        );
+    }
+
+    // finalizers, last and in order: cache first, metrics second
+    let cache_make = {
+        let cache = Arc::clone(&cache);
+        move || {
+            let cache = Arc::clone(&cache);
+            async move { shutdown_cache(&cache).await }
+        }
+    };
+    run_finalizer(tree, "cache.shutdown", ServiceKind::Cache, cache_make).await;
+
+    // metrics handle is consumed on shutdown, so it travels in a slot
+    let metrics_slot = Arc::new(std::sync::Mutex::new(Some(metrics_handle)));
+    let metrics_make = {
+        let slot = Arc::clone(&metrics_slot);
+        move || {
+            let slot = Arc::clone(&slot);
+            async move {
+                match slot.lock().ok().and_then(|mut guard| guard.take()) {
+                    Some(handle) => shutdown_metrics(handle).await,
+                    None => {
+                        warn!(
+                            "metrics finalizer ran with the handle already consumed; nothing to close"
+                        );
+                        ExitStatus::Success
+                    }
+                }
+            }
+        }
+    };
+    run_finalizer(tree, "metrics.shutdown", ServiceKind::Unit, metrics_make).await;
+
+    // final safety net, accounting timed-out stragglers by contract
+    let report = service.drain(Duration::from_secs(10)).await;
+    info!(?report, "task service drained");
 }
 
 /// Full startup: configuration, subsystems, tasks, wait for shutdown, drain.
@@ -287,15 +534,39 @@ async fn run_async(
         .build()
         .map_err(|error| CliError::Runtime(format!("failed to build the task service: {error}")))?;
 
+    // ---- the tree. Everything from here on is either adopted as an
+    // already-exited loader step or spawned as a unit; the order of the
+    // adoption calls mirrors the boot order.
+    // ipc-migration: TaskService stays the kernel; units hand it off to the tree
+    let tree = Init::new(service.clone());
+    adopt_bootstrap(&tree, "cli.bootstrap", ExitStatus::Success);
+    adopt_bootstrap(&tree, "config.load", ExitStatus::Success);
+    adopt_bootstrap(&tree, "route.resolve", ExitStatus::Success);
+
     let registry = ServiceRegistry::new();
+    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
     registry.register_service(
         "scheduler.service".to_string(),
         Arc::new(service.clone()) as Arc<dyn std::any::Any + Send + Sync>,
     );
 
     // ---- cache (favicon uniquification goes through here)
-    let cache = CacheManager::new(data_dir).map_err(|error| CliError::Cache(error.to_string()))?;
-    let cache = Arc::new(cache);
+    let cache = match CacheManager::new(data_dir) {
+        Ok(cache) => {
+            let cache = Arc::new(cache);
+            adopt_bootstrap(&tree, "cache.manager", ExitStatus::Success);
+            cache
+        }
+        Err(error) => {
+            adopt_bootstrap(
+                &tree,
+                "cache.manager",
+                ExitStatus::failure(error.to_string()),
+            );
+            return Err(boot_abort(&tree, &service, &[], CliError::Cache(error.to_string())).await);
+        }
+    };
+    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
     registry.register_service(
         "cache.manager".to_string(),
         Arc::clone(&cache) as Arc<dyn std::any::Any + Send + Sync>,
@@ -313,12 +584,36 @@ async fn run_async(
 
     // ---- metrics (off unless [metrics] prometheus = true)
     let metrics_addr = if config.metrics.prometheus {
-        Some(resolve_socket_addr(&config.metrics.prometheus_address)?)
+        match resolve_socket_addr(&config.metrics.prometheus_address) {
+            Ok(addr) => Some(addr),
+            Err(error) => {
+                adopt_bootstrap(
+                    &tree,
+                    "metrics.exporter",
+                    ExitStatus::failure(error.to_string()),
+                );
+                return Err(boot_abort(&tree, &service, &[], error).await);
+            }
+        }
     } else {
         None
     };
-    let metrics_handle = candyriya_metrics::install(metrics_addr)
-        .map_err(|error| CliError::Metrics(error.to_string()))?;
+    let metrics_handle = match candyriya_metrics::install(metrics_addr) {
+        Ok(handle) => {
+            adopt_bootstrap(&tree, "metrics.exporter", ExitStatus::Success);
+            handle
+        }
+        Err(error) => {
+            adopt_bootstrap(
+                &tree,
+                "metrics.exporter",
+                ExitStatus::failure(error.to_string()),
+            );
+            return Err(
+                boot_abort(&tree, &service, &[], CliError::Metrics(error.to_string())).await,
+            );
+        }
+    };
 
     // ---- session validators, selected from online-mode
     let auth = AuthConfig {
@@ -335,33 +630,55 @@ async fn run_async(
         auth.timeout,
     ));
     info!(mode = ?auth.mode, "session validation configured");
+    adopt_bootstrap(&tree, "auth.validators", ExitStatus::Success);
+    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
     registry.register_service(
         "auth.offline".to_string(),
         offline_validator as Arc<dyn std::any::Any + Send + Sync>,
     );
+    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
     registry.register_service(
         "auth.mojang".to_string(),
         mojang_validator as Arc<dyn std::any::Any + Send + Sync>,
     );
+    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
     registry.register_service(
         "config.store".to_string(),
         Arc::clone(&store) as Arc<dyn std::any::Any + Send + Sync>,
     );
     if let Some(router) = &router {
+        // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
         registry.register_service(
             "route.backends".to_string(),
             Arc::clone(router) as Arc<dyn std::any::Any + Send + Sync>,
         );
     }
 
-    // ---- command locales + the shared pair the plugin host functions
-    // resolve through (built before the plugin load so the loader can
-    // register plugin locale files into the same machines)
-    let (locales, plugin_locales) = build_locales(data_dir)?;
+    // ---- command locales + the kick-locale handle, plus the shared pair
+    // the plugin host functions resolve through (built before the plugin
+    // load so the loader can register plugin locale files into the same
+    // machines). One bootstrap step, one adopted unit.
+    let (locales, plugin_locales) = match build_locales(data_dir) {
+        Ok(pair) => pair,
+        Err(error) => {
+            adopt_bootstrap(&tree, "i18n.build", ExitStatus::failure(error.to_string()));
+            return Err(boot_abort(&tree, &service, &[], error).await);
+        }
+    };
+    let kick_i18n = match build_kick_i18n(data_dir, &config) {
+        Ok(i18n) => i18n,
+        Err(error) => {
+            adopt_bootstrap(&tree, "i18n.build", ExitStatus::failure(error.to_string()));
+            return Err(boot_abort(&tree, &service, &[], error).await);
+        }
+    };
+    adopt_bootstrap(&tree, "i18n.build", ExitStatus::Success);
 
     // ---- plugins: startup load (before the proxy state is built: the
     // shared dispatcher gets wired into it at construction time)
     let plugin_set = load_plugins(data_dir, &config, &cache, plugin_locales.clone());
+    adopt_bootstrap(&tree, "plugins.load", ExitStatus::Success);
+    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
     registry.register_service(
         "plugins.set".to_string(),
         Arc::clone(&plugin_set) as Arc<dyn std::any::Any + Send + Sync>,
@@ -372,11 +689,13 @@ async fn run_async(
     // register_plugin_host_services below), so `/candyriya reload`
     // swaps what they both see without any re-registration
     let event_dispatcher = Arc::new(ProxyEventDispatcher::new((*plugin_set).clone()));
-    let kick_i18n = build_kick_i18n(data_dir, &config)?;
 
     // ---- shared proxy state
+    // ipc-migration: these fields are cross-subsystem handles (Plugins.Dispatch
+    // and I18n.T ride them); the IPC conversion gives each its own unit
     let started = Instant::now();
     let mut proxy_state = ProxyState::new(Arc::clone(&config));
+    // ipc-migration: Roster/Route/Proxy snapshot — ProxyState carries handles across the subsystem boundary until each is a unit
     proxy_state.auth = auth;
     proxy_state.set_router(router.clone());
     proxy_state.favicon_cache = favicon_cache.clone();
@@ -404,14 +723,15 @@ async fn run_async(
     // ---- plugin host services: without these, the candyriya:* host
     // functions fall back to their built-in answers (callApi errors out,
     // the roster reads empty, listServers answers ["local"])
+    // ipc-migration: Roster.Snapshot / Router.Names — these keys exist only for the host-function path; both become capability calls in the IPC phase
     register_plugin_host_services(
         &registry,
-        &service,
         &proxy_state,
         router.as_deref(),
         &event_dispatcher,
     );
     // ---- hot reload: the same machinery, on demand
+    // ipc-migration: Config.Reload / Plugins.Reload — the ReloadFn closure runs synchronously on the REPL's blocking thread
     let reload_fn = build_reload_fn(
         Arc::clone(&store),
         config_path.to_path_buf(),
@@ -429,71 +749,259 @@ async fn run_async(
     let dispatcher = Arc::new(command_registry.dispatcher().map_err(|error| {
         CliError::Runtime(format!("failed to assemble the built-in commands: {error}"))
     })?);
+    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
     registry.register_service(
         "commands.dispatcher".to_string(),
         dispatcher.clone() as Arc<dyn std::any::Any + Send + Sync>,
     );
 
     // ---- one shutdown signal for Ctrl-C and /candyriya end; the accept
-    // loop watches one receiver, the main loop watches another
+    // loop watches one receiver, the REPL flips it, the main loop watches
+    // another. The tree gets a cancel sweep alongside the flip (in
+    // cascade_shutdown); the watch stays as a bridge until phase 3
+    // removes the accept half of it
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut console_rx = shutdown_tx.subscribe();
 
-    let bind_addr = resolve_socket_addr(&config.bind)?;
-    let socket = ProxySocket::bind(bind_addr, &SocketConfig::from(&config.advanced))
-        .map_err(|error| CliError::Proxy(error.to_string()))?;
+    // ---- bind the listener (loader phase: before the tree serves). If
+    // resolution or the bind itself fails, the step is adopted as a
+    // failure and the boot aborts before any serving unit exists.
+    let bind_addr = match resolve_socket_addr(&config.bind) {
+        Ok(addr) => addr,
+        Err(error) => {
+            adopt_bootstrap(&tree, "proxy.bind", ExitStatus::failure(error.to_string()));
+            return Err(boot_abort(&tree, &service, &[], error).await);
+        }
+    };
+    let socket = match ProxySocket::bind(bind_addr, &SocketConfig::from(&config.advanced)) {
+        Ok(socket) => socket,
+        Err(error) => {
+            adopt_bootstrap(&tree, "proxy.bind", ExitStatus::failure(error.to_string()));
+            return Err(boot_abort(&tree, &service, &[], CliError::Proxy(error.to_string())).await);
+        }
+    };
+    adopt_bootstrap(&tree, "proxy.bind", ExitStatus::Success);
     let local_addr = socket.local_addr();
     let listener = socket.into_listener();
-    let accept_task = serve(Arc::clone(&proxy_state), listener, shutdown_rx, &service);
-    info!(bind = %local_addr, task = ?accept_task, "proxy listening");
+
+    // ---- every bootstrap step is adopted; reap them now so the ring
+    // tells the boot story and no zombie lingers into serving
+    let adopted = tree.reap_children(Pid::INIT).len();
+    debug!(adopted, "bootstrap steps adopted and reaped");
+
+    // ---- spawn the serving units, in boot order; a failure of any of
+    // them unwinds the ones before it in reverse order (fail-fast boot)
+    let mut boot_units: Vec<(Pid, &'static str)> = Vec::with_capacity(4);
+
+    // proxy.accept: the unit body drives listener.accept(); connections
+    // keep their own kernel tasks until phase 3 turns them into units.
+    // The listener and the shutdown receiver are not Clone, so they ride
+    // in a single slot consumed by the one factory invocation a
+    // RestartPolicy::Never unit ever gets; a re-invocation reports a
+    // failure instead of serving on a stolen socket.
+    let accept_boot = Arc::new(std::sync::Mutex::new(Some((listener, shutdown_rx))));
+    let accept_spec = UnitSpec::new("proxy.accept", UnitKind::LongLived, RestartPolicy::Never, {
+        let state = Arc::clone(&proxy_state);
+        let service = service.clone();
+        let accept_boot = Arc::clone(&accept_boot);
+        move || {
+            let taken = accept_boot.lock().ok().and_then(|mut slot| slot.take());
+            let state = Arc::clone(&state);
+            let service = service.clone();
+            async move {
+                let Some((listener, shutdown)) = taken else {
+                    debug!("proxy.accept factory ran without a listener; reporting failure");
+                    return ExitStatus::failure("accept body rebuilt without a listener");
+                };
+                accept_loop(state, listener, shutdown, service).await;
+                ExitStatus::Success
+            }
+        }
+    })
+    .with_service_kind(ServiceKind::Accept);
+    match tree.spawn_unit(Pid::INIT, accept_spec) {
+        Ok(pid) => {
+            boot_units.push((pid, "proxy.accept"));
+            info!(bind = %local_addr, pid = %pid, "proxy listening");
+        }
+        Err(error) => {
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &boot_units,
+                CliError::Proxy(format!("failed to spawn proxy.accept: {error}")),
+            )
+            .await);
+        }
+    }
 
     // ---- periodic stats line
     let stats_state = Arc::clone(&proxy_state);
     let stats_router = router.clone();
-    service.every("stats.every-60s", Duration::from_secs(60), move || {
-        let state = Arc::clone(&stats_state);
-        let router = stats_router.clone();
-        async move {
-            log_stats(&state, router.as_deref());
+    let stats_spec = UnitSpec::new(
+        "stats.every-60s",
+        UnitKind::Every,
+        RestartPolicy::Never,
+        move || {
+            let state = Arc::clone(&stats_state);
+            let router = stats_router.clone();
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    // ipc-migration: Proxy.Stats (reads the shared proxy state directly)
+                    log_stats(&state, router.as_deref());
+                }
+            }
+        },
+    )
+    .with_service_kind(ServiceKind::Stats);
+    match tree.spawn_unit(Pid::INIT, stats_spec) {
+        Ok(pid) => boot_units.push((pid, "stats.every-60s")),
+        Err(error) => {
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &boot_units,
+                CliError::Runtime(format!("failed to spawn stats.every-60s: {error}")),
+            )
+            .await);
         }
-    });
+    }
+
+    // ---- play-state roster snapshot: rebuild every second from the live
+    // roster; plugin-facing getPlayerRoster answers from the key
+    let roster_state = Arc::clone(&proxy_state);
+    let roster_registry = registry.clone();
+    let roster_spec = UnitSpec::new(
+        "players.roster-refresh",
+        UnitKind::Every,
+        RestartPolicy::Never,
+        move || {
+            let state = Arc::clone(&roster_state);
+            let registry = roster_registry.clone();
+            let initial = roster_snapshot(&state);
+            // the comparison is cheap (a few small strings), so it happens
+            // synchronously per tick and a no-change tick is just one pass
+            async move {
+                let mut last_registered = initial;
+                loop {
+                    tokio::time::sleep(ROSTER_REFRESH_INTERVAL).await;
+                    // ipc-migration: Roster.Snapshot (reads the shared proxy state directly)
+                    let current = roster_snapshot(&state);
+                    if current != last_registered {
+                        // swap without the registry's replace warning: a join/part
+                        // is normal traffic, not an operator-actionable event
+                        // ipc-migration: Roster.Snapshot — remove+register swap kept until the IPC conversion
+                        registry.remove_service::<Vec<PlayerRef>>(PLAYERS_ROSTER_KEY);
+                        registry.register_service(
+                            PLAYERS_ROSTER_KEY.to_owned(),
+                            Arc::new(current.clone()) as Arc<dyn std::any::Any + Send + Sync>,
+                        );
+                        last_registered = current;
+                    }
+                }
+            }
+        },
+    )
+    .with_service_kind(ServiceKind::Roster);
+    match tree.spawn_unit(Pid::INIT, roster_spec) {
+        Ok(pid) => boot_units.push((pid, "players.roster-refresh")),
+        Err(error) => {
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &boot_units,
+                CliError::Runtime(format!("failed to spawn players.roster-refresh: {error}")),
+            )
+            .await);
+        }
+    }
 
     // ---- interactive console REPL (only when stdin is a TTY)
-    let _repl_task = repl::spawn_if_interactive(
-        &service,
+    let console_spec = repl::console_spec(
+        service.clone(),
         Arc::clone(&dispatcher),
         effects.clone(),
         shutdown,
         shutdown_tx.clone(),
         use_ansi,
     );
-
-    // ---- wait for shutdown: Ctrl-C, or the console REPL flipping the flag
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            match result {
-                Ok(()) => info!("Ctrl-C received; shutting down"),
-                Err(error) => warn!(%error, "failed to listen for Ctrl-C; continuing until told otherwise"),
-            }
-        }
-        result = console_rx.changed() => {
-            if result.is_ok() {
-                info!("shutdown requested via the console; shutting down");
-            }
+    match tree.spawn_unit(Pid::INIT, console_spec) {
+        Ok(pid) => boot_units.push((pid, "console")),
+        Err(error) => {
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &boot_units,
+                CliError::Runtime(format!("failed to spawn console: {error}")),
+            )
+            .await);
         }
     }
-    let _ = shutdown_tx.send(true);
 
-    // ---- drain the task service before tearing anything down
-    let report = service.drain(Duration::from_secs(10)).await;
-    info!(?report, "task service drained");
-
-    // ---- reverse-order teardown of the subsystems (drain handled the tasks)
-    match cache.shutdown() {
-        Ok(report) => debug!(?report, "cache shut down"),
-        Err(error) => warn!(%error, "cache shutdown failed"),
+    // ---- boot fail-fast: before entering the serving loop, harvest
+    // anything that already failed at birth (e.g. the console unit
+    // failing to spawn its blocking loop is impossible today; an accept
+    // body could fail immediately in principle)
+    if let Some(detail) = unit_failure_detail(&tree) {
+        return Err(boot_abort(
+            &tree,
+            &service,
+            &boot_units,
+            CliError::Proxy(format!("supervision tree aborted during boot: {detail}")),
+        )
+        .await);
     }
-    metrics_handle.shutdown();
+
+    // ---- wait for shutdown: Ctrl-C, the console REPL flipping the flag,
+    // or a serving unit dying under the watch
+    let mut unit_tick = tokio::time::interval(UNIT_FAILURE_POLL);
+    unit_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let unit_failure: Option<String> = loop {
+        tokio::select! {
+            biased;
+
+            result = tokio::signal::ctrl_c() => {
+                match result {
+                    Ok(()) => info!("Ctrl-C received; shutting down"),
+                    Err(error) => warn!(%error, "failed to listen for Ctrl-C; continuing until told otherwise"),
+                }
+                break None;
+            }
+            result = console_rx.changed() => {
+                if result.is_ok() {
+                    info!("shutdown requested via the console; shutting down");
+                }
+                break None;
+            }
+            _ = unit_tick.tick() => {
+                if let Some(detail) = unit_failure_detail(&tree) {
+                    break Some(detail);
+                }
+            }
+        }
+    };
+    if let Some(detail) = unit_failure {
+        return Err(boot_abort(
+            &tree,
+            &service,
+            &boot_units,
+            CliError::Proxy(format!("supervision tree aborted: {detail}")),
+        )
+        .await);
+    }
+
+    // ---- the cascade: watch + tree-wide cancel sweep, serving units,
+    // finalizers last (cache then metrics), drain as the final safety net
+    cascade_shutdown(
+        &tree,
+        &service,
+        &shutdown_tx,
+        &boot_units,
+        cache,
+        metrics_handle,
+    )
+    .await;
 
     Ok(())
 }
@@ -506,6 +1014,7 @@ const ROSTER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Snapshot the live play-state roster into the `Vec<PlayerRef>` shape the
 /// `players.roster` service key carries.
+// ipc-migration: Roster.Snapshot (reads the shared proxy state directly)
 fn roster_snapshot(state: &ProxyState) -> Vec<PlayerRef> {
     state
         .roster
@@ -526,13 +1035,14 @@ fn roster_snapshot(state: &ProxyState) -> Vec<PlayerRef> {
 ///   state holds the same instance for the lifecycle events, so both
 ///   sides see the same fan-out with no re-registration. The registry
 ///   just replaces on re-register.
-/// - `players.roster` — an initial snapshot is registered here, then a
-///   named task rebuilds it every [`ROSTER_REFRESH_INTERVAL`] from
+/// - `players.roster` — an initial snapshot is registered here; the
+///   `players.roster-refresh` unit (spawned with the rest of the boot
+///   units) then rebuilds it every [`ROSTER_REFRESH_INTERVAL`] from
 ///   `proxy_state.roster` (the accept/login pipeline owns that roster;
 ///   it is authoritative for the live play-state population). The host
 ///   function reads the registered snapshot, so this interval is the
-///   staleness bound a plugin can observe. The swap happens only when the
-///   snapshot changed, via remove+register: a registration over an
+///   staleness bound a plugin can observe. The swap happens only when
+///   the snapshot changed, via remove+register: a registration over an
 ///   existing key logs a warning in the registry, and a player join/part
 ///   is not one.
 /// - `players.ping_sink` — deliberately **not** registered. The play
@@ -546,45 +1056,24 @@ fn roster_snapshot(state: &ProxyState) -> Vec<PlayerRef> {
 ///   registration order. With no `[servers]` configured the key stays
 ///   absent and the host function falls back to `["local"]`; the reload
 ///   path re-registers (or removes) the names next to the router swap.
+// ipc-migration: Proxy.Stats / Router.Names / Roster.Snapshot — all three keys exist only for the host-function path and become capability calls in the IPC phase
 fn register_plugin_host_services(
     registry: &ServiceRegistry,
-    service: &TaskService,
     proxy_state: &Arc<ProxyState>,
     router: Option<&BackendRegistry>,
     dispatcher: &Arc<ProxyEventDispatcher>,
 ) {
+    // ipc-migration: Plugins.CallApi — the registry fans plugin callApi out to this dispatcher instance
     registry.register_service(
         DISPATCHER_SERVICE_KEY.to_owned(),
         Arc::clone(dispatcher) as Arc<dyn std::any::Any + Send + Sync>,
     );
 
+    // ipc-migration: Roster.Snapshot — read straight off the shared proxy state
     let roster = roster_snapshot(proxy_state);
     registry.register_service(
         PLAYERS_ROSTER_KEY.to_owned(),
-        Arc::new(roster.clone()) as Arc<dyn std::any::Any + Send + Sync>,
-    );
-    let mut last_registered = roster;
-    let roster_state = Arc::clone(proxy_state);
-    let roster_registry = registry.clone();
-    service.every(
-        "players.roster-refresh",
-        ROSTER_REFRESH_INTERVAL,
-        move || {
-            // the comparison is cheap (a few small strings), so it happens
-            // synchronously in the factory and the returned future is empty
-            let current = roster_snapshot(&roster_state);
-            if current != last_registered {
-                // swap without the registry's replace warning: a join/part
-                // is normal traffic, not an operator-actionable event
-                roster_registry.remove_service::<Vec<PlayerRef>>(PLAYERS_ROSTER_KEY);
-                roster_registry.register_service(
-                    PLAYERS_ROSTER_KEY.to_owned(),
-                    Arc::new(current.clone()) as Arc<dyn std::any::Any + Send + Sync>,
-                );
-                last_registered = current;
-            }
-            async {}
-        },
+        Arc::new(roster) as Arc<dyn std::any::Any + Send + Sync>,
     );
 
     if let Some(router) = router {
@@ -592,6 +1081,7 @@ fn register_plugin_host_services(
             .iter()
             .map(|backend| backend.name().to_owned())
             .collect();
+        // ipc-migration: Router.Names — read straight off the backend registry
         registry.register_service(
             SERVERS_NAMES_KEY.to_owned(),
             Arc::new(names) as Arc<dyn std::any::Any + Send + Sync>,
@@ -599,7 +1089,8 @@ fn register_plugin_host_services(
     }
 }
 
-/// Log one compact stats line for the periodic task.
+/// Log one compact stats line for the periodic unit.
+// ipc-migration: Proxy.Stats (reads ProxyState counters and limiter directly)
 fn log_stats(state: &ProxyState, router: Option<&BackendRegistry>) {
     let (backends_online, backends_total) = match router {
         Some(router) => (
@@ -669,6 +1160,7 @@ fn refresh_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) -> boo
 /// `servers.names` host service and the favicon are only swapped when
 /// their own rebuild succeeds, so a half-applied reload cannot leak out.
 /// Returns an operator-facing note on success.
+// ipc-migration: Config.Reload / Route.Replace / I18n.Reload — the phase swaps shared state straight across subsystem boundaries
 fn reload_config_phase(
     store: &ConfigStore,
     config_path: &Path,
@@ -685,9 +1177,11 @@ fn reload_config_phase(
     // backends: rebuild the registry from the new configuration and swap
     // it atomically; on failure the previous routing stays in place
     if config.servers.servers.is_empty() {
+        // ipc-migration: Route.Replace (swap-through-the-shared-state path)
         proxy_state.set_router(None);
         // mirror a fresh start with no [servers]: the key goes away and
         // listServers keeps its documented ["local"] fallback
+        // ipc-migration: Router.Names — the key is host-function-facing; swap and delete both ride the registry
         services.remove_service::<Vec<String>>(SERVERS_NAMES_KEY);
         notes.push("routing disabled (no [servers] configured)".to_owned());
     } else {
@@ -698,10 +1192,12 @@ fn reload_config_phase(
                     .map(|backend| backend.name().to_owned())
                     .collect();
                 let count = names.len();
+                // ipc-migration: Route.Replace (swap-through-the-shared-state path)
                 proxy_state.set_router(Some(Arc::new(registry)));
                 // keep the plugin-facing name list on the same swap, so a
                 // plugin never sees names that no longer route; remove+register
                 // to skip the registry's replace warning
+                // ipc-migration: Router.Names — same swap, host-function-facing
                 services.remove_service::<Vec<String>>(SERVERS_NAMES_KEY);
                 services.register_service(
                     SERVERS_NAMES_KEY.to_owned(),
@@ -723,6 +1219,7 @@ fn reload_config_phase(
         notes.push("favicon refreshed".to_owned());
     }
 
+    // ipc-migration: I18n.Reload — re-reads the locale tables in place
     match locales.reload() {
         Ok(()) => notes.push("locales reloaded".to_owned()),
         Err(error) => {
@@ -737,6 +1234,7 @@ fn reload_config_phase(
 /// Reload the plugin phase: re-stage every running plugin from disk and
 /// register newcomers found under the roots. The running set survives
 /// any failure — broken replacements never evict a working instance.
+// ipc-migration: Plugins.Reload — the phase reaches the plugin set, the shared registry and the cache across subsystem boundaries
 fn reload_plugins_phase(
     store: &ConfigStore,
     data_dir: &Path,
@@ -808,6 +1306,7 @@ fn reload_plugins_phase(
 /// The closure is synchronous and total: every failure is reported through
 /// the returned report, never panicked. Scope selects the phases; the
 /// default scope is both, config first.
+// ipc-migration: Config.Reload / Plugins.Reload — ReloadFn runs synchronously on the REPL's blocking thread
 #[allow(clippy::too_many_arguments)]
 fn build_reload_fn(
     store: Arc<ConfigStore>,
@@ -1004,5 +1503,93 @@ pub fn run_to_exit_code(args: Args) -> ExitCode {
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_tree() -> Init {
+        let service = TaskService::builder()
+            .handle(tokio::runtime::Handle::current())
+            .blocking_threads(1)
+            .build()
+            .expect("service builds");
+        Init::new(service)
+    }
+
+    async fn wait_zombies(tree: &Init, want: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if tree.zombie_count() == want {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for zombies"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+
+    #[test]
+    fn exit_is_failure_covers_the_failure_vocabulary() {
+        assert!(exit_is_failure(&ExitStatus::failure("x")));
+        assert!(exit_is_failure(&ExitStatus::Panicked));
+        assert!(exit_is_failure(&ExitStatus::TimedOut));
+        assert!(!exit_is_failure(&ExitStatus::Success));
+        assert!(!exit_is_failure(&ExitStatus::Cancelled));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unit_failure_detail_reports_failed_units_only() {
+        let tree = test_tree();
+        tree.spawn_unit(
+            Pid::INIT,
+            UnitSpec::new(
+                "test.fails",
+                UnitKind::Oneshot,
+                RestartPolicy::Never,
+                || async { ExitStatus::failure("boom") },
+            ),
+        )
+        .expect("failing unit spawns");
+        tree.spawn_unit(
+            Pid::INIT,
+            UnitSpec::new(
+                "test.ok",
+                UnitKind::Oneshot,
+                RestartPolicy::Never,
+                || async { ExitStatus::Success },
+            ),
+        )
+        .expect("succeeding unit spawns");
+        wait_zombies(&tree, 2).await;
+
+        let detail = unit_failure_detail(&tree).expect("the failure must be reported");
+        assert!(detail.contains("test.fails"), "unexpected detail: {detail}");
+        // both zombies were harvested; the ring holds both exits
+        assert_eq!(tree.zombie_count(), 0);
+        assert_eq!(tree.recent_exits(2).len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unit_failure_detail_stays_silent_without_failures() {
+        let tree = test_tree();
+        tree.spawn_unit(
+            Pid::INIT,
+            UnitSpec::new(
+                "test.ok",
+                UnitKind::Oneshot,
+                RestartPolicy::Never,
+                || async { ExitStatus::Success },
+            ),
+        )
+        .expect("succeeding unit spawns");
+        wait_zombies(&tree, 1).await;
+
+        assert!(unit_failure_detail(&tree).is_none());
+        assert_eq!(tree.zombie_count(), 0);
     }
 }

@@ -24,6 +24,10 @@
 //!   explicit grant installed at spawn; envelopes are type-erased inside
 //!   the tree and downcast on the callee, mismatches are errors plus
 //!   metrics, never panics. See [`Init::call`].
+//! - **bootstrap adoption** — loader-phase steps that completed before the
+//!   tree could exist are registered as already-exited units carrying
+//!   their outcome (see [`Init::adopt_unit`]); they are born as zombies
+//!   and flow through the same reaping path as everything else.
 //!
 //! Everything that runs, runs through the task service; nothing in this
 //! crate spawns tasks or threads ad hoc. Unit bodies are re-created from a

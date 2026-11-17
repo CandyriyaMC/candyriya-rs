@@ -62,6 +62,7 @@ impl CliDirectory {
 
 impl CliDirectory {
     /// The live roster as command-layer players, sorted by name.
+    // ipc-migration: Roster.Snapshot (the players roster is read straight off the proxy state)
     fn roster_players(&self) -> Vec<OnlinePlayer> {
         self.state
             .roster
@@ -88,6 +89,7 @@ impl NetworkDirectory for CliDirectory {
     fn servers(&self) -> Vec<ServerInfo> {
         // the store hands out a point-in-time snapshot; reload swaps it
         // atomically, so this always reflects the latest committed config
+        // ipc-migration: Config.Get (read straight off the config store)
         let config = self.config.get();
         let mut servers: Vec<ServerInfo> = config
             .servers
@@ -119,6 +121,7 @@ impl NetworkDirectory for CliDirectory {
     }
 
     fn snapshot(&self) -> ProxySnapshot {
+        // ipc-migration: Roster.Snapshot / Config.Get / Route.State / Proxy.Stats (whole body reads proxy state and the config store directly)
         let players = self.roster_players();
         let config = self.config.get();
         let mut backends: Vec<BackendSnapshot> = config
