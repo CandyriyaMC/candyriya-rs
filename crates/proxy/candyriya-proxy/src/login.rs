@@ -104,6 +104,7 @@ use candyriya_forwarding::{
     clean_ipv6_scope, create_forwarding_data, create_legacy_forwarding_address,
 };
 use candyriya_player::GameProfile;
+use candyriya_plugin_api::EventKind;
 use candyriya_protocol::{
     Handshake, Intent, MAX_PACKET_SIZE, Packet, decode_varint, parse_login_start_name, read_string,
     write_string, write_varint,
@@ -113,6 +114,7 @@ use candyriya_route::{Backend, BackendState};
 
 use crate::ProxyError;
 use crate::accept::ProxyState;
+use crate::events;
 use crate::handshake::HandshakeResult;
 use crate::limit::ConnectionSlot;
 use crate::registry::embedded_registry;
@@ -141,7 +143,7 @@ const VERIFY_TOKEN_LEN: usize = 4;
 /// Clamp for client-facing kick reasons. Backends' own disconnect reasons
 /// are user-facing text, we just make sure they cannot grow the frame
 /// unboundedly; the remaining bytes are cut at a char boundary.
-const MAX_KICK_REASON_CHARS: usize = 256;
+pub(crate) const MAX_KICK_REASON_CHARS: usize = 256;
 
 /// One backend-attempt window: `[advanced] connection-timeout` plus five
 /// seconds of headroom. Every blocking read in the login phase is bounded
@@ -160,6 +162,18 @@ enum Attempt {
     Done { backend: TcpStream },
     /// The client connection is gone (or its socket died); nothing to do.
     ClientGone,
+    /// A plugin vetoed the `login` event, so the Login Success the
+    /// backend just produced is never forwarded to the client. The
+    /// message is built once (plugin's reason verbatim, or the localized
+    /// generic one) and reused for the client-facing login disconnect and
+    /// for the kick/disconnect events plugins see. Never falls back to
+    /// another backend — the veto names the player, not the server.
+    LoginRefused {
+        /// Carrier-free reason for the events and the kick fallback.
+        event_reason: String,
+        /// The Text Component JSON the login disconnect carries.
+        packet_json: String,
+    },
     /// The backend kicked the player (or is not viable); the chain moves
     /// on. The string is the backend's reason when it kicked, or a
     /// diagnostic otherwise (for logs and the final disconnect).
@@ -201,6 +215,10 @@ pub async fn handle_login(
 
 /// The whole login exchange. Split from [`handle_login`] so the entry
 /// point stays a trivial forward; the budgets are armed inside.
+///
+/// The body is [`login_flow_inner`]; this wrapper exists so the
+/// `disconnect` event fires from exactly one place, with whatever the
+/// flow managed to learn about the session on its way out.
 async fn login_flow(
     state: &ProxyState,
     stream: &mut TcpStream,
@@ -208,6 +226,25 @@ async fn login_flow(
     conn_id: u64,
     handshake: &HandshakeResult,
     slot: &ConnectionSlot,
+) -> Result<(), ProxyError> {
+    let mut session = events::SessionSummary::default();
+    let result =
+        login_flow_inner(state, stream, peer, conn_id, handshake, slot, &mut session).await;
+    events::fire_disconnect(state, &session);
+    result
+}
+
+/// The login pipeline proper; see the module docs for the contract.
+/// `session` is filled in as the flow advances and read once the inner
+/// call returns — it is what the `disconnect` event reports.
+async fn login_flow_inner(
+    state: &ProxyState,
+    stream: &mut TcpStream,
+    peer: SocketAddr,
+    conn_id: u64,
+    handshake: &HandshakeResult,
+    slot: &ConnectionSlot,
+    session: &mut events::SessionSummary,
 ) -> Result<(), ProxyError> {
     if embedded_registry().is_none() {
         // build bug: the compiled-in tables are invalid. Loud in the log,
@@ -244,11 +281,22 @@ async fn login_flow(
     frame_body.extend_from_slice(&login_start.payload);
     let name = parse_login_start_name(&frame_body)
         .map_err(|error| ProxyError::BadPacket(error.to_string()))?;
+    // the account now announces itself; from here on every kick and the
+    // final disconnect can name it
+    session.name = Some(name.clone());
 
     // ---- 2. username validation
     if let Err(error) = validate_username(&name) {
         debug!(conn = conn_id, %peer, name = %name, %error, "rejected invalid username");
-        send_disconnect(stream, &mut client, handshake.protocol, "Invalid username").await;
+        kick(
+            state,
+            stream,
+            &mut client,
+            handshake.protocol,
+            session,
+            "Invalid username",
+        )
+        .await;
         return Ok(());
     }
 
@@ -261,7 +309,15 @@ async fn login_flow(
     {
         Ok(Ok(profile)) => profile,
         Ok(Err(ProfileError::Disconnected(reason))) => {
-            send_disconnect(stream, &mut client, handshake.protocol, &reason).await;
+            kick(
+                state,
+                stream,
+                &mut client,
+                handshake.protocol,
+                session,
+                &reason,
+            )
+            .await;
             return Ok(());
         }
         Ok(Err(ProfileError::Fatal(error))) => return Err(error),
@@ -270,15 +326,52 @@ async fn login_flow(
             return Ok(());
         }
     };
+    session.uuid = Some(profile.id.to_string());
+
+    // ---- 3.5. the plugins get their say before any backend is contacted.
+    // a veto denies the join: the client is kicked with the plugin's
+    // reason and no backend ever sees this player
+    if let Some(result) = events::fire(
+        state,
+        EventKind::ConnectionAllowed {
+            uuid: profile.id.to_string(),
+            name: profile.name.clone(),
+            protocol: u32::try_from(handshake.protocol).unwrap_or(0),
+            // the client link carries no proxy-side address resolution,
+            // so the peer address is what the client connected from
+            address: peer.to_string(),
+        },
+    ) && result.cancelled
+    {
+        let kick_message = events::plugin_cancel_kick(state, result.cancel_reason.as_deref());
+        debug!(
+            conn = conn_id,
+            %peer,
+            reason = %kick_message.event_reason,
+            "a plugin denied the connection"
+        );
+        veto_kick(
+            state,
+            stream,
+            &mut client,
+            handshake.protocol,
+            session,
+            kick_message,
+        )
+        .await;
+        return Ok(());
+    }
 
     // ---- 4. routing: forced host matches first, else the try chain
     let backends = route_backends(state, &handshake.server_address);
     if backends.is_empty() {
         warn!(conn = conn_id, %peer, "no backend available for this host; disconnecting");
-        send_disconnect(
+        kick(
+            state,
             stream,
             &mut client,
             handshake.protocol,
+            session,
             "No available server",
         )
         .await;
@@ -294,14 +387,50 @@ async fn login_flow(
     let overall = per_attempt.saturating_mul(backends.len() as u32) + Duration::from_secs(1);
     let deadline = Instant::now() + overall;
     let mut last_reason: Option<String> = None;
-    for backend in backends {
+    for index in 0..backends.len() {
+        let backend = backends[index].clone();
+        let backend_name = backend.name().to_owned();
+        // a kick fallback is also a server switch, from the unreachable
+        // backend to the next candidate: plugins get their veto before
+        // the proxy ever dials out
+        if index > 0 {
+            let from = backends[index - 1].name().to_owned();
+            if let Some((uuid, name)) = session.event_identity()
+                && let Some(result) = events::fire(
+                    state,
+                    EventKind::SwitchServer {
+                        uuid,
+                        name: name.to_owned(),
+                        from_server: from.clone(),
+                        to_server: backend_name.clone(),
+                    },
+                )
+                && result.cancelled
+            {
+                let reason = result
+                    .cancel_reason
+                    .unwrap_or_else(|| events::PLUGIN_CANCELLED_EVENT_REASON.to_owned());
+                debug!(
+                    conn = conn_id,
+                    %peer,
+                    from = %from,
+                    to = %backend_name,
+                    reason = %reason,
+                    "a plugin denied the kick-fallback hop; skipping this backend"
+                );
+                // the hop is denied, not the player: the chain
+                // moves on and the final disconnect (when nothing
+                // is left) carries this reason
+                last_reason = Some(reason);
+                continue;
+            }
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             last_reason = Some("backend timed out".to_owned());
             break;
         }
         let window = remaining.min(per_attempt);
-        let backend_name = backend.name().to_owned();
         let outcome = timeout(
             window,
             attempt_backend(
@@ -324,6 +453,7 @@ async fn login_flow(
                 // passes through untouched, and the backend never carries
                 // a cipher — drop it on the floor
                 info!(conn = conn_id, %peer, "conn={conn_id} transitioning to play state");
+                session.server = Some(backend_name.clone());
                 state
                     .roster
                     .insert(conn_id, profile.id, &profile.name, Some(backend_name));
@@ -344,16 +474,47 @@ async fn login_flow(
                     write_stall,
                 )
                 .await;
+                // a clean or torn-down play state ends the session; the
+                // wrapper fires the disconnect event with this summary
                 return Ok(());
             }
             Ok(Attempt::ClientGone) => return Ok(()),
-            Ok(Attempt::SecurityViolation(reason)) => {
-                // security violation: refuse, never fall back
-                warn!(conn = conn_id, %peer, %reason, "backend completed login without the forwarding exchange; disconnecting");
-                send_disconnect(
+            Ok(Attempt::LoginRefused {
+                event_reason,
+                packet_json,
+            }) => {
+                // a plugin vetoed the login event after the backend
+                // completed login; the client never sees the Login
+                // Success — it gets the plugin's words instead
+                warn!(
+                    conn = conn_id,
+                    %peer,
+                    reason = %event_reason,
+                    "a plugin denied the login; disconnecting without entering the play state"
+                );
+                veto_kick(
+                    state,
                     stream,
                     &mut client,
                     handshake.protocol,
+                    session,
+                    events::KickMessage {
+                        event_reason,
+                        packet_json,
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+            Ok(Attempt::SecurityViolation(reason)) => {
+                // security violation: refuse, never fall back
+                warn!(conn = conn_id, %peer, %reason, "backend completed login without the forwarding exchange; disconnecting");
+                kick(
+                    state,
+                    stream,
+                    &mut client,
+                    handshake.protocol,
+                    session,
                     "Unable to connect to a server",
                 )
                 .await;
@@ -372,7 +533,15 @@ async fn login_flow(
     }
 
     let reason = last_reason.unwrap_or_else(|| "No available server".to_owned());
-    send_disconnect(stream, &mut client, handshake.protocol, &reason).await;
+    kick(
+        state,
+        stream,
+        &mut client,
+        handshake.protocol,
+        session,
+        &reason,
+    )
+    .await;
     Ok(())
 }
 
@@ -695,6 +864,28 @@ async fn attempt_backend(
                         backend.name()
                     ));
                 }
+                // fire the login event here: the backend completed login
+                // (the forwarding exchange is acked — the backend only
+                // answers Login Success after it), but the client has not
+                // been told yet. A veto denies the login before it
+                // happens: no Login Success is forwarded, no session ever
+                // enters the play state, and the client gets the plugin's
+                // words as the disconnect reason instead.
+                if let Some(result) = events::fire(
+                    state,
+                    EventKind::Login {
+                        uuid: profile.id.to_string(),
+                        name: profile.name.clone(),
+                        protocol_version: u32::try_from(protocol).unwrap_or(0),
+                    },
+                ) && result.cancelled
+                {
+                    let kick = events::plugin_cancel_kick(state, result.cancel_reason.as_deref());
+                    return Attempt::LoginRefused {
+                        event_reason: kick.event_reason,
+                        packet_json: kick.packet_json,
+                    };
+                }
                 // forward the Login Success verbatim to the client; the
                 // frame is version-agnostic passthrough
                 if wire::write_packet(stream, client, packet).await.is_err() {
@@ -780,11 +971,22 @@ async fn handle_plugin_request(
 /// JSON component. Best effort: a client that cannot be reached is fine.
 async fn send_disconnect(stream: &mut TcpStream, client: &mut Wire, protocol: i32, reason: &str) {
     let reason_json = serde_json::json!({ "text": clamp_reason(reason) }).to_string();
+    send_disconnect_component(stream, client, protocol, reason_json).await;
+}
+
+/// Send a login disconnect with an already-serialized Text Component.
+/// Best effort: a client that cannot be reached is fine.
+async fn send_disconnect_component(
+    stream: &mut TcpStream,
+    client: &mut Wire,
+    protocol: i32,
+    component_json: String,
+) {
     let Some(disconnect_id) = registry_id(protocol, PacketSlot::LoginClientboundDisconnect) else {
         return;
     };
     let mut payload = BytesMut::new();
-    if write_string(&mut payload, &reason_json, MAX_PACKET_SIZE).is_err() {
+    if write_string(&mut payload, &component_json, MAX_PACKET_SIZE).is_err() {
         return;
     }
     let packet = Packet {
@@ -793,6 +995,40 @@ async fn send_disconnect(stream: &mut TcpStream, client: &mut Wire, protocol: i3
     };
     // a best-effort write; the connection closes regardless of the outcome
     let _ = wire::write_packet(stream, client, packet).await;
+}
+
+/// Kick a client that reached the login pipeline: fire the
+/// `connection_kicked` event (the plugins want to know why the door
+/// closed) and then send the login disconnect. `reason` is the plain
+/// carrier-free text the client is shown; it is also what plugins see.
+async fn kick(
+    state: &ProxyState,
+    stream: &mut TcpStream,
+    client: &mut Wire,
+    protocol: i32,
+    session: &mut events::SessionSummary,
+    reason: &str,
+) {
+    events::fire_kicked(state, session, reason);
+    session.reason = Some(reason.to_owned());
+    send_disconnect(stream, client, protocol, reason).await;
+}
+
+/// Kick a client out through the plugin-veto path: one `KickMessage`
+/// feeds the `connection_kicked` event, the login disconnect packet and
+/// the `disconnect` event at the end of the connection — the plugin's
+/// words (or the localized fallback) are what the client is shown.
+async fn veto_kick(
+    state: &ProxyState,
+    stream: &mut TcpStream,
+    client: &mut Wire,
+    protocol: i32,
+    session: &mut events::SessionSummary,
+    kick: events::KickMessage,
+) {
+    events::fire_kicked(state, session, &kick.event_reason);
+    session.reason = Some(kick.event_reason);
+    send_disconnect_component(stream, client, protocol, kick.packet_json).await;
 }
 
 /// Truncate a backend-provided kick reason at a char boundary.

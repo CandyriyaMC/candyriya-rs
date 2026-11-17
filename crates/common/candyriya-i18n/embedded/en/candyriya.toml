@@ -45,6 +45,7 @@
 "candyriya.kick.forced_host_not_found" = "<red>No server found for this address: <gold>{host}<reset><reset>"
 "candyriya.kick.maintenance" = "<red>Kicked: the proxy is in maintenance mode.<reset>"
 "candyriya.kick.never_authenticated" = "<red>Could not authenticate your connection.<reset>"
+"candyriya.kick.plugin_cancelled" = "<red>Kicked by a plugin.<reset>"
 "candyriya.kick.server_full" = "<red>The server is full.<reset>"
 "candyriya.kick.shutdown" = "<red>The proxy is shutting down. Please reconnect later.<reset>"
 "candyriya.kick.transfer_unavailable" = "<red>Transfers are not available on this proxy.<reset>"

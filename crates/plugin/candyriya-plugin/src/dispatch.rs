@@ -1,7 +1,7 @@
 //! Fan-out of game events into the loaded plugins.
 //!
 //! [`ProxyEventDispatcher`] takes a [`ProxyEvent`], sends the serialized
-//! [`EventEnvelope`] to every *loaded* plugin in load order, and collects
+//! [`EventEnvelope`](candyriya_plugin_api::EventEnvelope) to every *loaded* plugin in load order, and collects
 //! what came back. A plugin is expected to export `on_event`; the payload
 //! crosses the ABI as one flat JSON document and the answer is read back
 //! as an [`OutcomeReport`] (`{"cancelled":true,"cancel_reason":"..."}`).
@@ -40,6 +40,12 @@
 //!   path for one plugin to reach another plugin's `[api].exports`; host
 //!   functions use it instead of touching the plugin set themselves.
 //!
+//! The aggregate types — [`Outcome`] and [`DispatchResult`] — and the
+//! [`EventDispatcher`](candyriya_plugin_api::EventDispatcher) handle the
+//! proxy stores are defined in `candyriya-plugin-api` and re-exported from
+//! this crate (`candyriya_plugin::{Outcome, DispatchResult}`), so the
+//! proxy can fire events without depending on the wasm runtime.
+//!
 //! The read guard on the plugin set is held for the whole dispatch;
 //! [`crate::PluginReloader`] therefore waits for in-flight dispatches
 //! before swapping a plugin instance. A dispatch holds it across wasm
@@ -48,7 +54,8 @@
 
 use std::time::Duration;
 
-use candyriya_plugin_api::{OutcomeReport, ProxyEvent};
+pub use candyriya_plugin_api::{DispatchResult, Outcome};
+use candyriya_plugin_api::{EventDispatcher, OutcomeReport, ProxyEvent};
 
 use crate::error::PluginError;
 use crate::instance::PluginInstance;
@@ -83,58 +90,6 @@ pub enum CallApiError {
     /// The call into the target failed or timed out.
     #[error("{0}")]
     Call(String),
-}
-
-/// What came back from one plugin for one event.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
-    /// The plugin ran and did not cancel the event.
-    Allowed,
-    /// The plugin ran and cancelled the event, with an optional reason.
-    Cancelled {
-        /// The human-readable reason the plugin gave, if any.
-        cancel_reason: Option<String>,
-    },
-    /// The plugin did not answer within the timeout. Treated as not
-    /// cancelling; logged as an error.
-    Timeout,
-    /// The call failed or the answer was not a valid outcome report.
-    /// The string is a human-readable diagnosis.
-    Failed {
-        /// What went wrong, for logs.
-        error: String,
-    },
-}
-
-/// The aggregate result of one event dispatch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DispatchResult {
-    /// `true` when at least one plugin cancelled the event.
-    pub cancelled: bool,
-    /// The reason given by the first cancelling plugin in load order, if
-    /// any. `None` when nothing cancelled or the cancelling plugin gave
-    /// no reason.
-    pub cancel_reason: Option<String>,
-    /// One `(plugin_id, outcome)` pair per loaded plugin, in load order.
-    pub per_plugin_outcomes: Vec<(String, Outcome)>,
-}
-
-impl DispatchResult {
-    /// How many plugins answered with `allowed`.
-    pub fn allowed_count(&self) -> usize {
-        self.per_plugin_outcomes
-            .iter()
-            .filter(|(_, outcome)| matches!(outcome, Outcome::Allowed))
-            .count()
-    }
-
-    /// The outcome reported by a specific plugin, if it was dispatched to.
-    pub fn outcome_for(&self, plugin: &str) -> Option<&Outcome> {
-        self.per_plugin_outcomes
-            .iter()
-            .find(|(id, _)| id == plugin)
-            .map(|(_, outcome)| outcome)
-    }
 }
 
 /// Fans events out into the loaded plugin set.
@@ -214,11 +169,7 @@ impl ProxyEventDispatcher {
             Ok(payload) => payload,
             Err(error) => {
                 tracing::error!(%error, "failed to serialize the event envelope; dispatch skipped");
-                return DispatchResult {
-                    cancelled: false,
-                    cancel_reason: None,
-                    per_plugin_outcomes: Vec::new(),
-                };
+                return DispatchResult::default();
             }
         };
 
@@ -305,6 +256,14 @@ fn call_target(
     let _ = instance.take_pending_outcome();
     instance.set_caller_plugin_id(previous);
     result.map_err(|error| CallApiError::Call(error.to_string()))
+}
+
+// the proxy stores this as an `Arc<dyn EventDispatcher>` and never names
+// the runtime crate, so the contract is implemented once here
+impl EventDispatcher for ProxyEventDispatcher {
+    fn dispatch_event(&self, event: &ProxyEvent) -> DispatchResult {
+        self.dispatch_cancellable(event)
+    }
 }
 
 fn dispatch_one(

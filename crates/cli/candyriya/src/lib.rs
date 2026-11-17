@@ -49,8 +49,10 @@ use candyriya_command::{CommandRegistry, CommandState, ShutdownHandle};
 use candyriya_config::{Config, ConfigStore, DEFAULT_CONFIG_TOML};
 use candyriya_i18n::I18n;
 use candyriya_plugin::{
-    LimitBuilder, PluginLoader, PluginReloader, PluginSet, ServiceRegistry, resolve_plugins,
+    DISPATCHER_SERVICE_KEY, LimitBuilder, PluginLoader, PluginReloader, PluginSet,
+    ProxyEventDispatcher, ServiceRegistry, resolve_plugins,
 };
+use candyriya_plugin_api::EventDispatcher;
 use candyriya_proxy::{FaviconCache, ProxySocket, ProxyState, SocketConfig, serve};
 use candyriya_route::BackendRegistry;
 use candyriya_scheduler::TaskService;
@@ -348,12 +350,32 @@ async fn run_async(
         );
     }
 
+    // ---- plugins: startup load (before the proxy state is built: the
+    // shared dispatcher gets wired into it at construction time)
+    let plugin_set = load_plugins(data_dir, &config, &cache);
+    registry.register_service(
+        "plugins.set".to_string(),
+        Arc::clone(&plugin_set) as Arc<dyn std::any::Any + Send + Sync>,
+    );
+    // one dispatcher per process: the registry carries it for the host
+    // functions, the proxy state carries it for the lifecycle events —
+    // both hold handles to the same instance, so `/candyriya reload`
+    // swaps what they both see without any re-registration
+    let event_dispatcher = Arc::new(ProxyEventDispatcher::new((*plugin_set).clone()));
+    registry.register_service(
+        DISPATCHER_SERVICE_KEY.to_string(),
+        Arc::clone(&event_dispatcher) as Arc<dyn std::any::Any + Send + Sync>,
+    );
+    let kick_i18n = build_kick_i18n(data_dir, &config)?;
+
     // ---- shared proxy state
     let started = Instant::now();
     let mut proxy_state = ProxyState::new(Arc::clone(&config));
     proxy_state.auth = auth;
     proxy_state.set_router(router.clone());
     proxy_state.favicon_cache = favicon_cache.clone();
+    proxy_state.event_dispatcher = Some(event_dispatcher as Arc<dyn EventDispatcher>);
+    proxy_state.event_i18n = Some(Arc::new(kick_i18n));
     let proxy_state = Arc::new(proxy_state);
 
     // ---- command tree: the registry itself is built after the plugin set
@@ -373,13 +395,6 @@ async fn run_async(
         directory: directory as Arc<dyn candyriya_command::NetworkDirectory>,
         effects: effects.clone() as Arc<dyn candyriya_command::ProxyEffects>,
     };
-
-    // ---- plugins: startup load
-    let plugin_set = load_plugins(data_dir, &config, &cache);
-    registry.register_service(
-        "plugins.set".to_string(),
-        Arc::clone(&plugin_set) as Arc<dyn std::any::Any + Send + Sync>,
-    );
 
     // ---- hot reload: the same machinery, on demand
     let reload_fn = build_reload_fn(
@@ -701,6 +716,31 @@ fn warm_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) {
         return;
     }
     let _ = refresh_favicon(config, Some(cache));
+}
+
+/// Build the locale handle the proxy uses to render kick screens for
+/// plugin-vetoed actions.
+///
+/// Same shape as the command locales: the configured locale, with the
+/// data-dir `locales/` overrides layered on top when the directory
+/// exists. An unusable override directory degrades to the embedded
+/// tables with a warning; an embedded failure is a build defect and
+/// fails hard, exactly like [`build_locales`].
+fn build_kick_i18n(data_dir: &Path, config: &Config) -> Result<I18n, CliError> {
+    let dir = data_dir.join("locales");
+    match I18n::with_override_dir(&config.locale, &dir) {
+        Ok(i18n) => Ok(i18n),
+        Err(error) => {
+            warn!(
+                %error,
+                locale = %config.locale,
+                "failed to build the kick locale from the override directory; using the embedded default"
+            );
+            I18n::new("en").map_err(|embedded| {
+                CliError::Runtime(format!("embedded locales are broken: {embedded}"))
+            })
+        }
+    }
 }
 
 /// Build the command locales.

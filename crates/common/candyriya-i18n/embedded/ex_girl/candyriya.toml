@@ -44,6 +44,7 @@
 "candyriya.kick.forced_host_not_found" = "<red>По адресу <gold>{host}<reset> нет ни одного сервера. Совсем. Написано же — форсировано, а не предсказано<reset>"
 "candyriya.kick.maintenance" = "<red>Меня чинят. Зайди попозже, если остынешь<reset>"
 "candyriya.kick.never_authenticated" = "<red>Сессия не авторизована. Так нельзя. Возвращайся как положено<reset>"
+"candyriya.kick.plugin_cancelled" = "<red>Тебя выкинул плагин. Без объяснений<reset>"
 "candyriya.kick.server_full" = "<red>Мест нет. Совсем. Не «почти нет», а п*здец как нет<reset>"
 "candyriya.kick.shutdown" = "<red>Нас выключают. Какое совпадение. Потом заходи, если пустят<reset>"
 "candyriya.kick.transfer_unavailable" = "<red>Переводы тут недоступны. Просто недоступны, не спрашивай почему<reset>"

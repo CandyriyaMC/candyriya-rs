@@ -82,3 +82,4 @@ pub use crate::manifest::{DuplicateId, DuplicatePluginIds, PluginManifest, valid
 pub use crate::plugin_loader::{LoadIssue, LoadReport, PluginLoader};
 pub use crate::plugin_set::PluginSet;
 pub use crate::service_registry::ServiceRegistry;
+pub use candyriya_plugin_api::EventDispatcher;

@@ -26,6 +26,12 @@
 //!   Set Compression, modern `velocity:player_info` forwarding (BungeeGuard
 //!   and legacy included) or Login Disconnect, forwarding the Login Success
 //!   verbatim to the client.
+//! - **The plugin lifecycle events** (`events`): the proxy fires the typed
+//!   [`candyriya_plugin_api::ProxyEvent`] into the loaded plugin set at the
+//!   connection-allowed, login, kick, switch-server (kick-fallback hop) and
+//!   disconnect points, and honors a plugin's veto by denying the action
+//!   and kicking the client with the plugin's reason. Wired by the
+//!   composition root; a no-op without a dispatcher.
 //! - The **play-state hot path**: once the Login Success has been
 //!   delivered, the proxy stops parsing packets and copies bytes
 //!   bidirectionally between the two sockets (AES-128-CFB8 carried over
@@ -69,6 +75,7 @@
 use std::io;
 
 mod accept;
+mod events;
 mod handshake;
 mod limit;
 mod login;

@@ -43,6 +43,10 @@
 //! - [`LoginEvent`] / [`KickEvent`] / [`DisconnectEvent`] /
 //!   [`ConnectAllowedEvent`] / [`SwitchServerEvent`] — convenience
 //!   aliases for [`ProxyEvent`], one per game event.
+//! - [`EventDispatcher`] / [`DispatchResult`] / [`Outcome`] — the dispatch
+//!   contract the host uses to fan events into plugins: the object-safe
+//!   handle the proxy stores, and the aggregate it acts on. Implemented
+//!   by `candyriya_plugin::ProxyEventDispatcher`.
 //! - [`ComponentBuilder`] — fluent wrapper around lobsterchat's component
 //!   construction for the typical chat/kick/title line; components are
 //!   built, serialized and handed over whole.
@@ -81,6 +85,7 @@
 #![forbid(unsafe_code)]
 
 mod bossbar;
+mod dispatch;
 mod events;
 mod host;
 mod kick;
@@ -95,6 +100,7 @@ mod wire;
 pub use crate::bossbar::{
     BossBarAction, BossBarColor, BossBarDivision, BossBarFlag, BossBarFlags, BossBarPacket,
 };
+pub use crate::dispatch::{DispatchResult, EventDispatcher, Outcome};
 pub use crate::events::{
     ConnectAllowedEvent, DisconnectEvent, EventCancellation, EventEnvelope, EventIdRegistry,
     EventKind, EventPayload, KickEvent, LoginEvent, MinecraftEvent, OutcomeReport, PlayerRef,
