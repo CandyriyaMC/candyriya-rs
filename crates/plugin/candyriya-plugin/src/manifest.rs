@@ -53,6 +53,15 @@ impl PluginManifest {
         &self.metadata.id
     }
 
+    /// Does the plugin declare a `[locales]` section?
+    ///
+    /// Declaring it opts the plugin into the
+    /// `locales/<lang>/<plugin-id>.toml` convention; the loader registers
+    /// those files into the shared i18n machine (and so does a reload).
+    pub fn has_locales(&self) -> bool {
+        self.metadata.locales.is_some()
+    }
+
     /// The name of the wasm export the host calls when the plugin loads.
     pub fn plugin_main(&self) -> &str {
         &self.metadata.plugin_main

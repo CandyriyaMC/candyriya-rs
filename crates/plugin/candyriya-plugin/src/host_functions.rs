@@ -24,6 +24,11 @@
 //! - `switchPlayer` has no backend behind it yet, so it answers with
 //!   `{"ok": false, "error": "not implemented yet"}` — an honest stub
 //!   error handed downstream to the plugin author, not a fake success.
+//! - `i18nT` resolves keys through a plugin-scoped chain — the plugin's
+//!   own locale file (active, then `en`), then the shared `common`
+//!   tables (active, then `en`), then the key itself. Only the plugin's
+//!   `plugin.<id>.*` keys plus `common.*` keys resolve; out-of-scope
+//!   keys answer with the key itself, same as a missing key.
 //!
 //! # Service keys
 //!
@@ -44,8 +49,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use candyriya_plugin_api::{
-    CallApiRequest, CallApiResponse, CancelEventRequest, CandyriyaHostApi, HostOk, LogLevel,
-    LogMessage, OutcomeReport, PlayerNameRequest, PlayerRef, SwitchPlayerRequest,
+    CallApiRequest, CallApiResponse, CancelEventRequest, CandyriyaHostApi, HostOk, I18nTRequest,
+    LogLevel, LogMessage, OutcomeReport, PlayerNameRequest, PlayerRef, SwitchPlayerRequest,
 };
 
 use crate::dispatch::ProxyEventDispatcher;
@@ -109,6 +114,22 @@ pub(crate) fn register_host_functions(
             [extism::PTR],
             UserData::new(state()),
             get_locale,
+        )
+        .with_function_in_namespace(
+            HOST_NAMESPACE,
+            "i18nT",
+            [extism::PTR],
+            [extism::PTR],
+            UserData::new(state()),
+            i18n_t,
+        )
+        .with_function_in_namespace(
+            HOST_NAMESPACE,
+            "i18nLocale",
+            [extism::PTR],
+            [extism::PTR],
+            UserData::new(state()),
+            i18n_locale,
         )
         .with_function_in_namespace(
             HOST_NAMESPACE,
@@ -182,6 +203,46 @@ impl CandyriyaHostApi for HostState {
     }
 
     fn get_locale(&self) -> String {
+        self.i18n_locale.lock().clone()
+    }
+
+    fn i18n_t(&self, request: &I18nTRequest) -> String {
+        let key = &request.key;
+        // scope gate first: a plugin only ever sees its own namespace
+        // plus the shared common table, never core or peer plugins
+        if !key_in_plugin_scope(key, &self.plugin_id) {
+            tracing::warn!(
+                plugin = %self.plugin_id,
+                key = %key,
+                "i18n key out of scope; returning the key itself",
+            );
+            return key.clone();
+        }
+        let Some(locales) = &self.locales else {
+            tracing::warn!(
+                plugin = %self.plugin_id,
+                key = %key,
+                "no i18n machine available; returning the key itself",
+            );
+            return key.clone();
+        };
+        let args: Vec<(String, String)> = request
+            .args
+            .iter()
+            .flat_map(serde_json::Map::iter)
+            .map(|(name, value)| (name.clone(), json_value_to_arg_string(value)))
+            .collect();
+        let refs: Vec<(&str, &str)> = args
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let active = self.i18n_locale.lock().clone();
+        locales
+            .pick(&active)
+            .t_for_plugin(&self.plugin_id, key, &refs)
+    }
+
+    fn i18n_locale(&self) -> String {
         self.i18n_locale.lock().clone()
     }
 
@@ -280,6 +341,31 @@ impl CandyriyaHostApi for HostState {
         subscribers.clear();
         subscribers.extend(kinds.iter().cloned());
         HostOk::ok()
+    }
+}
+
+/// Is `key` inside the namespace a plugin may address?
+///
+/// Plugins resolve their own `plugin.<id>.*` keys and the shared
+/// `common.*` keys; everything else (core `candyriya.*`, other plugins'
+/// `plugin.<other>.*`) answers with the key itself, like a missing key.
+fn key_in_plugin_scope(key: &str, plugin_id: &str) -> bool {
+    if key.starts_with("common.") {
+        return true;
+    }
+    let own = format!("plugin.{plugin_id}.");
+    key.starts_with(&own)
+}
+
+/// Render one JSON arg value as an interpolation string.
+///
+/// Strings pass through untouched; everything else is its compact JSON
+/// form (`42`, `true`, `null`, `[1,2]`). A plugin that wants the raw
+/// JSON it sent would have to interpolate it back out itself.
+fn json_value_to_arg_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -406,6 +492,34 @@ fn hello_world(
     let name = String::from_utf8_lossy(&input);
     let reply = with_state(&user_data, |state| state.hello_world(&name))?;
     output_bytes(plugin, outputs, reply.as_bytes())
+}
+
+fn i18n_t(
+    plugin: &mut CurrentPlugin,
+    inputs: &[Val],
+    outputs: &mut [Val],
+    user_data: UserData<HostState>,
+) -> Result<(), extism::Error> {
+    let bytes = input_bytes(plugin, inputs)?;
+    let parsed = with_state(&user_data, |state| {
+        parse_object_input::<I18nTRequest>(state, &bytes)
+    })?;
+    let request = match parsed {
+        Ok(request) => request,
+        Err(reason) => return output_error_json(plugin, outputs, &reason),
+    };
+    let reply = with_state(&user_data, |state| state.i18n_t(&request))?;
+    output_bytes(plugin, outputs, reply.as_bytes())
+}
+
+fn i18n_locale(
+    plugin: &mut CurrentPlugin,
+    _inputs: &[Val],
+    outputs: &mut [Val],
+    user_data: UserData<HostState>,
+) -> Result<(), extism::Error> {
+    let locale = with_state(&user_data, |state| state.i18n_locale())?;
+    output_bytes(plugin, outputs, locale.as_bytes())
 }
 
 fn get_locale(
@@ -557,6 +671,37 @@ mod tests {
 
     // mirrors the byte cap in `log_message`
     const LOG_MSG_CAP: usize = 1024;
+
+    #[test]
+    fn plugin_scope_covers_own_namespace_and_common() {
+        for key in ["plugin.my-plugin.line", "common.yes"] {
+            assert!(key_in_plugin_scope(key, "my-plugin"), "{key}");
+        }
+        for key in [
+            "plugin.other.line",
+            "plugin.my-plugin",    // no sub-key: not a key anyone should resolve
+            "candyriya.reload.ok", // core
+            "common",              // bare prefix is not common.*
+            "plugin_.my-plugin.x", // no dot after "plugin"
+        ] {
+            assert!(!key_in_plugin_scope(key, "my-plugin"), "{key}");
+        }
+    }
+
+    #[test]
+    fn json_args_render_into_placeholders() {
+        assert_eq!(
+            json_value_to_arg_string(&serde_json::json!("plain")),
+            "plain"
+        );
+        assert_eq!(json_value_to_arg_string(&serde_json::json!(42)), "42");
+        assert_eq!(json_value_to_arg_string(&serde_json::json!(true)), "true");
+        assert_eq!(json_value_to_arg_string(&serde_json::json!(null)), "null");
+        assert_eq!(
+            json_value_to_arg_string(&serde_json::json!({"a": 1})),
+            "{\"a\":1}"
+        );
+    }
 
     #[test]
     fn log_message_truncation_lands_on_a_utf8_boundary() {
