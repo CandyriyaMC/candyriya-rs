@@ -1,0 +1,68 @@
+# cargo-fuzz crate. It is a workspace member on purpose so CI can type-check
+# every target with a plain stable toolchain (`cargo check --package
+# candyriya-fuzz`); actually *running* the fuzzers needs `cargo fuzz` on a
+# nightly toolchain. See README.md in this directory.
+[package]
+name = "candyriya-fuzz"
+description = "Coverage-guided fuzz targets for the candyriya wire-format parsers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = { workspace = true }
+tokio-util = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
+candyriya-protocol-registry = { version = "0.1.0", path = "../../protocol/candyriya-protocol-registry" }
+candyriya-forwarding = { version = "0.1.0", path = "../../network/candyriya-forwarding" }
+candyriya-proxy = { version = "0.1.0", path = "../../proxy/candyriya-proxy" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "packet_codec"
+path = "fuzz_targets/packet_codec.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "protocol_registry"
+path = "fuzz_targets/protocol_registry.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "forwarding"
+path = "fuzz_targets/forwarding.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "string_reader"
+path = "fuzz_targets/string_reader.rs"
+test = false
+bench = false
+doc = false
+
+

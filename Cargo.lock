@@ -383,6 +383,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "candyriya-fuzz"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "candyriya-forwarding",
+ "candyriya-protocol",
+ "candyriya-protocol-registry",
+ "candyriya-proxy",
+ "hmac",
+ "libfuzzer-sys",
+ "sha2",
+ "tokio-util",
+]
+
+[[package]]
 name = "candyriya-i18n"
 version = "0.1.0"
 dependencies = [
@@ -2192,6 +2207,16 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libfuzzer-sys"
+version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9fd2f41a1cba099f79a0b6b6c35656cf7c03351a7bae8ff0f28f25270f929d2"
+dependencies = [
+ "arbitrary",
+ "cc",
+]
 
 [[package]]
 name = "libm"
