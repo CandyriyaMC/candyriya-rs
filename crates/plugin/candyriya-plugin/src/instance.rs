@@ -180,17 +180,34 @@ impl PluginInstance {
     /// guest side). This waits at most five seconds and never blocks the
     /// calling thread beyond that.
     pub fn call(&self, export: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
+        self.call_with_timeout(export, input, CALL_TIMEOUT)
+    }
+
+    /// Call an export with a caller-chosen timeout.
+    ///
+    /// Same semantics as [`PluginInstance::call`] but with an explicit
+    /// deadline. The event dispatcher uses this to enforce its own
+    /// per-plugin timeout instead of the default five-second one. Exceeding
+    /// the deadline is reported as [`PluginError::Timeout`]; the plugin
+    /// keeps whatever state it had (the call is not cancelled, it just
+    /// stops being awaited).
+    pub fn call_with_timeout(
+        &self,
+        export: &str,
+        input: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, PluginError> {
         let (tx, rx) = sync_channel(1);
         self.send(PluginCommand::Call {
             export: export.to_owned(),
             input: input.to_vec(),
             respond: tx,
         })?;
-        match rx.recv_timeout(CALL_TIMEOUT) {
+        match rx.recv_timeout(timeout) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => Err(PluginError::Timeout {
                 plugin_id: self.plugin_id.clone(),
-                timeout_ms: CALL_TIMEOUT.as_millis() as u64,
+                timeout_ms: timeout.as_millis() as u64,
             }),
             Err(RecvTimeoutError::Disconnected) => Err(self.gone()),
         }

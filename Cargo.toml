@@ -98,6 +98,10 @@ rayon = "1.12"
 num_cpus = "1"
 base64 = "0.22"
 tempfile = "3"
+# concurrent hash maps (eventbus/plugin service registry); notify drives the
+# plugins/ hot-reload watcher
+dashmap = "6"
+notify = "8"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

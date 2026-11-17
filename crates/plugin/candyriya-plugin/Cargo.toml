@@ -20,8 +20,14 @@ toml = { workspace = true }
 semver = { workspace = true }
 tokio = { workspace = true }
 indexmap = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+notify = { workspace = true }
 candyriya-plugin-api = { version = "0.1.0", path = "../candyriya-plugin-api" }
 candyriya-cache = { version = "0.1.0", path = "../../common/candyriya-cache" }
+candyriya-scheduler = { version = "0.1.0", path = "../../common/candyriya-scheduler" }
 
 [dev-dependencies]
 wat = "1"

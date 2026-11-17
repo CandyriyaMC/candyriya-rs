@@ -172,6 +172,16 @@ impl LibraryPlugin {
         }
     }
 
+    /// Take the running instance out of the record, if there is one.
+    ///
+    /// The caller is responsible for what happens to the instance: the
+    /// loader drops it to stop a bad plugin, the hot-reload path uses it
+    /// to swap a stale instance for a freshly compiled one. The record's
+    /// state is left unchanged.
+    pub(crate) fn take_instance(&mut self) -> Option<PluginInstance> {
+        self.instance.take()
+    }
+
     /// Shut the plugin's worker thread down and wait for it.
     ///
     /// Failed plugins have no instance and only their record is dropped.

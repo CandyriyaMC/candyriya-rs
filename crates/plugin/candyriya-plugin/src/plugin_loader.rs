@@ -400,7 +400,7 @@ fn find_wasm(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Pick the wasm module for a plugin: `<id>.wasm`, else `lib.wasm`.
-fn select_wasm(dir: &Path, id: &str) -> Result<PathBuf, String> {
+pub(crate) fn select_wasm(dir: &Path, id: &str) -> Result<PathBuf, String> {
     let id_wasm = dir.join(format!("{id}.wasm"));
     if id_wasm.is_file() {
         return Ok(id_wasm);
