@@ -19,6 +19,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+lobsterchat = { workspace = true }
 # no default features: nu-ansi-term (via `ansi`) pulls windows-sys, which needs
 # dlltool that this build host does not have; tests don't need colored logs
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std", "tracing-log"] }
