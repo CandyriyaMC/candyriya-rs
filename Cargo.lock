@@ -465,6 +465,7 @@ dependencies = [
  "candyriya-protocol",
  "candyriya-protocol-registry",
  "candyriya-proxy",
+ "candyriya-route",
  "candyriya-scheduler",
  "portable-pty",
  "reqwest",
@@ -633,7 +634,6 @@ dependencies = [
 name = "candyriya-proxy"
 version = "0.1.1"
 dependencies = [
- "arc-swap",
  "base64 0.22.1",
  "bytes",
  "candyriya-auth",
@@ -678,8 +678,13 @@ dependencies = [
 name = "candyriya-route"
 version = "0.1.1"
 dependencies = [
+ "arc-swap",
  "bytes",
+ "candyriya-init",
+ "candyriya-metrics",
  "candyriya-protocol",
+ "candyriya-scheduler",
+ "metrics",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

@@ -141,6 +141,7 @@ struct RunningProxy {
     service: TaskService,
     init: Init,
     config_pid: Pid,
+    route_pid: Pid,
     _state: Arc<ProxyState>,
 }
 
@@ -151,14 +152,26 @@ fn spawn_proxy(config: Config, service: TaskService) -> RunningProxy {
     let socket_config = SocketConfig::from(&config.advanced);
     let bind: SocketAddr = config.bind.parse().expect("config bind is host:port");
     let router = registry_from_config(&config).expect("router builds from config");
-    // the config unit owns the live store; the fixture wires it exactly
-    // the way the composition root does
+    // the config and route units own the live store and the route table;
+    // the fixture wires them exactly the way the composition root does
     let store = Arc::new(candyriya_config::ConfigStore::new(config));
+    let router_store = candyriya_route::router_store(Some(Arc::new(router)));
     let init = Init::new(service.clone());
     let config_pid = init
         .spawn_unit(Pid::INIT, config_spec(store))
         .expect("config unit spawns");
-    let state = Arc::new(ProxyState::new(init.clone(), config_pid).with_router(Arc::new(router)));
+    let route_pid = init
+        .spawn_unit(
+            Pid::INIT,
+            candyriya_route::route_spec(Arc::clone(&router_store)),
+        )
+        .expect("route unit spawns");
+    let state = Arc::new(ProxyState::new(
+        init.clone(),
+        config_pid,
+        route_pid,
+        router_store,
+    ));
     let socket = ProxySocket::bind(bind, &socket_config).expect("proxy socket binds");
     let addr = socket.local_addr();
     let listener = socket.into_listener();
@@ -170,6 +183,7 @@ fn spawn_proxy(config: Config, service: TaskService) -> RunningProxy {
         service,
         init,
         config_pid,
+        route_pid,
         _state: state,
     }
 }
@@ -182,6 +196,9 @@ async fn finish_proxy(proxy: RunningProxy) -> (ShutdownReport, candyriya_schedul
     // cancel it so the active count can reach zero
     if let Err(error) = proxy.init.cancel(proxy.config_pid) {
         eprintln!("failed to cancel the config unit: {error}");
+    }
+    if let Err(error) = proxy.init.cancel(proxy.route_pid) {
+        eprintln!("failed to cancel the route unit: {error}");
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     while proxy.service.stats().active != 0 {

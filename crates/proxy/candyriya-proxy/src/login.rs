@@ -110,7 +110,7 @@ use candyriya_protocol::{
     write_string, write_varint,
 };
 use candyriya_protocol_registry::{ConnectionState, Direction, PacketKind, PacketSlot};
-use candyriya_route::{Backend, BackendState};
+use candyriya_route::BackendRef;
 
 use crate::ProxyError;
 use crate::accept::ProxyState;
@@ -420,7 +420,7 @@ async fn login_flow_inner(
     }
 
     // ---- 4. routing: forced host matches first, else the try chain
-    let backends = route_backends(state, &handshake.server_address);
+    let backends = state.backends_for(&handshake.server_address).await;
     if backends.is_empty() {
         warn!(conn = conn_id, %peer, "no backend available for this host; disconnecting");
         kick(
@@ -782,7 +782,7 @@ async fn attempt_backend(
     peer: SocketAddr,
     conn_id: u64,
     handshake: &HandshakeResult,
-    backend: Backend,
+    backend: BackendRef,
     profile: &GameProfile,
     login_start: &Packet,
     client_ip: &str,
@@ -805,11 +805,11 @@ async fn attempt_backend(
     let mut backend_stream = match connect {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
-            mark_offline(state, backend.name());
+            state.mark_backend_offline(backend.name()).await;
             return Attempt::NotViable(format!("connect to {} failed: {error}", backend.name()));
         }
         Err(_) => {
-            mark_offline(state, backend.name());
+            state.mark_backend_offline(backend.name()).await;
             return Attempt::NotViable(format!("connect to {} timed out", backend.name()));
         }
     };
@@ -1150,32 +1150,6 @@ fn extract_disconnect_reason(payload: &[u8]) -> String {
     }
 }
 
-/// The ordered list of backends to try: forced-host matches in declaration
-/// order win over the `[servers]` try chain; otherwise the try chain in
-/// order. Unknown names are skipped (the registry validated them at
-/// construction time).
-fn route_backends(state: &ProxyState, host: &str) -> Vec<Backend> {
-    let Some(router) = state.router() else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if let Some(names) = router.resolve_host(host) {
-        for name in names {
-            if let Some(backend) = router.get(name) {
-                out.push(backend.clone());
-            }
-        }
-    }
-    if out.is_empty() {
-        for name in router.try_chain() {
-            if let Some(backend) = router.get(name) {
-                out.push(backend.clone());
-            }
-        }
-    }
-    out
-}
-
 /// Resolve the packet id for `slot` at `protocol`, falling back to the
 /// newest known release when the client speaks a version the registry has
 /// no table for; `None` only when even that is missing (a build bug).
@@ -1270,14 +1244,6 @@ fn read_byte_array(src: &mut &[u8], max: usize) -> Option<Vec<u8>> {
     let out = head.to_vec();
     *src = tail;
     Some(out)
-}
-
-/// Mark a backend offline after a connect failure, so health-aware paths
-/// observe reality. Best effort: an unregistered name is ignored.
-fn mark_offline(state: &ProxyState, name: &str) {
-    if let Some(router) = state.router() {
-        let _ = router.set_state(name, BackendState::Offline);
-    }
 }
 
 #[cfg(test)]
@@ -1457,16 +1423,16 @@ mod tests {
         };
         let state = crate::accept::test_helpers::test_state(config).with_router(Arc::new(registry));
 
-        let forced = route_backends(&state, "forced.example.com");
+        let forced = state.backends_for("forced.example.com").await;
         assert_eq!(forced.len(), 1);
         assert_eq!(forced[0].name(), "a");
 
-        let plain = route_backends(&state, "plain.example.com");
+        let plain = state.backends_for("plain.example.com").await;
         assert_eq!(plain.len(), 1);
         assert_eq!(plain[0].name(), "b");
 
-        // no router wired in: the answer is an empty list, never a panic
+        // no routing wired in: the answer is an empty list, never a panic
         let bare = crate::accept::test_helpers::test_state(Config::default());
-        assert!(route_backends(&bare, "forced.example.com").is_empty());
+        assert!(bare.backends_for("forced.example.com").await.is_empty());
     }
 }

@@ -22,9 +22,13 @@
 //!    Prometheus exporter (only when `[metrics] prometheus = true`), the
 //!    Mojang/offline session validators selected from `online-mode`, the
 //!    routing registry, the command tree and the interactive console REPL.
-//!    The plugin-facing host services the `candyriya:*` functions resolve
-//!    through — the plugin dispatcher, the play-state roster snapshot and
-//!    the backend name list — are registered right after the plugin load.
+//!    Routing reads go to the `route` unit through the same IPC plane —
+//!    login, the stats line and the directory all call it; `/candyriya
+//!    reload` swaps the very store the unit serves, so a reload is visible
+//!    to the next call. The plugin-facing host services the `candyriya:*`
+//!    functions resolve through — the plugin dispatcher, the play-state
+//!    roster snapshot and the backend name list — are registered right
+//!    after the plugin load.
 //!    All of the above is the loader phase: everything that ran before
 //!    the task service existed is adopted into the tree as an
 //!    already-exited unit once the tree is up.
@@ -77,7 +81,10 @@ use candyriya_plugin_api::{EventDispatcher, PlayerRef};
 use candyriya_proxy::{
     FaviconCache, ProxySocket, ProxyState, SocketConfig, accept_loop, config_spec,
 };
-use candyriya_route::BackendRegistry;
+use candyriya_route::{
+    BackendRegistry, DEFAULT_HEALTH_CHECK_INTERVAL, RouteMsg, RouteResp, health_spec, route_spec,
+    router_store,
+};
 use candyriya_scheduler::TaskService;
 use candyriya_telemetry::LogConfig;
 
@@ -378,7 +385,10 @@ async fn cascade_shutdown(
     let _ = shutdown_tx.send(true);
 
     // stop the serving units through the tree, newest first: console,
-    // players.roster-refresh, stats.every-60s, proxy.accept
+    // players.roster-refresh, stats.every-60s, proxy.accept, route.health,
+    // route. route.health is a child of route, so cancelling it before route
+    // keeps the order; when route exits the child re-parents to the root
+    // and the wait below reaps it there
     for (pid, _) in boot_units.iter().rev() {
         if let Err(error) = tree.cancel(*pid) {
             debug!(%error, %pid, "unit already gone in the cancel sweep");
@@ -547,6 +557,17 @@ async fn run_async(
     adopt_bootstrap(&tree, "config.load", ExitStatus::Success);
     adopt_bootstrap(&tree, "route.resolve", ExitStatus::Success);
 
+    // one shared route store: the route unit serves from it, the reload
+    // path swaps through it — the names list is collected once here from
+    // the same registry that lands in the store
+    let router_names: Option<Vec<String>> = router.as_ref().map(|registry| {
+        registry
+            .iter()
+            .map(|backend| backend.name().to_owned())
+            .collect()
+    });
+    let router_store = router_store(router);
+
     // ---- the config unit: it owns the live store and is the single source
     // of truth for every runtime read of the configuration — through the
     // tree or not at all. The store is shared with the reload path
@@ -570,6 +591,64 @@ async fn run_async(
     // the config unit alone in the first phase of boot: unwinds with the
     // other early failures so it never outlives an aborted boot
     let config_unwind = [(config_pid, "config")];
+
+    // ---- the route unit: the single owner of runtime routing reads. The
+    // store it serves is the same object the reload path swaps through, so
+    // /candyriya reload works unchanged; nobody calls the registry
+    // directly from here on. Always spawned, even with no [servers] — an
+    // empty store is an honest state.
+    let route_pid = match tree.spawn_unit(Pid::INIT, route_spec(Arc::clone(&router_store))) {
+        Ok(pid) => {
+            info!(pid = %pid, "route unit spawned");
+            pid
+        }
+        Err(error) => {
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &config_unwind,
+                CliError::Runtime(format!("failed to spawn route: {error}")),
+            )
+            .await);
+        }
+    };
+    // the route unit joins the first boot phase too: early boot failures
+    // unwind it alongside the config unit
+    let config_unwind = [(config_pid, "config"), (route_pid, "route")];
+
+    // ---- the route.health child: the health-check loop lives with the
+    // route unit. Spawned only when [servers] is non-empty at boot — with
+    // nothing to check the child would be dead weight. If a later
+    // /candyriya reload adds servers, nothing watches them here; the
+    // reload phase owns routing changes and does not start health checks
+    // (that belongs to the reload phase, not this slice).
+    let health_boot: Option<(Pid, &'static str)> = if config.servers.servers.is_empty() {
+        info!("no [servers] configured; backend health checks are not wired");
+        None
+    } else {
+        match tree.spawn_unit(
+            route_pid,
+            health_spec(Arc::clone(&router_store), DEFAULT_HEALTH_CHECK_INTERVAL),
+        ) {
+            Ok(pid) => {
+                info!(
+                    pid = %pid,
+                    interval_secs = DEFAULT_HEALTH_CHECK_INTERVAL.as_secs(),
+                    "route.health unit spawned"
+                );
+                Some((pid, "route.health"))
+            }
+            Err(error) => {
+                return Err(boot_abort(
+                    &tree,
+                    &service,
+                    &config_unwind,
+                    CliError::Runtime(format!("failed to spawn route.health: {error}")),
+                )
+                .await);
+            }
+        }
+    };
 
     let registry = ServiceRegistry::new();
     // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
@@ -684,13 +763,9 @@ async fn run_async(
         "config.store".to_string(),
         Arc::clone(&store) as Arc<dyn std::any::Any + Send + Sync>,
     );
-    if let Some(router) = &router {
-        // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
-        registry.register_service(
-            "route.backends".to_string(),
-            Arc::clone(router) as Arc<dyn std::any::Any + Send + Sync>,
-        );
-    }
+    // the route.backends key is gone: routing reads the shared store the
+    // route unit serves (and swaps on reload), and the key had zero prod
+    // readers to begin with; no detached Arc escapes the store this way
 
     // ---- command locales + the kick-locale handle, plus the shared pair
     // the plugin host functions resolve through (built before the plugin
@@ -732,10 +807,14 @@ async fn run_async(
     // ipc-migration: these fields are cross-subsystem handles (Plugins.Dispatch
     // and I18n.T ride them); the IPC conversion gives each its own unit
     let started = Instant::now();
-    let mut proxy_state = ProxyState::new(tree.clone(), config_pid);
+    let mut proxy_state = ProxyState::new(
+        tree.clone(),
+        config_pid,
+        route_pid,
+        Arc::clone(&router_store),
+    );
     // ipc-migration: Roster/Route/Proxy snapshot — ProxyState carries handles across the subsystem boundary until each is a unit
     proxy_state.auth = auth;
-    proxy_state.set_router(router.clone());
     proxy_state.favicon_cache = favicon_cache.clone();
     proxy_state.event_dispatcher = Some(Arc::clone(&event_dispatcher) as Arc<dyn EventDispatcher>);
     proxy_state.event_i18n = Some(Arc::new(kick_i18n));
@@ -770,7 +849,7 @@ async fn run_async(
     register_plugin_host_services(
         &registry,
         &proxy_state,
-        router.as_deref(),
+        router_names.as_deref(),
         &event_dispatcher,
     );
     // ---- hot reload: the same machinery, on demand
@@ -840,10 +919,16 @@ async fn run_async(
 
     // ---- spawn the serving units, in boot order; a failure of any of
     // them unwinds the ones before it in reverse order (fail-fast boot).
-    // The config unit is already up (spawned before the boot abort
-    // machinery needs it) and rides in the list so a runtime config
-    // collapse is caught by the same watchdog as a serving unit dying.
-    let mut boot_units: Vec<(Pid, &'static str)> = vec![(config_pid, "config")];
+    // The config and route units are already up (spawned before the boot
+    // abort machinery needs them) and ride in the list so a runtime
+    // collapse is caught by the same watchdog as a serving unit dying;
+    // route.health rides along too and is cancelled before its parent
+    // (reverse spawn order).
+    let mut boot_units: Vec<(Pid, &'static str)> =
+        vec![(config_pid, "config"), (route_pid, "route")];
+    if let Some((pid, name)) = health_boot {
+        boot_units.push((pid, name));
+    }
 
     // proxy.accept: the unit body drives listener.accept(); connections
     // keep their own kernel tasks until phase 3 turns them into units.
@@ -900,24 +985,26 @@ async fn run_async(
 
     // ---- periodic stats line
     let stats_state = Arc::clone(&proxy_state);
-    let stats_router = router.clone();
     let stats_spec = UnitSpec::new(
         "stats.every-60s",
         UnitKind::Every,
         RestartPolicy::Never,
         move || {
             let state = Arc::clone(&stats_state);
-            let router = stats_router.clone();
             async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(60)).await;
-                    // ipc-migration: Proxy.Stats (reads the shared proxy state directly)
-                    log_stats(&state, router.as_deref());
+                    // ipc-migration: Proxy.Stats — counters (limiter, atomics) in-process, backends through the route unit
+                    log_stats(&state).await;
                 }
             }
         },
     )
-    .with_service_kind(ServiceKind::Stats);
+    .with_service_kind(ServiceKind::Stats)
+    // the stats unit reads routing over IPC; as a sibling of the route
+    // unit the subtree rule does not authorize the call, so the grant
+    // rides its spawn like an inherited fd
+    .with_grant(route_pid);
     match tree.spawn_unit(Pid::INIT, stats_spec) {
         Ok(pid) => boot_units.push((pid, "stats.every-60s")),
         Err(error) => {
@@ -1115,15 +1202,16 @@ fn roster_snapshot(state: &ProxyState) -> Vec<PlayerRef> {
 ///   "player messaging is not implemented yet" error instead of a sink
 ///   that pretends to deliver. Wire one in here once the proxy grows a
 ///   client-bound chat path.
-/// - `servers.names` — the backend names from [`BackendRegistry`], in
-///   registration order. With no `[servers]` configured the key stays
-///   absent and the host function falls back to `["local"]`; the reload
-///   path re-registers (or removes) the names next to the router swap.
+/// - `servers.names` — the backend names the registry seeded into the
+///   route store, in registration order. With no `[servers]` configured the
+///   key stays absent and the host function falls back to `["local"]`; the
+///   reload path re-registers (or removes) the names next to the router
+///   swap.
 // ipc-migration: Proxy.Stats / Router.Names / Roster.Snapshot — all three keys exist only for the host-function path and become capability calls in the IPC phase
 fn register_plugin_host_services(
     registry: &ServiceRegistry,
     proxy_state: &Arc<ProxyState>,
-    router: Option<&BackendRegistry>,
+    router_names: Option<&[String]>,
     dispatcher: &Arc<ProxyEventDispatcher>,
 ) {
     // ipc-migration: Plugins.CallApi — the registry fans plugin callApi out to this dispatcher instance
@@ -1139,40 +1227,58 @@ fn register_plugin_host_services(
         Arc::new(roster) as Arc<dyn std::any::Any + Send + Sync>,
     );
 
-    if let Some(router) = router {
-        let names: Vec<String> = router
-            .iter()
-            .map(|backend| backend.name().to_owned())
-            .collect();
-        // ipc-migration: Router.Names — read straight off the backend registry
+    if let Some(names) = router_names {
+        // ipc-migration: Router.Names — the names the route unit serves, collected once from the registry at boot
         registry.register_service(
             SERVERS_NAMES_KEY.to_owned(),
-            Arc::new(names) as Arc<dyn std::any::Any + Send + Sync>,
+            Arc::new(names.to_vec()) as Arc<dyn std::any::Any + Send + Sync>,
         );
     }
 }
 
 /// Log one compact stats line for the periodic unit.
+///
+/// The backend counters are read from the `route` unit as one snapshot; on
+/// a route-unit outage the line is logged without them (and the error with
+/// it) — fabricating zeros would look like "all backends offline", which is
+/// a different, stronger claim than "unknown".
 // ipc-migration: Proxy.Stats (reads ProxyState counters and limiter directly)
-fn log_stats(state: &ProxyState, router: Option<&BackendRegistry>) {
-    let (backends_online, backends_total) = match router {
-        Some(router) => (
-            router
-                .iter()
-                .filter(|backend| backend.state() == candyriya_route::BackendState::Online)
-                .count(),
-            router.iter().count(),
-        ),
-        None => (0, 0),
+async fn log_stats(state: &ProxyState) {
+    let snapshot = match state.route(RouteMsg::Snapshot).await {
+        Ok(RouteResp::Snapshot(snapshot)) => Some(snapshot),
+        Ok(other) => {
+            error!(reply = ?other, "unexpected route unit reply to a Snapshot call");
+            None
+        }
+        Err(error) => {
+            error!(%error, "route unit unavailable; backend counts omitted from the stats line");
+            None
+        }
     };
-    info!(
-        active_connections = state.limiter.current_connections(),
-        accepted = state.conn_counter.load(Ordering::Relaxed),
-        rejected = state.connection_rejections.load(Ordering::Relaxed),
-        backends_online,
-        backends_total,
-        "proxy stats"
-    );
+    match snapshot {
+        Some(entries) => {
+            let backends_online = entries
+                .iter()
+                .filter(|entry| entry.state() == candyriya_route::BackendState::Online)
+                .count();
+            info!(
+                active_connections = state.limiter.current_connections(),
+                accepted = state.conn_counter.load(Ordering::Relaxed),
+                rejected = state.connection_rejections.load(Ordering::Relaxed),
+                backends_online,
+                backends_total = entries.len(),
+                "proxy stats"
+            );
+        }
+        None => {
+            info!(
+                active_connections = state.limiter.current_connections(),
+                accepted = state.conn_counter.load(Ordering::Relaxed),
+                rejected = state.connection_rejections.load(Ordering::Relaxed),
+                "proxy stats"
+            );
+        }
+    }
 }
 
 /// Load the configured favicon into the cache unconditionally.

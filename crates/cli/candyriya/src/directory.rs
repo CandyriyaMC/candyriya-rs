@@ -9,7 +9,8 @@
 //!   thread rather than awaited (threading a runtime through brigadier was
 //!   judged worse than the hand-off; see [`CliDirectory::live_config`]);
 //! - the shared proxy state for live connection counters,
-//! - the routing registry (when wired) for per-backend health.
+//! - the `route` unit (through the same snapshot IPC the proxy uses) for
+//!   per-backend health.
 //!
 //! The command trait is deliberately infallible, so a total configuration
 //! outage cannot be reported as an error: when the fetch fails, the boot
@@ -132,6 +133,29 @@ impl CliDirectory {
             }
         }
     }
+
+    /// The routing snapshot from the `route` unit, as name → state.
+    ///
+    /// Same hand-off as [`CliDirectory::live_config`]. On any failure every
+    /// backend reads as `Unknown` — the command layer cannot return an
+    /// error, and an honest "unknown" is not a fabricated health verdict.
+    fn live_backend_states(&self) -> Vec<candyriya_route::BackendSnapshot> {
+        match self
+            .links
+            .runtime
+            .block_on(self.state.route(candyriya_route::RouteMsg::Snapshot))
+        {
+            Ok(candyriya_route::RouteResp::Snapshot(snapshot)) => snapshot,
+            Ok(other) => {
+                error!(reply = ?other, "unexpected route unit reply to a Snapshot call; backend states reported as unknown");
+                Vec::new()
+            }
+            Err(error) => {
+                error!(%error, "route unit unavailable for command output; backend states reported as unknown");
+                Vec::new()
+            }
+        }
+    }
 }
 
 fn route_state(state: Option<candyriya_route::BackendState>) -> CmdBackendState {
@@ -177,12 +201,16 @@ impl NetworkDirectory for CliDirectory {
     fn snapshot(&self) -> ProxySnapshot {
         let players = self.roster_players();
         let config = self.live_config();
+        let health = self.live_backend_states();
         let mut backends: Vec<BackendSnapshot> = config
             .servers
             .servers
             .iter()
             .map(|(name, address)| {
-                let state = self.state.router().and_then(|router| router.state(name));
+                let state = health
+                    .iter()
+                    .find(|entry| entry.name() == name.as_str())
+                    .map(candyriya_route::BackendSnapshot::state);
                 BackendSnapshot {
                     name: name.clone(),
                     address: address.clone(),

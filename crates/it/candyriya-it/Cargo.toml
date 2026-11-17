@@ -45,9 +45,11 @@ base64 = { workspace = true }
  candyriya-proxy = { version = "0.1.0", path = "../../proxy/candyriya-proxy" }
  candyriya-config = { version = "0.1.0", path = "../../config/candyriya-config" }
  candyriya-scheduler = { version = "0.1.0", path = "../../common/candyriya-scheduler" }
- # the end-to-end fixture wires the config unit the same way the
- # composition root does
+ # the end-to-end fixture wires the config and route units the same way
+ # the composition root does
  candyriya-init = { version = "0.1.0", path = "../../common/candyriya-init" }
+ # the route unit serves routing from the shared store
+ candyriya-route = { version = "0.1.0", path = "../../network/candyriya-route" }
  # jar download for the smoke test (the rest of the suite is loopback-only)
  reqwest = { workspace = true }
  # jar integrity check for the smoke test

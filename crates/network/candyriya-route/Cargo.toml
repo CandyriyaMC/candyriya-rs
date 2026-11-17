@@ -15,11 +15,18 @@ exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 
 [dependencies]
 bytes = { workspace = true }
+arc-swap = { workspace = true }
 candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
+candyriya-init = { version = "0.1.0", path = "../../common/candyriya-init" }
+candyriya-metrics = { version = "0.1.1", path = "../../common/candyriya-metrics" }
+metrics = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+candyriya-scheduler = { version = "0.1.0", path = "../../common/candyriya-scheduler" }
 
 [lints]
 workspace = true
