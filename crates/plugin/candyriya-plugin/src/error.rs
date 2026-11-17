@@ -3,10 +3,15 @@
 //! Discovery problems (a stray `.wasm` with no manifest, a manifest that does
 //! not parse, an id mismatch) do not fail the load; they land in the
 //! [`crate::LoadReport::issues`] list as `(where, why)` tuples. This enum is
-//! for hard failures: a single plugin that cannot be used, or a broken host
-//! invariant.
+//! for hard failures: a single plugin that cannot be used, a broken host
+//! invariant, or a discovered set that cannot be ordered at all.
 
 use std::path::PathBuf;
+
+use crate::dep_resolution::DependencyFailure;
+use crate::library_plugin::LibraryPlugin;
+use crate::manifest::DuplicatePluginIds;
+use crate::plugin_loader::LoadIssue;
 
 /// Errors produced while preparing, loading or calling one plugin.
 #[derive(Debug, thiserror::Error)]
@@ -124,5 +129,37 @@ pub enum PluginError {
         export: String,
         /// extism's report.
         message: String,
+    },
+
+    /// The discovered set contained a duplicate id. The loader already
+    /// rejects cross-root collisions, so this means the input to the
+    /// resolver was assembled by hand.
+    #[error("{0}")]
+    DuplicatePluginIds(DuplicatePluginIds),
+
+    /// A dependency cycle was found in the plugin set. The `diagnosis`
+    /// lines name the cycle members, one line per cycle, e.g.
+    /// `` `a` depends on `b`; `b` depends on `a` ``. Downstream plugins
+    /// blocked by a cycle are named on a separate line.
+    #[error("dependency cycle(s) in the plugin dependency graph:\n{}", .diagnosis.join("\n"))]
+    DependencyCycle {
+        /// Self-consistent diagnosis, one line per cycle found.
+        diagnosis: Vec<String>,
+    },
+
+    /// At least one plugin cannot load because a hard dependency is missing.
+    /// Every such failure is listed in `failures` — resolution never stops
+    /// at the first one. The plugins that do load are carried along in
+    /// `loadable`, in load order; `issues` is the flat `(where, why)` list
+    /// covering the drops plus any missing *soft* dependencies.
+    #[error("cannot load {n} plugin(s) due to missing hard dependencies: {failures}", n = .failures.len(), failures = .failures.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
+    UnresolvedDependencies {
+        /// Every dropped plugin and the missing dependency that caused it,
+        /// in drop order.
+        failures: Vec<DependencyFailure>,
+        /// Everything that is wrong with the set, as `(where, why)` tuples.
+        issues: Vec<LoadIssue>,
+        /// The plugins that load, in dependency order.
+        loadable: Vec<LibraryPlugin>,
     },
 }

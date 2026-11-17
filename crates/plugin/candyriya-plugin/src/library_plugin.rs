@@ -57,6 +57,19 @@ pub struct LibraryPlugin {
     state: PluginState,
 }
 
+// Manual Debug: LibraryPlugin carries a live wasm instance whose internals
+// are not Debug; the useful parts are the id, origin and state.
+impl std::fmt::Debug for LibraryPlugin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LibraryPlugin")
+            .field("id", &self.id())
+            .field("dir", &self.dir)
+            .field("origin", &self.origin)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LibraryPlugin {
     /// Build a record from parts (loader-internal plumbing).
     pub(crate) fn new(

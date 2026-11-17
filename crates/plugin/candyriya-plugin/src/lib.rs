@@ -14,13 +14,18 @@
 //! - [`LibraryPlugin`] / [`PluginState`] — per-plugin records and lifecycle
 //!   (`Loaded` / `Failed` / `Disabled`).
 //! - [`HostState`] — host-side state handed to each instance.
+//! - [`dep_resolution::resolve_plugin_order`] / [`dep_resolution::resolve_plugins`] —
+//!   the dependency resolver: turns the discovered set into a dependency
+//!   load order (libraries first, then plugins, alphabetical, then
+//!   topological) with cycle and missing-hard-dependency diagnostics.
 //!
-//! Not implemented here yet (by design, they land next): the dependency
-//! resolver, host functions and the task API, fuel/memory limits and WASI,
-//! and the hot-reload machinery. No host functions are registered today.
+//! Not implemented here yet (by design, they land next): host functions and
+//! the task API, fuel/memory limits and WASI, and the hot-reload machinery.
+//! No host functions are registered today.
 
 #![forbid(unsafe_code)]
 
+mod dep_resolution;
 mod error;
 mod host_state;
 mod instance;
@@ -28,6 +33,10 @@ mod library_plugin;
 mod manifest;
 mod plugin_loader;
 
+pub use crate::dep_resolution::{
+    DependencyFailure, DependencyResolution, SoftDependency, resolve_plugin_order, resolve_plugins,
+    validate_set,
+};
 pub use crate::error::PluginError;
 pub use crate::host_state::HostState;
 pub use crate::instance::PluginInstance;
