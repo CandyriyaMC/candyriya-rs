@@ -228,13 +228,23 @@ impl PluginReloader {
             dir: dir.clone(),
         })?;
 
-        let data_dir = self.config_root.join("config").join(id);
-        std::fs::create_dir_all(&data_dir).map_err(|source| PluginError::DataDir {
-            path: data_dir.clone(),
+        // the replacement inherits the proxy's shared services (the
+        // dispatcher, the roster, ...) so its host functions work
+        let data_root = self.config_root.clone();
+        let config_dir = data_root.join("config").join(id);
+        std::fs::create_dir_all(&config_dir).map_err(|source| PluginError::DataDir {
+            path: config_dir.clone(),
+            source,
+        })?;
+        let cache_dir = data_root.join("cache").join(id);
+        std::fs::create_dir_all(&cache_dir).map_err(|source| PluginError::DataDir {
+            path: cache_dir.clone(),
             source,
         })?;
 
-        let instance = PluginInstance::new(&wasm_path, HostState::new(data_dir), id, &self.limits)?;
+        let host_state =
+            HostState::new(data_root, id).with_services(Arc::new(self.services.clone()));
+        let instance = PluginInstance::new(&wasm_path, host_state, id, &self.limits)?;
         match instance.function_exists(manifest.plugin_main()) {
             Ok(true) => {}
             Ok(false) => {

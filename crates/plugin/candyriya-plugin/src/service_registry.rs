@@ -51,6 +51,14 @@ pub struct ServiceRegistry {
     inner: Arc<DashMap<String, ServiceEntry>>,
 }
 
+impl std::fmt::Debug for ServiceRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceRegistry")
+            .field("entries", &self.inner.len())
+            .finish()
+    }
+}
+
 impl ServiceRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {

@@ -37,7 +37,12 @@ use std::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use parking_lot::Mutex;
+
+use candyriya_plugin_api::OutcomeReport;
+
 use crate::error::PluginError;
+use crate::host_functions;
 use crate::host_state::HostState;
 use crate::limits::{
     CALL_WINDOW, CallRateLimiter, HandleTable, InstanceSlots, Limits, LogBudget, check_module,
@@ -96,6 +101,9 @@ pub struct PluginInstance {
     slots: Option<Arc<InstanceSlots>>,
     rate_limiter: CallRateLimiter,
     handles: Arc<HandleTable>,
+    subscribers: Arc<Mutex<std::collections::HashSet<String>>>,
+    caller_plugin_id: Arc<Mutex<Option<String>>>,
+    pending_outcome: Arc<Mutex<Option<OutcomeReport>>>,
 }
 
 impl PluginInstance {
@@ -103,9 +111,10 @@ impl PluginInstance {
     /// and spawn its dedicated thread.
     ///
     /// The module bytes are read and passed to extism inline; the extism
-    /// plugin is created with no host functions and WASI disabled. The
-    /// module is first checked against the static [`Limits`] caps (memory,
-    /// tables, functions) — a module over the caps is rejected before any
+    /// plugin is created with the `candyriya:*` host functions registered
+    /// (see `host_functions`) and WASI disabled. The module is first
+    /// checked against the static [`Limits`] caps (memory, tables,
+    /// functions) — a module over the caps is rejected before any
     /// compilation happens. The manifest carries the configured memory page
     /// cap and, when set, the call timeout and per-call fuel limit.
     ///
@@ -182,17 +191,25 @@ impl PluginInstance {
             Some(fuel) => builder.with_fuel_limit(fuel),
             None => builder,
         };
+        // host functions close over their own clones of the shared state;
+        // the worker keeps the original one for caller identity bookkeeping
+        let builder = host_functions::register_host_functions(builder, host_state.clone());
         let plugin = builder.build().map_err(|e| PluginError::WasmLoad {
             path: wasm_path.to_path_buf(),
             message: format!("{e:#}"),
         })?;
+
+        let subscribers = Arc::clone(&host_state.subscribers);
+        let caller_plugin_id = Arc::clone(&host_state.caller_plugin_id);
+        let pending_outcome = Arc::clone(&host_state.pending_outcome);
 
         let (command_tx, command_rx) = sync_channel::<PluginCommand>(MAILBOX_CAPACITY);
         let thread_name = format!("candyriya-plugin-{plugin_id}");
         let data_dir = host_state.data_dir.clone();
         let plugin_id_owned = plugin_id.to_owned();
         let worker_plugin_id = plugin_id.to_owned();
-        // move the host state in too; host functions will close over it later
+        // move the host state in too: the worker needs the caller identity
+        // bookkeeping; the host functions hold their own clones inside the plugin
         let worker = std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || worker_loop(plugin, host_state, command_rx, worker_plugin_id))
@@ -213,6 +230,9 @@ impl PluginInstance {
                 limits.max_open_handles,
                 plugin_id.to_owned(),
             )),
+            subscribers,
+            caller_plugin_id,
+            pending_outcome,
         })
     }
 
@@ -237,6 +257,40 @@ impl PluginInstance {
     /// them.
     pub fn handle_table(&self) -> Arc<HandleTable> {
         Arc::clone(&self.handles)
+    }
+
+    /// The event kinds this plugin opted into via the
+    /// `candyriya:subscribeToEvents` host function. Shared with the host
+    /// functions, which replace it wholesale on subscribe.
+    pub fn subscribers(&self) -> Arc<Mutex<std::collections::HashSet<String>>> {
+        Arc::clone(&self.subscribers)
+    }
+
+    /// Whether `kind` should be dispatched to this plugin.
+    ///
+    /// An empty allowlist means every kind — until a plugin subscribes, it
+    /// receives the whole stream.
+    pub fn subscribes_to(&self, kind: &str) -> bool {
+        let subscribers = self.subscribers.lock();
+        subscribers.is_empty() || subscribers.contains(kind)
+    }
+
+    /// Set the caller identity for the export about to run and return the
+    /// previous value. The host restores the previous value after the
+    /// call; `None` means the proxy itself is the caller.
+    pub fn set_caller_plugin_id(&self, caller: Option<String>) -> Option<String> {
+        std::mem::replace(&mut self.caller_plugin_id.lock(), caller)
+    }
+
+    /// The caller identity for the call currently in flight, if any.
+    pub fn caller_plugin_id(&self) -> Option<String> {
+        self.caller_plugin_id.lock().clone()
+    }
+
+    /// Take (and clear) the cancellation the plugin recorded through the
+    /// `candyriya:cancelEvent` host function for the call in flight.
+    pub fn take_pending_outcome(&self) -> Option<OutcomeReport> {
+        self.pending_outcome.lock().take()
     }
 
     /// A fresh log byte budget for one invocation, capped by

@@ -18,6 +18,239 @@ pub fn event_manifest(id: &str) -> String {
     )
 }
 
+/// A module whose `<export>` always answers with the given static bytes.
+pub fn static_export_plugin_wat(export: &str, response: &str) -> String {
+    let bytes = response.as_bytes();
+    let stores: String = bytes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            format!(
+                "\n    (call $store_u8 (i64.add (local.get $p) (i64.const {i})) (i32.const {b}))"
+            )
+        })
+        .collect();
+    format!(
+        r#"(module
+  (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+  (import "extism:host/env" "output_set" (func $output_set (param i64 i64)))
+  (import "extism:host/env" "store_u8" (func $store_u8 (param i64 i32)))
+  (memory (export "memory") 1)
+  (func (export "{export}") (result i32)
+    (local $p i64)
+    (local.set $p (call $alloc (i64.const {len}))){stores}
+    (call $output_set (local.get $p) (i64.const {len}))
+    (i32.const 0)))
+"#,
+        len = bytes.len(),
+    )
+}
+
+/// Compile the static-export module.
+pub fn static_export_plugin_wasm(export: &str, response: &str) -> Vec<u8> {
+    wat::parse_str(static_export_plugin_wat(export, response))
+        .expect("static-export fixture wat compiles")
+}
+
+/// A module whose `on_event` forwards its input to a namespaced host
+/// function and returns the host function's raw output.
+///
+/// Proves the host-function round trip: the guest calls the host and the
+/// host's bytes land in the caller's hands untouched.
+pub fn echo_host_fn_wat(import_module: &str, import_name: &str) -> String {
+    format!(
+        r#"(module
+  (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+  (import "extism:host/env" "input_length" (func $input_length (result i64)))
+  (import "extism:host/env" "input_load_u8" (func $input_load_u8 (param i64) (result i32)))
+  (import "extism:host/env" "store_u8" (func $store_u8 (param i64 i32)))
+  (import "extism:host/env" "output_set" (func $output_set (param i64 i64)))
+  (import "extism:host/env" "length" (func $length (param i64) (result i64)))
+  (import "{module}" "{name}" (func $hostfn (param i64) (result i64)))
+  (memory (export "memory") 1)
+  (func (export "on_event") (result i32)
+    (local $len i64)
+    (local $in i64)
+    (local $out i64)
+    (local $i i64)
+    (local.set $len (call $input_length))
+    (local.set $in (call $alloc (local.get $len)))
+    (block $done
+      (loop $loop
+        (br_if $done (i64.ge_u (local.get $i) (local.get $len)))
+        (call $store_u8
+          (i64.add (local.get $in) (local.get $i))
+          (call $input_load_u8 (local.get $i)))
+        (local.set $i (i64.add (local.get $i) (i64.const 1)))
+        (br $loop)))
+    (local.set $out (call $hostfn (local.get $in)))
+    (call $output_set (local.get $out) (call $length (local.get $out)))
+    (i32.const 0)))
+"#,
+        module = import_module,
+        name = import_name,
+    )
+}
+
+/// Compile the echo fixture.
+pub fn echo_host_fn_wasm(import_module: &str, import_name: &str) -> Vec<u8> {
+    wat::parse_str(echo_host_fn_wat(import_module, import_name)).expect("echo fixture wat compiles")
+}
+
+/// A module with two exports:
+///
+/// - `subscribe` calls `candyriya:subscribeToEvents` with a static
+///   `["login"]` argument (input sniffing is impossible in a static
+///   fixture, so the allowlist is hardcoded);
+/// - `on_event` answers `{"cancelled": true}` unconditionally.
+///
+/// Used to prove the dispatcher's subscriber gate — the guest that would
+/// cancel the event is never asked, because it did not subscribe to the
+/// event kind being dispatched.
+pub fn subscribe_login_plugin_wat() -> String {
+    let subscribe_input = br#"["login"]"#;
+    let subscribe_stores: String = subscribe_input
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            format!(
+                "\n    (call $store_u8 (i64.add (local.get $s) (i64.const {i})) (i32.const {b}))"
+            )
+        })
+        .collect();
+    let report = br#"{"cancelled": true}"#;
+    let report_stores: String = report
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            format!(
+                "\n    (call $store_u8 (i64.add (local.get $p) (i64.const {i})) (i32.const {b}))"
+            )
+        })
+        .collect();
+    format!(
+        r#"(module
+  (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+  (import "extism:host/env" "store_u8" (func $store_u8 (param i64 i32)))
+  (import "extism:host/env" "output_set" (func $output_set (param i64 i64)))
+  (import "candyriya" "subscribeToEvents" (func $subscribe (param i64) (result i64)))
+  (memory (export "memory") 1)
+  (func (export "subscribe") (result i32)
+    (local $s i64)
+    (local.set $s (call $alloc (i64.const {subscribe_len}))){subscribe_stores}
+    (drop (call $subscribe (local.get $s)))
+    (call $output_set (local.get $s) (i64.const {subscribe_len}))
+    (i32.const 0))
+  (func (export "on_event") (result i32)
+    (local $p i64)
+    (local.set $p (call $alloc (i64.const {report_len}))){report_stores}
+    (call $output_set (local.get $p) (i64.const {report_len}))
+    (i32.const 0)))
+"#,
+        subscribe_len = subscribe_input.len(),
+        report_len = report.len(),
+    )
+}
+
+/// Compile the subscribe/on_event fixture.
+pub fn subscribe_login_plugin_wasm() -> Vec<u8> {
+    wat::parse_str(subscribe_login_plugin_wat()).expect("subscribe fixture wat compiles")
+}
+
+/// A module whose `on_event` first records a cancellation through the
+/// `candyriya:cancelEvent` host function (with a static reason) and only
+/// then answers `{"cancelled": false}`.
+///
+/// Used to prove the cancellation recorded via `cancelEvent` wins over
+/// whatever the export returns.
+pub fn cancel_event_plugin_wat() -> String {
+    let host_input = br#"{"cancel": true, "reason": "nope"}"#;
+    let host_stores: String = host_input
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            format!(
+                "\n    (call $store_u8 (i64.add (local.get $in) (i64.const {i})) (i32.const {b}))"
+            )
+        })
+        .collect();
+    let report = br#"{"cancelled": false}"#;
+    let report_stores: String = report
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            format!(
+                "\n    (call $store_u8 (i64.add (local.get $p) (i64.const {i})) (i32.const {b}))"
+            )
+        })
+        .collect();
+    format!(
+        r#"(module
+  (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+  (import "extism:host/env" "store_u8" (func $store_u8 (param i64 i32)))
+  (import "extism:host/env" "output_set" (func $output_set (param i64 i64)))
+  (import "candyriya" "cancelEvent" (func $cancel (param i64) (result i64)))
+  (memory (export "memory") 1)
+  (func (export "on_event") (result i32)
+    (local $in i64)
+    (local $p i64)
+    (local.set $in (call $alloc (i64.const {host_len}))){host_stores}
+    (drop (call $cancel (local.get $in)))
+    (local.set $p (call $alloc (i64.const {report_len}))){report_stores}
+    (call $output_set (local.get $p) (i64.const {report_len}))
+    (i32.const 0)))
+"#,
+        host_len = host_input.len(),
+        report_len = report.len(),
+    )
+}
+
+/// Compile the cancelEvent fixture.
+pub fn cancel_event_plugin_wasm() -> Vec<u8> {
+    wat::parse_str(cancel_event_plugin_wat()).expect("cancel fixture wat compiles")
+}
+
+/// A module whose `on_event` records a cancellation through the
+/// `candyriya:cancelEvent` host function (with a static reason) and then
+/// never returns.
+///
+/// Used to prove a cancellation recorded before the call died beats the
+/// timeout — the merge prefers `cancelEvent` over everything.
+pub fn cancel_event_then_hang_plugin_wat() -> String {
+    let host_input = br#"{"cancel": true, "reason": "nope"}"#;
+    let host_stores: String = host_input
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            format!(
+                "\n    (call $store_u8 (i64.add (local.get $in) (i64.const {i})) (i32.const {b}))"
+            )
+        })
+        .collect();
+    format!(
+        r#"(module
+  (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+  (import "extism:host/env" "store_u8" (func $store_u8 (param i64 i32)))
+  (import "extism:host/env" "output_set" (func $output_set (param i64 i64)))
+  (import "candyriya" "cancelEvent" (func $cancel (param i64) (result i64)))
+  (memory (export "memory") 1)
+  (func (export "on_event") (result i32)
+    (local $in i64)
+    (local.set $in (call $alloc (i64.const {host_len}))){host_stores}
+    (drop (call $cancel (local.get $in)))
+    (loop $spin
+      (br $spin))
+    (i32.const 0)))
+"#,
+        host_len = host_input.len(),
+    )
+}
+
+/// Compile the hang-after-cancel fixture.
+pub fn cancel_event_then_hang_plugin_wasm() -> Vec<u8> {
+    wat::parse_str(cancel_event_then_hang_plugin_wat()).expect("cancel fixture wat compiles")
+}
+
 /// A module whose `on_event` always answers with the given static JSON
 /// `OutcomeReport` document.
 pub fn response_plugin_wat(response: &str) -> String {

@@ -18,7 +18,9 @@
 //!
 //! The actual binding functions (host functions the plugins call, exports
 //! the host calls) live in `candyriya-plugin`; they are intentionally not
-//! here. This crate is the *contract* those bindings are built on.
+//! here. The [`CandyriyaHostApi`] trait and the `host` module types are
+//! the *contract* those bindings are built on: the exact wire shapes,
+//! published for plugin SDKs to code against.
 //!
 //! Contents:
 //!
@@ -46,6 +48,10 @@
 //!   built, serialized and handed over whole.
 //! - [`MessageMode`] — how the host should deliver a message
 //!   (plain chat, system message or the actionbar overlay).
+//! - [`CandyriyaHostApi`] — the published mirror of the
+//!   `candyriya:*` host-function surface: exact wire shapes, wire-name
+//!   constants and the typed contract hosts implement and SDKs bind
+//!   against.
 //! - [`KickReason`] / [`DisconnectReason`] — the pre-built kick and
 //!   disconnect reasons, renderable to MiniMessage via candyriya-i18n.
 //! - [`text`] / [`translatable`] — the two component constructors plugin
@@ -76,6 +82,7 @@
 
 mod bossbar;
 mod events;
+mod host;
 mod kick;
 mod message;
 mod metadata;
@@ -92,6 +99,12 @@ pub use crate::events::{
     ConnectAllowedEvent, DisconnectEvent, EventCancellation, EventEnvelope, EventIdRegistry,
     EventKind, EventPayload, KickEvent, LoginEvent, MinecraftEvent, OutcomeReport, PlayerRef,
     PluginEvent, ProxyEvent, SwitchServerEvent,
+};
+pub use crate::host::{
+    CALL_API_FN, CANCEL_EVENT_FN, CallApiRequest, CallApiResponse, CancelEventRequest,
+    CandyriyaHostApi, GET_LOCALE_FN, GET_PLAYER_ROSTER_FN, HELLO_WORLD_FN, HOST_NAMESPACE, HostOk,
+    LIST_SERVERS_FN, LOG_MESSAGE_FN, LogLevel, LogMessage, PING_PLAYER_FN, PlayerNameRequest,
+    SUBSCRIBE_TO_EVENTS_FN, SWITCH_PLAYER_FN, SwitchPlayerRequest,
 };
 pub use crate::kick::{DisconnectReason, KickReason};
 pub use crate::message::{ComponentBuilder, MessageMode, text, translatable};

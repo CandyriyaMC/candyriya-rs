@@ -76,11 +76,15 @@ pub struct LoadReport {
 /// and re-uses it for reload passes. Sandbox limits default to
 /// [`Limits::default`]; use [`PluginLoader::with_limits`] to apply the
 /// `[plugins]` section of `candyriya-config` (see `LimitBuilder::from_config`).
+/// Host functions see the same [`crate::ServiceRegistry`] the loader is built with;
+/// use [`PluginLoader::with_services`] to share one with the rest of the
+/// proxy (the dispatcher is required for `candyriya:callApi` to work).
 pub struct PluginLoader<'a> {
     plugins_dir: PathBuf,
     libraries_dir: PathBuf,
     cache: &'a CacheManager,
     limits: Limits,
+    services: crate::service_registry::ServiceRegistry,
 }
 
 impl<'a> PluginLoader<'a> {
@@ -101,7 +105,21 @@ impl<'a> PluginLoader<'a> {
             libraries_dir,
             cache,
             limits,
+            services: crate::service_registry::ServiceRegistry::new(),
         }
+    }
+
+    /// The service registry this loader hands to every plugin's host state.
+    ///
+    /// Host functions resolve cross-subsystem handles (the event dispatcher
+    /// for `candyriya:callApi`, the player roster, ...) through this
+    /// registry. The default is a fresh, empty registry — the composition
+    /// root should share its own so the plugins see the same services as
+    /// the rest of the proxy.
+    #[must_use]
+    pub fn with_services(mut self, services: crate::service_registry::ServiceRegistry) -> Self {
+        self.services = services;
+        self
     }
 
     /// The sandbox limits this loader applies to every plugin.
@@ -313,14 +331,24 @@ impl<'a> PluginLoader<'a> {
         } = candidate;
         let id = manifest.id().to_owned();
 
-        // every plugin owns <data_dir>/config/<id>/
-        let data_dir = self.cache.root().join("config").join(&id);
-        if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        // every plugin owns <data_dir>/config/<id>/ and <data_dir>/cache/<id>/
+        let data_root = self.cache.root().to_path_buf();
+        let config_dir = data_root.join("config").join(&id);
+        if let Err(e) = std::fs::create_dir_all(&config_dir) {
             let reason = format!(
-                "failed to create plugin data directory {}: {e}",
-                data_dir.display()
+                "failed to create plugin config directory {}: {e}",
+                config_dir.display()
             );
-            issues.push((data_dir.clone(), reason.clone()));
+            issues.push((config_dir.clone(), reason.clone()));
+            return LibraryPlugin::failed(dir, manifest, origin, reason);
+        }
+        let cache_dir = data_root.join("cache").join(&id);
+        if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+            let reason = format!(
+                "failed to create plugin cache directory {}: {e}",
+                cache_dir.display()
+            );
+            issues.push((cache_dir.clone(), reason.clone()));
             return LibraryPlugin::failed(dir, manifest, origin, reason);
         }
 
@@ -330,7 +358,8 @@ impl<'a> PluginLoader<'a> {
             return LibraryPlugin::failed(dir, manifest, origin, why);
         }
 
-        let host_state = HostState::with_instance_slots(data_dir, Arc::clone(instance_slots));
+        let host_state = HostState::with_instance_slots(data_root, Arc::clone(instance_slots), &id)
+            .with_services(Arc::new(self.services.clone()));
         let instance = match PluginInstance::new(&wasm_path, host_state, &id, &self.limits) {
             Ok(instance) => instance,
             Err(e) => {

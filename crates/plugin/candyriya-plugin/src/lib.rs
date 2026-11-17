@@ -24,21 +24,30 @@
 //!   registry (route handle, config store, permissions resolver, ... keys).
 //! - [`ProxyEventDispatcher`] — fans a [`candyriya_plugin_api::ProxyEvent`]
 //!   into every loaded plugin, in load order, with a per-plugin timeout.
-//! - [`PluginReloader`] / [`Watch`] — hot reload primitives: swap a
+//!   Host functions that route between plugins go through its
+//!   [`ProxyEventDispatcher::call_api`].
+//! - [`PluginReloader`] / [`Watch`] - hot reload primitives: swap a
 //!   plugin for its on-disk state, watch `plugins/` and trigger reloads
 //!   through the task service. [`PluginReloader::reload_all`] re-reads
 //!   every running plugin and picks up newcomers under the roots.
+//! - **Host functions** - the `candyriya:*` functions a plugin can call
+//!   from WASM (`candyriya:helloWorld`, `candyriya:callApi`,
+//!   `candyriya:cancelEvent`, ...), registered on every instance by
+//!   [`PluginInstance::new`]. They read the plugin's identity from
+//!   [`HostState`] (never from the wire), resolve cross-subsystem handles
+//!   through the [`ServiceRegistry`], and are documented as the
+//!   [`candyriya_plugin_api::CandyriyaHostApi`] contract for plugin authors.
 //!
-//! Not implemented here yet (by design, they land next): host functions and
-//! the task API. No host functions are registered today. Sandbox limits for
-//! modules (memory/fuel/time/byte/handle accounting and the per-window call
-//! rate limit) live in [`Limits`] and are applied by [`PluginInstance::new`].
+//! Sandbox limits for modules (memory/fuel/time/byte/handle accounting and
+//! the per-window call rate limit) live in [`Limits`] and are applied by
+//! [`PluginInstance::new`].
 
 #![forbid(unsafe_code)]
 
 mod dep_resolution;
 mod dispatch;
 mod error;
+mod host_functions;
 mod host_state;
 mod hot_reload;
 mod instance;
@@ -54,9 +63,14 @@ pub use crate::dep_resolution::{
     validate_set,
 };
 pub use crate::dispatch::{
-    DEFAULT_EVENT_TIMEOUT, DispatchResult, ON_EVENT_EXPORT, Outcome, ProxyEventDispatcher,
+    CallApiError, DEFAULT_EVENT_TIMEOUT, DispatchResult, ON_EVENT_EXPORT, Outcome,
+    ProxyEventDispatcher,
 };
 pub use crate::error::PluginError;
+pub use crate::host_functions::{
+    DISPATCHER_SERVICE_KEY, PLAYERS_PING_SINK_KEY, PLAYERS_ROSTER_KEY, PlayerPingSink,
+    SERVERS_NAMES_KEY,
+};
 pub use crate::host_state::HostState;
 pub use crate::hot_reload::{HotReloadError, PluginReloader, ReloadAllReport, ReloadReport, Watch};
 pub use crate::instance::PluginInstance;

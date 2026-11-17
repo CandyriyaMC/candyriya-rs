@@ -111,7 +111,7 @@ fn module_requesting_32mib_of_memory_fails_with_default_limits() {
 
     let error = expect_err(PluginInstance::new(
         &wasm_path,
-        HostState::new(dir),
+        HostState::new(dir, "test-plugin"),
         "greedy",
         &Limits::new(),
     ));
@@ -135,8 +135,13 @@ fn memory_growth_beyond_the_cap_traps_at_runtime() {
     let wasm_path = write_wasm(temp.path(), "grow.wasm", MEMORY_GROW_WAT);
     let dir = temp.path().join("data");
 
-    let instance = PluginInstance::new(&wasm_path, HostState::new(dir), "grower", &Limits::new())
-        .expect("module with one initial page loads");
+    let instance = PluginInstance::new(
+        &wasm_path,
+        HostState::new(dir, "test-plugin"),
+        "grower",
+        &Limits::new(),
+    )
+    .expect("module with one initial page loads");
 
     let result = instance.call("on_event", b"");
     assert!(
@@ -152,8 +157,13 @@ fn fuel_limited_infinite_loop_times_out() {
     let dir = temp.path().join("data");
     let limits = Limits::builder().max_fuel(1_000_000).build();
 
-    let instance = PluginInstance::new(&wasm_path, HostState::new(dir), "fuel-loop", &limits)
-        .expect("module compiles under fuel metering");
+    let instance = PluginInstance::new(
+        &wasm_path,
+        HostState::new(dir, "test-plugin"),
+        "fuel-loop",
+        &limits,
+    )
+    .expect("module compiles under fuel metering");
 
     let start = Instant::now();
     let error = instance
@@ -184,7 +194,7 @@ fn fuel_zero_is_unlimited_and_normal_calls_work() {
     // Limits::default() carries max_fuel = 0 (unlimited)
     let instance = PluginInstance::new(
         &wasm_path,
-        HostState::new(dir),
+        HostState::new(dir, "test-plugin"),
         "normal",
         &Limits::default(),
     )
@@ -204,7 +214,7 @@ fn table_beyond_the_cap_is_rejected_at_load() {
 
     let error = expect_err(PluginInstance::new(
         &wasm_path,
-        HostState::new(dir),
+        HostState::new(dir, "test-plugin"),
         "table",
         &Limits::new(),
     ));
@@ -231,7 +241,7 @@ fn function_cap_is_enforced() {
     // a cap of 1 rejects a two-function module
     let error = expect_err(PluginInstance::new(
         &two,
-        HostState::new(temp.path().join("d1")),
+        HostState::new(temp.path().join("d1"), "d1-plugin"),
         "two",
         &Limits::builder().max_functions(1).build(),
     ));
@@ -251,7 +261,7 @@ fn function_cap_is_enforced() {
     // the same module loads untouched under the default cap
     PluginInstance::new(
         &one,
-        HostState::new(temp.path().join("d2")),
+        HostState::new(temp.path().join("d2"), "d2-plugin"),
         "one",
         &Limits::default(),
     )
@@ -269,8 +279,13 @@ fn input_beyond_the_cap_is_rejected_before_the_call() {
     let dir = temp.path().join("data");
     let limits = Limits::builder().max_input_bytes(16).build();
 
-    let instance = PluginInstance::new(&wasm_path, HostState::new(dir), "input-cap", &limits)
-        .expect("module loads");
+    let instance = PluginInstance::new(
+        &wasm_path,
+        HostState::new(dir, "test-plugin"),
+        "input-cap",
+        &limits,
+    )
+    .expect("module loads");
 
     let error = instance
         .call("on_event", &[0u8; 17])
@@ -302,7 +317,7 @@ fn output_beyond_the_cap_fails_and_at_cap_passes() {
     let big = write_wasm(temp.path(), "big.wasm", &output_wat(2 * 1024 * 1024));
     let instance = PluginInstance::new(
         &big,
-        HostState::new(temp.path().join("big-data")),
+        HostState::new(temp.path().join("big-data"), "big-data-plugin"),
         "big",
         &Limits::new(), // default cap: 1 MiB
     )
@@ -328,7 +343,7 @@ fn output_beyond_the_cap_fails_and_at_cap_passes() {
     let exact = write_wasm(temp.path(), "exact.wasm", &output_wat(2048));
     let exact_instance = PluginInstance::new(
         &exact,
-        HostState::new(temp.path().join("exact-data")),
+        HostState::new(temp.path().join("exact-data"), "exact-data-plugin"),
         "exact",
         &Limits::builder().max_output_bytes(2048).build(),
     )
@@ -350,8 +365,13 @@ fn rate_limit_blocks_2000_calls_in_one_window() {
     let dir = temp.path().join("data");
     let limits = Limits::builder().max_calls(2000).build();
 
-    let instance = PluginInstance::new(&wasm_path, HostState::new(dir), "rate", &limits)
-        .expect("module loads");
+    let instance = PluginInstance::new(
+        &wasm_path,
+        HostState::new(dir, "test-plugin"),
+        "rate",
+        &limits,
+    )
+    .expect("module loads");
 
     for _ in 0..2000 {
         instance
@@ -385,8 +405,13 @@ fn rate_limit_zero_is_unlimited() {
     let dir = temp.path().join("data");
     let limits = Limits::builder().max_calls(0).build();
 
-    let instance = PluginInstance::new(&wasm_path, HostState::new(dir), "unlimited", &limits)
-        .expect("module loads");
+    let instance = PluginInstance::new(
+        &wasm_path,
+        HostState::new(dir, "test-plugin"),
+        "unlimited",
+        &limits,
+    )
+    .expect("module loads");
     for _ in 0..30 {
         instance
             .call("on_event", b"")
@@ -405,8 +430,13 @@ fn open_handles_beyond_64_fail() {
     let dir = temp.path().join("data");
 
     // the default cap: 64 open handles
-    let instance = PluginInstance::new(&wasm_path, HostState::new(dir), "handles", &Limits::new())
-        .expect("module loads");
+    let instance = PluginInstance::new(
+        &wasm_path,
+        HostState::new(dir, "test-plugin"),
+        "handles",
+        &Limits::new(),
+    )
+    .expect("module loads");
     let table = instance.handle_table();
 
     let handles: Vec<_> = (0..64)
@@ -445,9 +475,12 @@ fn instance_limit_default_is_a_single_instance_per_plugin() {
     );
     let slots = Arc::new(InstanceSlots::new());
 
-    let first = HostState::with_instance_slots(temp.path().join("d1"), Arc::clone(&slots));
-    let second = HostState::with_instance_slots(temp.path().join("d2"), Arc::clone(&slots));
-    let third = HostState::with_instance_slots(temp.path().join("d3"), Arc::clone(&slots));
+    let first =
+        HostState::with_instance_slots(temp.path().join("d1"), Arc::clone(&slots), "same-id");
+    let second =
+        HostState::with_instance_slots(temp.path().join("d2"), Arc::clone(&slots), "same-id");
+    let third =
+        HostState::with_instance_slots(temp.path().join("d3"), Arc::clone(&slots), "same-id");
 
     let instance = PluginInstance::new(&wasm_path, first, "same-id", &Limits::new())
         .expect("first instance fits the default single slot");
@@ -473,7 +506,7 @@ fn instance_limit_default_is_a_single_instance_per_plugin() {
     // a different plugin id is unaffected
     PluginInstance::new(
         &wasm_path,
-        HostState::with_instance_slots(temp.path().join("d4"), Arc::clone(&slots)),
+        HostState::with_instance_slots(temp.path().join("d4"), Arc::clone(&slots), "other-id"),
         "other-id",
         &Limits::new(),
     )
@@ -500,6 +533,7 @@ fn instance_limit_zero_is_unlimited() {
         let state = HostState::with_instance_slots(
             temp.path().join(format!("d{index}")),
             Arc::clone(&slots),
+            "many",
         );
         instances.push(
             PluginInstance::new(
