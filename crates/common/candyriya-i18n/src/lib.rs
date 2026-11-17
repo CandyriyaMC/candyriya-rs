@@ -42,6 +42,11 @@
 //!
 //! This function never panics and a missing key is never an error.
 //!
+//! Plugins cross the WASM boundary with a narrower chain, exposed as
+//! [`I18n::t_for_plugin`]: the plugin's own file (active, then en), then
+//! `L/common.toml`, then `en/common.toml`, then the key itself. Core
+//! `candyriya.toml` files and other plugins' files are out of reach.
+//!
 //! # MiniMessage note
 //!
 //! The values are MiniMessage strings; the proxy parses them with

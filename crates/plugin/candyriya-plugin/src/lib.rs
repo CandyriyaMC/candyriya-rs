@@ -14,6 +14,9 @@
 //! - [`LibraryPlugin`] / [`PluginState`] — per-plugin records and lifecycle
 //!   (`Loaded` / `Failed` / `Disabled`).
 //! - [`HostState`] — host-side state handed to each instance.
+//! - [`SharedLocales`] — the shared pair of i18n machines plugin host
+//!   functions (`candyriya:i18nT` / `candyriya:i18nLocale`) resolve
+//!   through; cloning shares tables and registrations.
 //! - [`dep_resolution::resolve_plugin_order`] / [`dep_resolution::resolve_plugins`] —
 //!   the dependency resolver: turns the discovered set into a dependency
 //!   load order (libraries first, then plugins, alphabetical, then
@@ -53,6 +56,7 @@ mod hot_reload;
 mod instance;
 mod library_plugin;
 mod limits;
+mod locales;
 mod manifest;
 mod plugin_loader;
 mod plugin_set;
@@ -78,6 +82,7 @@ pub use crate::library_plugin::{LibraryPlugin, PluginOrigin, PluginState};
 pub use crate::limits::{
     CALL_WINDOW, HandleTable, HostHandle, InstanceSlots, LimitBuilder, Limits, LogBudget,
 };
+pub use crate::locales::SharedLocales;
 pub use crate::manifest::{DuplicateId, DuplicatePluginIds, PluginManifest, validate_unique};
 pub use crate::plugin_loader::{LoadIssue, LoadReport, PluginLoader};
 pub use crate::plugin_set::PluginSet;

@@ -26,7 +26,8 @@ The short version, before the details:
 - **Not wired into the proxy yet:** events are not dispatched into plugins
   during a real connection; plugins are loaded at startup and on demand via
   `/candyriya reload` (no filesystem watcher is armed in the CLI today);
-  no host functions are registered.
+  host functions are registered (the i18n surface is live - see
+  [I18n](#i18n)), but their proxy-side backends are mostly unwired.
 - **Not enforced:** the `permissions` list in `plugin.toml` is validated
   structurally but never checked against any action.
 
@@ -70,8 +71,8 @@ Extism-compatible wasm module can be a plugin: Rust (via `extism-pdk`), Go,
 AssemblyScript, C#, C, Zig and others. The host does not know or care what
 language you used. The price is that the boundary carries bytes, not Rust
 types: structured data crosses as JSON, and host capabilities arrive as
-host functions (which do not exist yet - see
-[Status](#where-things-stand)).
+host functions (the `candyriya:*` surface; the i18n part is live - see
+[I18n](#i18n)).
 
 For readers coming from other proxies: there is no plugin classloader, no
 dependency of the host on your module's internals, and no way for a broken
@@ -178,6 +179,9 @@ permissions = ["players.read"]
 cache_quota_bytes = 16777216        # optional
 cache_quota_resources = 1024        # optional
 
+# plugin locale files (optional, empty table opts in)
+[locales]
+
 [api]
 exports = [{ name = "hello_world" }, { name = "ping" }]
 ```
@@ -200,6 +204,7 @@ Field by field:
 | `permissions` | string list | no | Capability whitelist as opaque strings. Must be non-empty and unique, no leading/trailing whitespace. **Not enforced.** |
 | `cache_quota_bytes` | integer (u64) | no | Max bytes in this plugin's cache namespace. `None` = proxy default. |
 | `cache_quota_resources` | integer (u64) | no | Max cache resources in this plugin's namespace. `None` = proxy default. |
+| `[locales]` | (empty) table | no | Opts into the `locales/<lang>/<id>.toml` convention; the proxy registers those files at load and on `/candyriya reload`. See [Plugin locale files](#plugin-locale-files). |
 | `[api].exports` | table array | no | Exports other plugins may call. See [exports](#apiexports). |
 
 Two naming notes that trip people up:
@@ -596,22 +601,33 @@ lookup never panics and a missing key is never an error.
 
 ### Plugin locale files
 
-The host-side hook for plugin locales is
-`I18n::register_plugin_locale(plugin_id, dir)` - it loads
-`<dir>/<active-locale>/<plugin_id>.toml` and, when the active locale is
-not English, `<dir>/en/<plugin_id>.toml`. There is no `common.toml` for
-plugins; your file is your file.
-
-**Status, plainly: this is not wired into the proxy yet.** The plugin
-loader does not call `register_plugin_locale`, and no plugin locale files
-are loaded at proxy startup today - the only call sites are in the i18n
-crate's own tests. The expected layout, for when the wiring lands, is a
-`locales/` directory in your plugin's own directory:
+A plugin that ships user-facing strings declares an empty `[locales]`
+table in its `plugin.toml` and drops its locale files next to its
+`plugin.toml`, in a `locales/` tree named after the plugin id:
 
 ```text
 <data_dir>/plugins/my-plugin/locales/en/my-plugin.toml
 <data_dir>/plugins/my-plugin/locales/ex_girl/my-plugin.toml
 ```
+
+```toml
+# plugins/my-plugin/plugin.toml
+id = "my-plugin"
+# ...
+plugin_api = "0.1"
+
+[locales]
+```
+
+At load time the proxy registers those files into the same i18n machine
+the proxy itself uses (`I18n::register_plugin_locale(plugin_id, dir)`,
+with `dir` = the plugin's `locales/` directory). `/candyriya reload`
+re-reads the registered files, so an edit applies without a restart; a
+plugin that gains `[locales]` (or fixes a broken file) is picked up by
+the reload pass as well. There is no `common.toml` for plugins; your
+file is your file. (In the core machine, registered plugin files sit
+after the core `candyriya` files and before `common`; from inside wasm
+the chain is narrower still - see below.)
 
 Name the file after your plugin id. Values are MiniMessage, flat keys
 quoted as strings:
@@ -623,19 +639,16 @@ quoted as strings:
 
 Rules for plugin authors:
 
-- **Namespace your keys as `plugin.<your-id>.*`.** That is the convention
-  from the project's i18n design notes - core keys use their own
-  prefixes (`proxy.*`, `common.*`), plugin keys use `plugin.*`. Be aware
-  it is **not enforced by the code today** - nothing stops you from using
-  any flat key, and nothing catches a collision for you. Keep to the
-  namespace anyway; colliding keys will bite you the moment enforcement
-  lands.
+- **Namespace your keys as `plugin.<your-id>.*`.** Core keys use their
+  own prefixes (`proxy.*`, `common.*`), plugin keys use `plugin.*`.
+  This one **is** enforced at the host boundary: `candyriya:i18nT`
+  resolves only `plugin.<your-id>.*` keys plus shared `common.*` keys;
+  anything else answers with the key itself.
 - **Do not shadow core keys, and do not try to shadow other plugins'
-  keys.** Plugin files are checked *after* the core files in the lookup
-  chain, so core strings are not overridable. Within the plugin tier,
-  earlier-registered files are checked first and win, so you can only
-  shadow a plugin registered after you - and everyone will hate you for
-  it. Keep your file to your own namespaced keys.
+  keys.** Core strings are never overridable by plugins. For a given
+  plugin, the host looks up only that plugin's own file (active, then
+  `en`) - another plugin's file is never consulted for your keys.
+  Keep your file to your own namespaced keys.
 - Values are MiniMessage, parsed with `lobsterchat` at the point of use.
   The i18n layer only stores and interpolates strings; it deliberately
   does not parse values at lookup time, so a bad value in your file is
@@ -644,14 +657,35 @@ Rules for plugin authors:
 - Template files with the same key set for every locale you ship; adding
   a key without both locales is a bug, same rule as core.
 
-There is one more piece of this that does not exist yet: the WASM host
-functions `i18n.t` / `i18n.locale`. They are planned for the
-host-function milestone, and they are the only way a plugin will ever
-read proxy strings from inside wasm. **Today your plugin cannot call the
-i18n service at all** - no host functions are registered. If you put a
-user-facing string in your Rust/WAT source today, it will be hardcoded
-English (or whatever you write); when the host functions land, move it into
-your `locales/` files and call `i18n.t`.
+### Calling i18n from wasm
+
+Two host functions, under the `candyriya` namespace:
+
+- `candyriya:i18nT(key, args?) -> string` — input is a JSON object,
+  e.g. `{"key": "plugin.my-plugin.connected", "args": {"server": "hub"}}`;
+  `args` is optional. `{name}` placeholders in the resolved template are
+  interpolated host-side from the object (a string value is used as-is;
+  any other value is stringified compactly). The answer is a raw UTF-8
+  string — the interpolated text, ready for `parse_minimessage` if you
+  want to render it.
+- `candyriya:i18nLocale() -> string` — the active locale for this
+  plugin, e.g. `en`.
+
+The resolution chain for a plugin's key is narrower than the core one:
+
+1. the plugin's own `<active>/<your-id>.toml`, then its own `en` sibling;
+2. `<active>/common.toml`;
+3. `en/common.toml`;
+4. the key itself, with a one-time warn per key.
+
+Core `candyriya.*` files are deliberately out of the chain. A key
+outside your own namespace and `common.*` answers with the key itself,
+exactly like a missing key — i18n never panics and a miss is never an
+error. (For comparison, the core chain is documented above; plugins do
+not get the core tier.)
+
+Without `[locales]` in `plugin.toml` the proxy does not register your
+files and `i18nT` resolves against the common tables only.
 
 ## Limits
 
@@ -872,8 +906,11 @@ Two things to not expect:
   your own code as above. The wire format is JSON and built for stability
   (the ABI compatibility rule is same-major, equal-or-older-minor) - but
   expect additive changes and pin what you rely on.
-- **No host functions to call yet.** Your plugin cannot read the i18n
-  service, query the player roster, log through the proxy, schedule tasks,
-  or call peers. All of that is the host-function milestone. Write the
-  plugin so it does useful, self-contained work (answer events, read its
-  own data directory) and the rest will plug in.
+- **The i18n host functions are live.** Your plugin can resolve its own
+  `plugin.<id>.*` keys plus shared `common.*` keys with `candyriya:i18nT`,
+  and read its active locale with `candyriya:i18nLocale` (see
+  [Calling i18n from wasm](#calling-i18n-from-wasm)). The rest of the
+  surface - the player roster, logging, scheduling, peer calls - is the
+  host-function milestone. Write the plugin so it does useful,
+  self-contained work (answer events, read its own data directory) and the
+  rest will plug in.

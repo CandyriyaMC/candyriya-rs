@@ -52,6 +52,18 @@ pub struct ApiExport {
     pub name: String,
 }
 
+/// The `[locales]` section of `plugin.toml`.
+///
+/// Declaring it opts the plugin into the plugin-locale convention: the
+/// plugin ships `locales/<lang>/<plugin-id>.toml` files next to its
+/// `plugin.toml` (same directory as the wasm module), and the proxy
+/// registers them into the shared i18n machine when the plugin loads.
+/// `/candyriya reload` re-reads the registered files, so edits apply
+/// without a restart. The table is empty on purpose — the layout is the
+/// contract; unknown keys are ignored for forward compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LocalesInfo {}
+
 /// The `[api]` section of `plugin.toml`.
 ///
 /// Declares which exports of this plugin other plugins are allowed to
@@ -115,6 +127,11 @@ pub struct PluginMetadata {
     /// `None` means the proxy default applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_quota_resources: Option<u64>,
+    /// The `[locales]` section. Declaring it opts the plugin into the
+    /// `locales/<lang>/<plugin-id>.toml` convention; the proxy registers
+    /// those files into the shared i18n machine at load time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locales: Option<LocalesInfo>,
     /// The `[api]` section, listing exports callable by other plugins.
     #[serde(default)]
     pub api: ApiInfo,

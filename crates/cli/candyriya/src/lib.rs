@@ -49,7 +49,8 @@ use candyriya_command::{CommandRegistry, CommandState, ShutdownHandle};
 use candyriya_config::{Config, ConfigStore, DEFAULT_CONFIG_TOML};
 use candyriya_i18n::I18n;
 use candyriya_plugin::{
-    LimitBuilder, PluginLoader, PluginReloader, PluginSet, ServiceRegistry, resolve_plugins,
+    LimitBuilder, PluginLoader, PluginReloader, PluginSet, ServiceRegistry, SharedLocales,
+    resolve_plugins,
 };
 use candyriya_proxy::{FaviconCache, ProxySocket, ProxyState, SocketConfig, serve};
 use candyriya_route::BackendRegistry;
@@ -358,7 +359,7 @@ async fn run_async(
 
     // ---- command tree: the registry itself is built after the plugin set
     // exists, so `/candyriya reload` can run both phases
-    let locales = build_locales(data_dir)?;
+    let (locales, plugin_locales) = build_locales(data_dir)?;
     let shutdown = ShutdownHandle::new();
     let directory = Arc::new(CliDirectory::new(
         Arc::clone(&store),
@@ -375,7 +376,7 @@ async fn run_async(
     };
 
     // ---- plugins: startup load
-    let plugin_set = load_plugins(data_dir, &config, &cache);
+    let plugin_set = load_plugins(data_dir, &config, &cache, plugin_locales.clone());
     registry.register_service(
         "plugins.set".to_string(),
         Arc::clone(&plugin_set) as Arc<dyn std::any::Any + Send + Sync>,
@@ -392,6 +393,7 @@ async fn run_async(
         Arc::clone(&cache),
         registry.clone(),
         data_dir,
+        plugin_locales,
     );
     let command_registry =
         CommandRegistry::new(command_state, shutdown.clone()).with_reload(reload_fn);
@@ -594,6 +596,7 @@ fn reload_plugins_phase(
     plugin_set: &PluginSet,
     cache: &CacheManager,
     services: &ServiceRegistry,
+    plugin_locales: &SharedLocales,
 ) -> candyriya_command::PluginPhaseReport {
     // limits come from the current configuration, i.e. the post-config-reload
     // one when both phases run — a raised [plugins] cap applies immediately
@@ -604,13 +607,15 @@ fn reload_plugins_phase(
         data_dir.to_path_buf(),
         services.clone(),
         limits.clone(),
-    );
+    )
+    .with_locales(plugin_locales.clone());
     let loader = PluginLoader::with_limits(
         data_dir.join("plugins"),
         data_dir.join("libraries"),
         cache,
         limits.clone(),
-    );
+    )
+    .with_locales(plugin_locales.clone());
     let report = reloader.reload_all(&loader);
 
     let mut details = Vec::new();
@@ -667,6 +672,7 @@ fn build_reload_fn(
     cache: Arc<CacheManager>,
     services: ServiceRegistry,
     data_dir: &Path,
+    plugin_locales: SharedLocales,
 ) -> candyriya_command::ReloadFn {
     use candyriya_command::{ReloadReport, ReloadScope};
 
@@ -684,8 +690,16 @@ fn build_reload_fn(
                 &locales,
             )
         });
-        let plugins = plugin_phase
-            .then(|| reload_plugins_phase(&store, &data_dir, &plugin_set, &cache, &services));
+        let plugins = plugin_phase.then(|| {
+            reload_plugins_phase(
+                &store,
+                &data_dir,
+                &plugin_set,
+                &cache,
+                &services,
+                &plugin_locales,
+            )
+        });
 
         ReloadReport { config, plugins }
     })
@@ -703,21 +717,28 @@ fn warm_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) {
     let _ = refresh_favicon(config, Some(cache));
 }
 
-/// Build the command locales.
+/// Build the command locales plus the shared pair the plugin host
+/// functions resolve through.
 ///
 /// `<data_dir>/locales/{en,ex_girl}/*.toml` overrides the embedded tables;
 /// a broken override degrades to embedded with a warning instead of blocking
-/// startup, and an embedded failure is a build defect and fails hard.
-fn build_locales(data_dir: &Path) -> Result<candyriya_command::Locales, CliError> {
+/// startup, and an embedded failure is a build defect and fails hard. The
+/// returned [`SharedLocales`] is built from the same underlying handles, so
+/// plugin registrations and `/candyriya reload` apply to both.
+fn build_locales(data_dir: &Path) -> Result<(candyriya_command::Locales, SharedLocales), CliError> {
+    let pair = |en: I18n, ex_girl: I18n| {
+        (
+            candyriya_command::Locales::new(en.clone(), ex_girl.clone()),
+            SharedLocales::new(en, ex_girl),
+        )
+    };
     let locales_dir = data_dir.join("locales");
     if locales_dir.is_dir() {
         match (
             I18n::with_override_dir("en", &locales_dir),
             I18n::with_override_dir("ex_girl", &locales_dir),
         ) {
-            (Ok(en), Ok(ex_girl)) => {
-                return Ok(candyriya_command::Locales::new(en, ex_girl));
-            }
+            (Ok(en), Ok(ex_girl)) => return Ok(pair(en, ex_girl)),
             (en, ex_girl) => {
                 if let Err(error) = en {
                     warn!(%error, "failed to load en locale overrides; using embedded locale");
@@ -728,14 +749,25 @@ fn build_locales(data_dir: &Path) -> Result<candyriya_command::Locales, CliError
             }
         }
     }
-    candyriya_command::Locales::embedded()
-        .map_err(|error| CliError::Runtime(format!("embedded locales are broken: {error}")))
+    // embedded fallback: one pair of handles, cloned for the command and
+    // plugin sides so registrations and reloads stay in sync
+    match (I18n::new("en"), I18n::new("ex_girl")) {
+        (Ok(en), Ok(ex_girl)) => Ok(pair(en, ex_girl)),
+        (Err(error), _) | (_, Err(error)) => Err(CliError::Runtime(format!(
+            "embedded locales are broken: {error}"
+        ))),
+    }
 }
 
 /// Scan `plugins/` and `libraries/`, resolve the dependency order, and build
 /// the shared plugin set. Failures are logged, never fatal: a broken plugin
 /// must not take the proxy down.
-fn load_plugins(data_dir: &Path, config: &Config, cache: &CacheManager) -> Arc<PluginSet> {
+fn load_plugins(
+    data_dir: &Path,
+    config: &Config,
+    cache: &CacheManager,
+    plugin_locales: SharedLocales,
+) -> Arc<PluginSet> {
     let plugins_dir = data_dir.join("plugins");
     let libraries_dir = data_dir.join("libraries");
     // the data-dir layout ships both roots; create them so a first run does
@@ -746,7 +778,8 @@ fn load_plugins(data_dir: &Path, config: &Config, cache: &CacheManager) -> Arc<P
         }
     }
     let limits = LimitBuilder::from_config(config).build();
-    let loader = PluginLoader::with_limits(plugins_dir, libraries_dir, cache, limits);
+    let loader = PluginLoader::with_limits(plugins_dir, libraries_dir, cache, limits)
+        .with_locales(plugin_locales);
     let report = loader.load();
     for (where_, why) in &report.issues {
         warn!(path = %where_.display(), "plugin: {why}");

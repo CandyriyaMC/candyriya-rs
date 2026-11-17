@@ -129,6 +129,9 @@ struct Locales {
 
 /// Locale file pair of one plugin, resolved for the build.
 struct PluginLocales {
+    /// The plugin id this file pair belongs to (used for plugin-scoped
+    /// lookups that must not see other plugins' files).
+    id: String,
     active: LocaleMap,
     en: LocaleMap,
 }
@@ -140,6 +143,19 @@ impl Locales {
             .or_else(|| self.plugins.iter().find_map(|p| p.active.get(key)))
             .or_else(|| self.en_candyriya.get(key))
             .or_else(|| self.plugins.iter().find_map(|p| p.en.get(key)))
+            .or_else(|| self.active_common.get(key))
+            .or_else(|| self.en_common.get(key))
+            .map(String::as_str)
+    }
+
+    /// Plugin-scoped lookup, as served to a plugin through the WASM host
+    /// boundary: the plugin's own file (active, then en), then the common
+    /// chain. Core `candyriya` files and every other plugin's file are
+    /// deliberately out of reach.
+    fn lookup_for_plugin(&self, plugin_id: &str, key: &str) -> Option<&str> {
+        let own = self.plugins.iter().find(|p| p.id == plugin_id);
+        own.and_then(|p| p.active.get(key))
+            .or_else(|| own.and_then(|p| p.en.get(key)))
             .or_else(|| self.active_common.get(key))
             .or_else(|| self.en_common.get(key))
             .map(String::as_str)
@@ -179,6 +195,7 @@ fn build_locales(
                 override_file(Some(dir), "en", &file_name).unwrap_or_default()
             };
             PluginLocales {
+                id: id.clone(),
                 active: active_map,
                 en: en_map,
             }
@@ -394,6 +411,35 @@ impl I18n {
         let value = {
             let table = self.inner.load();
             table.lookup(key).map(str::to_owned)
+        };
+        match value {
+            Some(value) => interpolate(&value, args),
+            None => {
+                warn_missing_once(&self.missing, key);
+                key.to_owned()
+            }
+        }
+    }
+
+    /// Look up `key` exactly as a plugin sees it through the WASM host
+    /// boundary.
+    ///
+    /// The fallback chain is shorter than the core one and skips everything
+    /// a plugin has no business reading:
+    ///
+    /// 1. the plugin's **own** `<active>/<plugin_id>.toml`, then its own
+    ///    `en` sibling; other plugins' files are never consulted;
+    /// 2. `<active>/common.toml`;
+    /// 3. `en/common.toml`;
+    /// 4. the key itself, with a one-time `tracing::warn!` per key.
+    ///
+    /// Core `candyriya.toml` files are out of the chain on purpose: plugins
+    /// get their own namespace plus the shared `common` keys, nothing else.
+    /// Interpolation is identical to [`I18n::t`]. This function never panics.
+    pub fn t_for_plugin(&self, plugin_id: &str, key: &str, args: &[(&str, &str)]) -> String {
+        let value = {
+            let table = self.inner.load();
+            table.lookup_for_plugin(plugin_id, key).map(str::to_owned)
         };
         match value {
             Some(value) => interpolate(&value, args),

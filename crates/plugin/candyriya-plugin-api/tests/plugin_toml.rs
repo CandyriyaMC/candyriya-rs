@@ -39,6 +39,7 @@ fn parses_full_fixture() {
     assert_eq!(meta.api.exports.len(), 2);
     assert_eq!(meta.api.exports[0].name, "greet");
     assert_eq!(meta.api.exports[1].name, "status");
+    assert!(meta.locales.is_some());
 
     meta.validate().expect("fixture must validate");
 }
@@ -58,6 +59,7 @@ fn parses_required_fields_only() {
     assert_eq!(meta.cache_quota_bytes, None);
     assert_eq!(meta.cache_quota_resources, None);
     assert_eq!(meta.api, ApiInfo::default());
+    assert_eq!(meta.locales, None);
 
     meta.validate().expect("minimal manifest must validate");
 }

@@ -34,6 +34,8 @@
 //!   checks) is the loader's job, not this crate's.
 //! - [`ApiInfo`] / [`ApiExport`] — the `[api]` section listing exports
 //!   other plugins may call through the host.
+//! - [`LocalesInfo`] — the `[locales]` section opting the plugin into the
+//!   `locales/<lang>/<plugin-id>.toml` convention.
 //! - [`EventKind`] / [`EventPayload`] (alias [`PluginEvent`]) /
 //!   [`EventEnvelope`] / [`ProxyEvent`] / [`EventCancellation`] /
 //!   [`OutcomeReport`] / [`MinecraftEvent`] / [`EventIdRegistry`] /
@@ -103,12 +105,13 @@ pub use crate::events::{
 pub use crate::host::{
     CALL_API_FN, CANCEL_EVENT_FN, CallApiRequest, CallApiResponse, CancelEventRequest,
     CandyriyaHostApi, GET_LOCALE_FN, GET_PLAYER_ROSTER_FN, HELLO_WORLD_FN, HOST_NAMESPACE, HostOk,
-    LIST_SERVERS_FN, LOG_MESSAGE_FN, LogLevel, LogMessage, PING_PLAYER_FN, PlayerNameRequest,
-    SUBSCRIBE_TO_EVENTS_FN, SWITCH_PLAYER_FN, SwitchPlayerRequest,
+    I18N_LOCALE_FN, I18N_T_FN, I18nTRequest, LIST_SERVERS_FN, LOG_MESSAGE_FN, LogLevel, LogMessage,
+    PING_PLAYER_FN, PlayerNameRequest, SUBSCRIBE_TO_EVENTS_FN, SWITCH_PLAYER_FN,
+    SwitchPlayerRequest,
 };
 pub use crate::kick::{DisconnectReason, KickReason};
 pub use crate::message::{ComponentBuilder, MessageMode, text, translatable};
-pub use crate::metadata::{ApiExport, ApiInfo, MetadataError, PluginMetadata};
+pub use crate::metadata::{ApiExport, ApiInfo, LocalesInfo, MetadataError, PluginMetadata};
 pub use crate::minimessage::{escape_minimessage, parse_minimessage};
 pub use crate::tablist::{
     ACTION_ADD_PLAYER, ACTION_INITIALIZE_CHAT, ACTION_UPDATE_DISPLAY_NAME, ACTION_UPDATE_GAME_MODE,
