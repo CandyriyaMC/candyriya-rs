@@ -9,6 +9,8 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+bytes = { workspace = true }
+uuid = { workspace = true }
 thiserror = { workspace = true }
 candyriya-messaging = { version = "0.1.0", path = "../candyriya-messaging" }
 candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }

@@ -407,9 +407,11 @@ dependencies = [
 name = "candyriya-messaging-candyriya"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "candyriya-messaging",
  "candyriya-protocol",
  "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
