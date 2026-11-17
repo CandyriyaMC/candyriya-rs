@@ -5,7 +5,7 @@ title: Plugins
 
 # Plugins
 
-candyriya-rs runs plugins as [Extism](https://extism.org) WebAssembly modules.
+Candyriya runs plugins as [Extism](https://extism.org) WebAssembly modules.
 This page is the guide for plugin authors: where plugins live, what
 `plugin.toml` declares, what the host expects from your module, and what
 works today versus what is planned. For a description of the plugin runtime
@@ -35,7 +35,7 @@ and as the current state of the runtime, accurately separated.
 
 ## System overview
 
-A candyriya plugin is a `.wasm` module with an Extism-compatible ABI,
+A Candyriya plugin is a `.wasm` module with an Extism-compatible ABI,
 loaded by [extism](https://extism.org) on top of wasmtime. The Extism
 manifest the host builds carries no WASI: the plugin gets no filesystem,
 no sockets, no environment, and no clock beyond what the host may one day
@@ -866,7 +866,7 @@ raw WAT on that pattern and are a known-good reference.
 
 Two things to not expect:
 
-- **No published Rust crate for the candyriya plugin types yet.**
+- **No published Rust crate for the Candyriya plugin types yet.**
   `candyriya-plugin-api` is a host-side crate (`#![forbid(unsafe_code)]`,
   no runtime). You mirror `EventEnvelope` / `OutcomeReport` and friends in
   your own code as above. The wire format is JSON and built for stability

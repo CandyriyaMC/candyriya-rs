@@ -1,6 +1,6 @@
 # Development
 
-This document collects notes for people hacking on candyriya-rs. For building
+This document collects notes for people hacking on Candyriya. For building
 and submitting changes, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Audit pipeline

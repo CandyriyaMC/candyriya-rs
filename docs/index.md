@@ -1,13 +1,13 @@
 ---
 layout: default
-title: candyriya-rs
+title: Candyriya
 ---
 
-# candyriya-rs
+# Candyriya
 
 A high-performance Minecraft Java Edition proxy written in Rust.
 
-candyriya-rs is a from-scratch, asynchronous Minecraft proxy in the spirit of
+Candyriya is a from-scratch, asynchronous Minecraft proxy in the spirit of
 [Velocity](https://papermc.io/software/velocity), built on Tokio and designed
 for low latency and high connection counts. It speaks the vanilla protocol
 directly and forwards player connections to backend servers, adding modern
@@ -38,7 +38,7 @@ landed crate by crate.
 - [Installation](installation) — building from source, running the proxy,
   connecting a backend
 - [Configuration](configuration) — configuration file reference and hot reload
-- [Development](development) — notes for hacking on candyriya-rs,
+- [Development](development) — notes for hacking on Candyriya,
   including the audit pipeline
 - [Permissions](permissions) — the permission engine: nodes, contexts,
   inheritance and wildcards
@@ -48,14 +48,14 @@ landed crate by crate.
 
 ## Community
 
-- [Issues](https://github.com/bejiihiu/candyriya-rs/issues) — bug reports and
+- [Issues](https://github.com/CandyriyaMC/candyriya-rs/issues) — bug reports and
   feature requests (please use the templates)
-- [Discussions](https://github.com/bejiihiu/candyriya-rs/discussions) —
+- [Discussions](https://github.com/CandyriyaMC/candyriya-rs/discussions) —
   questions and ideas
-- [Contributing](https://github.com/bejiihiu/candyriya-rs/blob/main/CONTRIBUTING.md) —
+- [Contributing](https://github.com/CandyriyaMC/candyriya-rs/blob/main/CONTRIBUTING.md) —
   how to build, test and submit changes
-- [Security policy](https://github.com/bejiihiu/candyriya-rs/blob/main/SECURITY.md) —
+- [Security policy](https://github.com/CandyriyaMC/candyriya-rs/blob/main/SECURITY.md) —
   report vulnerabilities privately, never in public issues
 
-candyriya-rs is free software, licensed under
-[GPL-3.0](https://github.com/bejiihiu/candyriya-rs/blob/main/LICENSE).
+Candyriya is free software, licensed under
+[GPL-3.0](https://github.com/CandyriyaMC/candyriya-rs/blob/main/LICENSE).

@@ -77,7 +77,7 @@ allow-registry = [
     "https://github.com/rust-lang/crates.io-index",
 ]
 allow-git = [
-    "https://github.com/bejiihiu/candyriya-rs",
+    "https://github.com/CandyriyaMC/candyriya-rs",
 ]
 unused-allowed-source = "allow"
 

@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-candyriya-rs is developed on the `main` branch and is pre-1.0. Only the latest
+Candyriya is developed on the `main` branch and is pre-1.0. Only the latest
 release (and `main`) receives security fixes.
 
 | Version | Supported |
@@ -18,8 +18,8 @@ discussions, or pull requests.**
 
 Instead, report them privately via GitHub's private vulnerability reporting:
 
-1. Go to the [Security Advisories](https://github.com/bejiihiu/candyriya-rs/security/advisories) page.
-2. Click **Report a vulnerability** (or open [this link](https://github.com/bejiihiu/candyriya-rs/security/advisories/new) directly).
+1. Go to the [Security Advisories](https://github.com/CandyriyaMC/candyriya-rs/security/advisories) page.
+2. Click **Report a vulnerability** (or open [this link](https://github.com/CandyriyaMC/candyriya-rs/security/advisories/new) directly).
 3. Fill in as much detail as you can: affected version/commit, steps to
    reproduce, impact, and any suggested fix.
 
@@ -34,7 +34,7 @@ Instead, report them privately via GitHub's private vulnerability reporting:
 
 ## Scope
 
-This policy covers the candyriya-rs codebase: the proxy, its crates, and the
+This policy covers the Candyriya codebase: the proxy, its crates, and the
 release pipeline. Vulnerabilities in third-party dependencies should be
 reported upstream, but please let us know as well so we can bump the
 dependency or ship a mitigation.

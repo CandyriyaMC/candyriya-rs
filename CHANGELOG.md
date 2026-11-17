@@ -1,17 +1,17 @@
 # Changelog
 
-All notable changes to candyriya-rs are documented in this file.
+All notable changes to Candyriya are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 GitHub Releases are attached to tags automatically when they are pushed; each
 release carries the prebuilt binaries as assets. See the
-[Releases](https://github.com/bejiihiu/candyriya-rs/releases) page.
+[Releases](https://github.com/CandyriyaMC/candyriya-rs/releases) page.
 
 ## [0.1.0] - 2026-11-17
 
-The first tagged release of candyriya-rs: a from-scratch Minecraft Java Edition
+The first tagged release of Candyriya: a from-scratch Minecraft Java Edition
 proxy written in Rust — Tokio everywhere, no `unsafe`, and no JVM on the proxy
 host. Feature complete and documented end to end; see
 [Known limitations](#known-limitations) for the explicit edges.
@@ -19,7 +19,7 @@ host. Feature complete and documented end to end; see
 ### Download and install
 
 - **Prebuilt binaries** are attached to every tagged release on the
-  [Releases](https://github.com/bejiihiu/candyriya-rs/releases) page, one asset
+  [Releases](https://github.com/CandyriyaMC/candyriya-rs/releases) page, one asset
   per target: `candyriya-<version>-x86_64-unknown-linux-gnu.tar.gz`,
   `candyriya-<version>-aarch64-unknown-linux-gnu.tar.gz`,
   `candyriya-<version>-x86_64-pc-windows-msvc.zip`,
@@ -35,7 +35,7 @@ host. Feature complete and documented end to end; see
   `online-mode=false` and let modern forwarding tell it who the player is,
   then join.
 
-The [installation guide](https://bejiihiu.github.io/candyriya-rs/installation)
+The [installation guide](https://candyriyamc.github.io/candyriya-rs/installation)
 covers the whole path: requirements and OS matrix, prebuilt assets and source
 builds, online vs offline mode, modern forwarding end to end (Paper's
 `paper-global.yml`, `server.properties`, `spigot.yml`), the minimal
@@ -236,7 +236,7 @@ failures and how to update.
 Unknown keys are warnings, not errors; every validation problem is reported
 together with file location. Hot reload swaps the running configuration
 atomically; a failed reload keeps the old one. The full reference lives in
-[docs/configuration.md](https://bejiihiu.github.io/candyriya-rs/configuration).
+[docs/configuration.md](https://candyriyamc.github.io/candyriya-rs/configuration).
 
 - Root keys: `bind`, `motd` (MiniMessage only; `§`-codes are not supported),
   `motd-favicon`, `show-max-players`, `online-mode`, `force-key-authentication`,
@@ -275,20 +275,20 @@ atomically; a failed reload keeps the old one. The full reference lives in
 
 - **A full documentation site** lives in `docs/`, built to GitHub Pages,
   covering the whole product in four guides:
-  - [Installation](https://bejiihiu.github.io/candyriya-rs/installation) —
+  - [Installation](https://candyriyamc.github.io/candyriya-rs/installation) —
     requirements, downloads, building from source, online vs offline mode,
     modern forwarding end to end, a first-run checklist, troubleshooting and
     updating.
-  - [Configuration](https://bejiihiu.github.io/candyriya-rs/configuration) —
+  - [Configuration](https://candyriyamc.github.io/candyriya-rs/configuration) —
     every key in `candyriya.toml`, its type, default, behavior, validation
     rules and cross-key interactions; hot reload semantics.
-  - [Permissions](https://bejiihiu.github.io/candyriya-rs/permissions) — the
+  - [Permissions](https://candyriyamc.github.io/candyriya-rs/permissions) — the
     engine: node grammar, resolution precedence, contexts, groups, the
     config-backed provider, and worked examples.
-  - [Architecture](https://bejiihiu.github.io/candyriya-rs/architecture) —
+  - [Architecture](https://candyriyamc.github.io/candyriya-rs/architecture) —
     every crate in the workspace, the connection pipeline end to end, the
     dependency DAG, design notes and an honest build-status section.
-- **README.md** rewritten as a proper front page: what candyriya-rs is and
+- **README.md** rewritten as a proper front page: what Candyriya is and
   who it is for, a feature tour, honest status and credits.
 - **No stubs in the shipped guides.** The four guides above are complete
   references rather than placeholders; the plugin and command authoring pages
@@ -311,4 +311,4 @@ atomically; a failed reload keeps the old one. The full reference lives in
 - **TCP only.** There is no UDP/QUIC transport; the proxy speaks Minecraft's
   TCP protocol exclusively.
 
-[0.1.0]: https://github.com/bejiihiu/candyriya-rs/releases/tag/v0.1.0
+[0.1.0]: https://github.com/CandyriyaMC/candyriya-rs/releases/tag/v0.1.0

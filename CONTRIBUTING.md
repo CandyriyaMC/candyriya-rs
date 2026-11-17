@@ -1,9 +1,9 @@
-# Contributing to candyriya-rs
+# Contributing to Candyriya
 
 Thanks for your interest in contributing! This document covers the basics:
 building the project, running the checks, and what we expect from pull
 requests. For background and concepts, see the
-[documentation](https://bejiihiu.github.io/candyriya-rs).
+[documentation](https://candyriyamc.github.io/candyriya-rs).
 
 ## Building from source
 
@@ -11,7 +11,7 @@ You need a stable Rust toolchain (edition 2024), installed via
 [rustup](https://rustup.rs):
 
 ```shell
-git clone https://github.com/bejiihiu/candyriya-rs.git
+git clone https://github.com/CandyriyaMC/candyriya-rs.git
 cd candyriya-rs
 cargo build --release
 ```
@@ -103,7 +103,7 @@ Guidelines, and strict Clippy lints.
 
 ## Reporting bugs and requesting features
 
-Use the [issue templates](https://github.com/bejiihiu/candyriya-rs/issues/new/choose).
+Use the [issue templates](https://github.com/CandyriyaMC/candyriya-rs/issues/new/choose).
 For security issues, follow [SECURITY.md](SECURITY.md) instead — never file a
 public issue.
 

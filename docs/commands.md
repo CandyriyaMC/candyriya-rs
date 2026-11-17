@@ -5,7 +5,7 @@ title: Commands
 
 # Commands
 
-candyriya-rs exposes its built-in command set to two sources: players typing
+Candyriya exposes its built-in command set to two sources: players typing
 in Minecraft chat (a leading `/`), and the operator typing into the proxy's
 console (the terminal the proxy was started from). Both go through the same
 command tree, built on a Brigadier-style model: literal nodes (`/candyriya`,
@@ -26,7 +26,7 @@ Type the command after the prompt, without `/` (it also works with one):
 
 ```shell
 candyriya > /candyriya info
-CandyriyaProx v0.1.0
+Candyriya v0.1.0
 Uptime: 3h 12m
 Config: ./candyriya.toml (log level info)
 Players online: 0

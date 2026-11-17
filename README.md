@@ -1,4 +1,4 @@
-# candyriya-rs
+# Candyriya
 
 A from-scratch Minecraft Java Edition proxy written in Rust, built on Tokio.
 It connects players to your backend servers, forwards their identity securely,
@@ -7,7 +7,7 @@ plugins.
 
 ## What it is
 
-candyriya-rs is an independent community proxy, not a commercial product and
+Candyriya (candyriya-rs) is an independent community proxy, not a commercial product and
 not a rebrand of anything. It speaks the vanilla protocol directly, routes
 connections to backend servers, and adds the facilities a real network needs:
 secure player-info forwarding, forced hosts, fallback routing, a WASM plugin
@@ -16,7 +16,7 @@ in the open.
 
 ## Who it is for
 
-candyriya-rs is for people who run a Minecraft network and want a proxy they
+Candyriya is for people who run a Minecraft network and want a proxy they
 can inspect, trust and extend:
 
 - You run a lobby and a set of backends and want one native binary on the
@@ -30,7 +30,7 @@ can inspect, trust and extend:
 - You want to read the code before you run it. The workspace forbids
   `unsafe`, and every check CI runs is documented in CONTRIBUTING.md.
 
-The reason to select candyriya-rs for a network comes down to six things: a
+The reason to select Candyriya for a network comes down to six things: a
 core API bridge that plugins program against, proxy interop with the existing
 plugin-messaging world, a plugin architecture that keeps untrusted code on a
 short leash, a multi-thread async runtime that uses every core, a
@@ -83,35 +83,35 @@ every user-facing string.
 
 Installation is documented on the docs site rather than duplicated here:
 
-- [Installation guide](https://bejiihiu.github.io/candyriya-rs/installation) —
+- [Installation guide](https://candyriyamc.github.io/candyriya-rs/installation) —
   prebuilt release assets, building from source, online vs offline auth mode,
   modern forwarding setup, Paper backend configuration, a first-run checklist
   and an update procedure.
 
 Prebuilt binaries are published on the
-[GitHub Releases page](https://github.com/bejiihiu/candyriya-rs/releases) for
+[GitHub Releases page](https://github.com/CandyriyaMC/candyriya-rs/releases) for
 tagged versions. Until the first tag is cut, building from source is the
 honest path.
 
 ## Documentation
 
-The docs site is built from the [`docs/`](https://github.com/bejiihiu/candyriya-rs/tree/main/docs)
+The docs site is built from the [`docs/`](https://github.com/CandyriyaMC/candyriya-rs/tree/main/docs)
 directory in this repository:
 
-- [Installation](https://bejiihiu.github.io/candyriya-rs/installation) —
+- [Installation](https://candyriyamc.github.io/candyriya-rs/installation) —
   requirements, downloads, forwarding setup and first-run checklist
-- [Configuration](https://bejiihiu.github.io/candyriya-rs/configuration)
+- [Configuration](https://candyriyamc.github.io/candyriya-rs/configuration)
   (coming soon) — every key in `candyriya.toml`, validation and hot reload
-- [Permissions](https://bejiihiu.github.io/candyriya-rs/permissions)
+- [Permissions](https://candyriyamc.github.io/candyriya-rs/permissions)
   (coming soon) — the permission engine: nodes, contexts, inheritance and
   wildcards
-- [Plugin messaging](https://bejiihiu.github.io/candyriya-rs/plugin-messaging)
+- [Plugin messaging](https://candyriyamc.github.io/candyriya-rs/plugin-messaging)
   (coming soon) — the BungeeCord, Velocity and native `candyriya:main`
   channel specs
-- [Architecture](https://bejiihiu.github.io/candyriya-rs/architecture)
+- [Architecture](https://candyriyamc.github.io/candyriya-rs/architecture)
   (coming soon) — workspace layout, design notes and the crate dependency
   DAG
-- [Commands](https://bejiihiu.github.io/candyriya-rs/commands)
+- [Commands](https://candyriyamc.github.io/candyriya-rs/commands)
   (coming soon) — the built-in command set and its permission nodes
 
 Pages marked "coming soon" are being written; the source of truth is the
@@ -127,7 +127,7 @@ before a pull request is merged.
 
 ## Status and maturity
 
-Pre-1.0, under active development. candyriya-rs is being built in the open,
+Pre-1.0, under active development. Candyriya is being built in the open,
 crate by crate. Nothing here is a final API yet; configuration formats and
 plugin contracts may change between commits, and pre-1.0 upgrades are your
 responsibility.
@@ -168,23 +168,23 @@ any feature is what the code on `main` does, not what this page claims.
 ## Contributing
 
 Bug reports and feature requests go through
-[GitHub Issues](https://github.com/bejiihiu/candyriya-rs/issues) with the
+[GitHub Issues](https://github.com/CandyriyaMC/candyriya-rs/issues) with the
 templates; questions and ideas go to
-[GitHub Discussions](https://github.com/bejiihiu/candyriya-rs/discussions).
+[GitHub Discussions](https://github.com/CandyriyaMC/candyriya-rs/discussions).
 Those pages are where network operators and plugin authors should start.
 
-- [CONTRIBUTING.md](https://github.com/bejiihiu/candyriya-rs/blob/main/CONTRIBUTING.md)
+- [CONTRIBUTING.md](https://github.com/CandyriyaMC/candyriya-rs/blob/main/CONTRIBUTING.md)
   — how to build, test and submit changes; the repository squash-merges and
   uses Conventional Commits
-- [Code of Conduct](https://github.com/bejiihiu/candyriya-rs/blob/main/.github/CODE_OF_CONDUCT.md)
+- [Code of Conduct](https://github.com/CandyriyaMC/candyriya-rs/blob/main/.github/CODE_OF_CONDUCT.md)
   — the project follows the Contributor Covenant
-- [SECURITY.md](https://github.com/bejiihiu/candyriya-rs/blob/main/SECURITY.md)
+- [SECURITY.md](https://github.com/CandyriyaMC/candyriya-rs/blob/main/SECURITY.md)
   — how to report a vulnerability privately; never file a security issue in
   public
 
 ## Credits
 
-candyriya-rs stands on Tokio, the async runtime underneath everything here,
+Candyriya stands on Tokio, the async runtime underneath everything here,
 and on the wider Rust async ecosystem: bytes, crossbeam, dashmap, rayon,
 parking_lot, arc-swap, flate2, figment, tracing and the OpenTelemetry tooling.
 Its wire compatibility builds on the work of others: the Velocity project
@@ -193,10 +193,10 @@ Purpur are the reference backends, BungeeCord defined the plugin messaging
 wire format, and Minecraft protocol data from Mojang and the PrismarineJS
 project feeds the version registry. The cache layer uses cachegirl, the text
 and MiniMessage handling uses lobsterchat, and plugins run on Extism. All of
-it is free software, and so is candyriya-rs.
+it is free software, and so is Candyriya.
 
 ## License
 
-candyriya-rs is free software, licensed under the
-[GNU General Public License v3.0](https://github.com/bejiihiu/candyriya-rs/blob/main/LICENSE).
+Candyriya is free software, licensed under the
+[GNU General Public License v3.0](https://github.com/CandyriyaMC/candyriya-rs/blob/main/LICENSE).
 You can study, modify and redistribute it under the same terms.

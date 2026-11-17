@@ -5,14 +5,14 @@ title: Architecture
 
 # Architecture
 
-This page catalogues every crate in the candyriya-rs workspace: what it is
+This page catalogues every crate in the Candyriya workspace: what it is
 for, what it depends on, and how bytes move through the system. It is a
 reference for people reading the code base, not an introduction to the proxy
 — for running the proxy, see the [installation guide](installation).
 
 ## How to read this page
 
-candyriya-rs is one product split into many packages. Every crate named
+Candyriya is one product split into many packages. Every crate named
 `candyriya-*` is a separate package with its own `Cargo.toml`, its own tests
 and its own release cadence — but they are versioned and developed together,
 and none of them is useful or supported on its own. Think of the workspace
@@ -242,7 +242,7 @@ here; it models what the proxy does with them.
 a versioned v1 binary protocol with VarInt-framed strings (not CESU-8), a
 documented packet table for serverbound and clientbound directions, and
 strict direction pairing. This is the native surface for plugins that know
-they are talking to candyriya.
+they are talking to Candyriya.
 
 ### Identity and persistence
 
@@ -562,5 +562,5 @@ exact statements of what each part does today.
 - [Installation](installation) — building, running, backend forwarding setup
 - [Configuration](configuration) — the `candyriya.toml` reference
 - [Permissions](permissions) — the permission engine, nodes and precedence
-- [Contributing](https://github.com/bejiihiu/candyriya-rs/blob/main/CONTRIBUTING.md) —
+- [Contributing](https://github.com/CandyriyaMC/candyriya-rs/blob/main/CONTRIBUTING.md) —
   how the workspace is checked and merged

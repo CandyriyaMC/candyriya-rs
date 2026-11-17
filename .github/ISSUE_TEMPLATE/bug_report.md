@@ -39,7 +39,7 @@ body:
       label: Environment
       description: Client version, backend server software + version, operating system, proxy version/commit.
       placeholder: |
-        - candyriya-rs version/commit:
+        - Candyriya version/commit:
         - Client version:
         - Backend software (e.g. Paper 1.21.1):
         - OS:

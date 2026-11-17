@@ -5,7 +5,7 @@ title: Permissions
 
 # Permissions
 
-candyriya-rs ships its own permission engine in the workspace. It is not a
+Candyriya ships its own permission engine in the workspace. It is not a
 port of an existing plugin and it is not an external crate; the node
 grammar, the resolution algorithm and the provider contract are all
 implemented here. This page documents the model, the public API, the

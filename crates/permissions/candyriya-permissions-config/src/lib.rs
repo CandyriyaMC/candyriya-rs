@@ -1,6 +1,6 @@
 //! # candyriya-permissions-config
 //!
-//! The **default permission provider** for candyriya-rs: it sources grants from
+//! The **default permission provider** for Candyriya: it sources grants from
 //! the TOML configuration the proxy already owns (`[permissions]` in
 //! `candyriya.toml`) and materializes [`Grant`] instances for the
 //! [`candyriya_permissions`] engine. It is what runs on networks that do not

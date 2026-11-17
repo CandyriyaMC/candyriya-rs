@@ -596,7 +596,7 @@ async fn run_smoke() {
         Duration::from_secs(15),
         Duration::from_millis(100),
         "/candyriya info output",
-        || proxy.log.contains("CandyriyaProx") && proxy.log.contains("Uptime:"),
+        || proxy.log.contains("Candyriya") && proxy.log.contains("Uptime:"),
     );
     eprintln!("smoke: /candyriya info answered over the console");
 

@@ -14,7 +14,7 @@
 /// commented out because their defaults are the number of logical CPUs,
 /// which cannot be expressed in a static file.
 pub const DEFAULT_CONFIG_TOML: &str = r#"# candyriya configuration
-# Documentation: https://bejiihiu.github.io/candyriya-rs
+# Documentation: https://candyriyamc.github.io/candyriya-rs
 #
 # The proxy ships sane defaults; uncommented keys below show them.
 # Values in this file are the base layer — your candyriya.toml overrides

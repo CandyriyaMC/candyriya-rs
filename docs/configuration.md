@@ -5,7 +5,7 @@ title: Configuration
 
 # Configuration
 
-candyriya reads a single `candyriya.toml` file. This page is the reference
+Candyriya reads a single `candyriya.toml` file. This page is the reference
 for every key the proxy understands — there is no other configuration. The
 defaults are not invented; they come from the embedded, fully commented
 `DEFAULT_CONFIG_TOML` template that ships inside the binary. That template is
@@ -565,11 +565,11 @@ starts and is likewise restart-only.
 
 ## Troubleshooting configuration errors
 
-**Port already in use.** Another process (often a previous candyriya or a
+**Port already in use.** Another process (often a previous Candyriya or a
 backend) holds `bind`'s port: the listener fails at startup with a bind
 error, e.g. "address already in use". Stop the conflicting process or move
 `bind` to a free port (and update your firewall). `SO_REUSEPORT` via
-`enable-reuse-port = true` lets two candyriya instances share one port on
+`enable-reuse-port = true` lets two Candyriya instances share one port on
 Linux/macOS by kernel load-balancing — it is not a fix for an unrelated
 service holding the port, and it is ignored on Windows.
 

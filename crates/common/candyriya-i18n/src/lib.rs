@@ -1,4 +1,4 @@
-//! Locale loader for CandyriyaProx and its plugins.
+//! Locale loader for Candyriya and its plugins.
 //!
 //! User-facing strings for the proxy live in two embedded locales:
 //!

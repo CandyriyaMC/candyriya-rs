@@ -1,3 +1,5 @@
-title: candyriya-rs
-description: A high-performance Minecraft Java Edition proxy written in Rust
+title: Candyriya
+description: Candyriya is a high-performance Minecraft Java Edition proxy written in Rust
+url: https://candyriyamc.github.io
+baseurl: /candyriya-rs
 theme: jekyll-theme-cayman

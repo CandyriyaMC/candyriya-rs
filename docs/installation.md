@@ -5,9 +5,9 @@ title: Installation
 
 # Installation
 
-This guide covers getting the candyriya proxy onto a host, pointing it at
+This guide covers getting the Candyriya proxy onto a host, pointing it at
 backend servers, and surviving the first start. It assumes you have run
-Minecraft servers before; it does not explain what a proxy is. candyriya is
+Minecraft servers before; it does not explain what a proxy is. Candyriya is
 pre-1.0 — APIs and config formats may shift between commits.
 
 ## Requirements
@@ -40,7 +40,7 @@ directory out of shared folders.
 ### Prebuilt release
 
 Tagged releases publish binaries on the
-[GitHub Releases page](https://github.com/bejiihiu/candyriya-rs/releases).
+[GitHub Releases page](https://github.com/CandyriyaMC/candyriya-rs/releases).
 Assets are named `candyriya-<version>-<target>.tar.gz` (Linux and macOS) or
 `candyriya-<version>-<target>.zip` (Windows), where `<target>` is the Rust
 triple, e.g. `x86_64-unknown-linux-gnu` or `x86_64-pc-windows-msvc`. There is
@@ -57,7 +57,7 @@ transitive dependencies (`build-essential` on Debian/Ubuntu, `gcc` on Fedora,
 MSVC Build Tools or mingw-w64 on Windows):
 
 ```shell
-git clone https://github.com/bejiihiu/candyriya-rs.git
+git clone https://github.com/CandyriyaMC/candyriya-rs.git
 cd candyriya-rs
 cargo build --release
 ```
@@ -88,7 +88,7 @@ what forwarding is for, below.
 
 ## Configuration walkthrough
 
-candyriya reads a single `candyriya.toml`. With no file at all it runs on
+Candyriya reads a single `candyriya.toml`. With no file at all it runs on
 embedded defaults and generates a `forwarding.secret` on first start, so the
 smallest viable install is: one binary, one data directory, one backend.
 
@@ -200,7 +200,7 @@ configured kick message.
 ## Running the proxy
 
 The data directory is the current working directory by default; pass
-`--data-dir <path>` to pin it. Everything candyriya writes — `candyriya.toml`,
+`--data-dir <path>` to pin it. Everything Candyriya writes — `candyriya.toml`,
 `forwarding.secret`, `logs/candyriya.log.YYYY-MM-DD` (daily rotation),
 `players.json`, cache and plugins — lives there.
 
@@ -208,7 +208,7 @@ The data directory is the current working directory by default; pass
 
 ```ini
 [Unit]
-Description=candyriya-rs Minecraft proxy
+Description=Candyriya Minecraft proxy
 After=network-online.target
 Wants=network-online.target
 
