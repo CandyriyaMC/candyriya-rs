@@ -3,9 +3,9 @@
 //! Shows the network-wide online count followed by one line per configured
 //! backend, in `try`-chain order. The per-backend lines carry a **priority
 //! color**: priority 0 (first `try` target) renders green, priority 1 renders
-//! gold, everything else renders gray. The report itself is
-//! [`GlistReport`] — the very type the admin `/glist` reuses, so both entries
-//! share one implementation and one output shape.
+//! gold, everything else renders gray. The report itself is [`GlistReport`] —
+//! built by [`GlistReport::from_directory`] and rendered by
+//! [`GlistReport::render`].
 
 use azalea_brigadier::builder::argument_builder::ArgumentBuilder;
 
@@ -31,10 +31,9 @@ pub struct GlistServerEntry {
 /// Online players across the network: a network-wide total plus one entry
 /// per configured backend.
 ///
-/// This is the **shared implementation** for the player `/glist` and the
-/// admin `/glist`: both print exactly this report, built by
-/// [`GlistReport::from_directory`] and rendered by [`GlistReport::render`].
-/// There is intentionally no second formatting for the admin side.
+/// One shared implementation builds and renders the report; the command is a
+/// thin shell around it. There is intentionally exactly one output shape for
+/// the player list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlistReport {
     /// Players online across the whole network (including players who are
@@ -73,13 +72,13 @@ impl GlistReport {
 
     /// Renders the report as a sequence of MiniMessage lines for the locale.
     ///
-    /// Always emits the `players online:` total line first. On an empty
-    /// network a `candyriya.glist.empty` line follows it; otherwise each
-    /// configured backend gets its own priority-colored line (green first,
-    /// gold second, gray after that).
+    /// Always emits the total line first. On an empty network a
+    /// `candyriya.glist.empty` line follows it; otherwise each configured
+    /// backend gets its own priority-colored line (green first, gold second,
+    /// gray after that).
     pub fn render(&self, i18n: &candyriya_i18n::I18n) -> Vec<String> {
         let total = self.total.to_string();
-        let mut lines = vec![i18n.t("proxy.glist.total", &[("count", total.as_str())])];
+        let mut lines = vec![i18n.t("candyriya.glist.total", &[("count", total.as_str())])];
         if self.total == 0 {
             lines.push(i18n.t("candyriya.glist.empty", &[]));
             return lines;
@@ -103,13 +102,14 @@ impl GlistReport {
 /// value stays a parseable MiniMessage string.
 fn priority_line_key(priority: usize) -> &'static str {
     match priority {
-        0 => "proxy.glist.backend.first",
-        1 => "proxy.glist.backend.second",
-        _ => "proxy.glist.backend.rest",
+        0 => "candyriya.glist.backend.first",
+        1 => "candyriya.glist.backend.second",
+        _ => "candyriya.glist.backend.rest",
     }
 }
 
-/// The player-facing `/glist` command.
+/// The `/glist` command. Open to everyone: listing the network is the
+/// player-facing counterpart of the tab list.
 pub struct GlistCommand {
     state: CommandState,
 }
@@ -126,17 +126,14 @@ impl CandyCommand for GlistCommand {
         "glist"
     }
 
-    fn permission(&self) -> Option<&str> {
-        Some("candyriya.command.glist")
-    }
-
     fn build(&self, lit: ArgumentBuilder<CommandSource>) -> ArgumentBuilder<CommandSource> {
         let state = self.state.clone();
         lit.executes(move |ctx| {
-            let origin = ctx.source.origin().clone();
+            let source = &ctx.source;
             let report = GlistReport::from_directory(&*state.directory);
-            for line in report.render(&state.i18n) {
-                state.effects.message(&origin, line);
+            let lines = report.render(state.locales.pick(source));
+            for line in lines {
+                state.effects.send(source, &line);
             }
             1
         })

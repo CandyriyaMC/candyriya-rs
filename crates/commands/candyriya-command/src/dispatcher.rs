@@ -9,8 +9,12 @@
 //!   permission gating on each command's root literal;
 //! - [`Dispatcher`] — the concrete wrapper the proxy uses: dispatch, tab
 //!   completion and access to the underlying Azalea Brigadier dispatcher.
+//!   Commands are added one at a time with [`Dispatcher::register`], or all
+//!   at once as an atomic batch with a crate-internal register call, when
+//!   the tree is assembled by the built-in command registry.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use azalea_brigadier::builder::literal_argument_builder::literal;
 use azalea_brigadier::command_dispatcher::CommandDispatcher;
@@ -47,11 +51,31 @@ pub fn build(
     commands: &[&dyn CandyCommand],
 ) -> Result<CommandDispatcher<CommandSource>, CommandError> {
     let mut dispatcher = CommandDispatcher::new();
+    register_commands(&mut dispatcher, commands)?;
+    Ok(dispatcher)
+}
+
+/// Validates a batch of commands and registers them on `dispatcher`.
+///
+/// Validation (names, duplicates against both the batch and the existing
+/// tree, permission nodes) happens for the whole batch before the tree is
+/// mutated, so on error the dispatcher is left unchanged — incremental
+/// registration is all-or-nothing just like [`build`].
+pub(crate) fn register_commands(
+    dispatcher: &mut CommandDispatcher<CommandSource>,
+    commands: &[&dyn CandyCommand],
+) -> Result<(), CommandError> {
     let mut seen = HashSet::with_capacity(commands.len());
+    let mut builders = Vec::with_capacity(commands.len());
     for command in commands {
         let name = command.name();
         validate_command_name(name)?;
         if !seen.insert(name.to_owned()) {
+            return Err(CommandError::DuplicateName(name.to_owned()));
+        }
+        // brigadier silently merges same-name literals — treat a pre-existing
+        // root literal as a duplicate instead of letting the trees merge
+        if dispatcher.find_node(&[name]).is_some() {
             return Err(CommandError::DuplicateName(name.to_owned()));
         }
 
@@ -68,17 +92,37 @@ pub fn build(
             let raw = parsed.as_str().to_owned();
             lit = lit.requires(move |source: &CommandSource| source.has_permission(&raw));
         }
-        dispatcher.register(command.build(lit));
+        builders.push(command.build(lit));
     }
-    Ok(dispatcher)
+    for builder in builders {
+        dispatcher.register(builder);
+    }
+    Ok(())
+}
+
+/// A pre-dispatch hook for commands that are not part of the brigadier
+/// tree at all.
+///
+/// Implementations see the slash-stripped input and the source before
+/// parsing. Returning `Some(code)` means "handled" — the input never reaches
+/// the command tree. Returning `None` passes the input through untouched.
+/// The hidden command has no node in the tree, no permission requirement,
+/// no suggestion entries and no usage listings; it is not discoverable
+/// through tab completion, `get_all_usage` or `find_node`.
+pub(crate) trait HiddenRunner: Send + Sync {
+    /// Attempt to handle `input`. See [`Dispatcher::execute`].
+    fn run(&self, input: &str, source: &CommandSource) -> Option<i32>;
 }
 
 /// The command dispatcher wrapper the proxy drives.
 ///
 /// Construct with [`Dispatcher::new`]; dispatch with [`Dispatcher::execute`];
-/// tab-complete with [`Dispatcher::completions`].
+/// tab-complete with [`Dispatcher::completions`]. Commands are added one at a
+/// time with [`Dispatcher::register`], or as an all-or-nothing batch when
+/// the tree is assembled by the built-in command registry.
 pub struct Dispatcher {
     inner: CommandDispatcher<CommandSource>,
+    hidden: Option<Arc<dyn HiddenRunner>>,
 }
 
 impl Dispatcher {
@@ -90,7 +134,51 @@ impl Dispatcher {
     pub fn new(commands: &[&dyn CandyCommand]) -> Result<Self, CommandError> {
         Ok(Self {
             inner: build(commands)?,
+            hidden: None,
         })
+    }
+
+    /// An empty dispatcher to register commands onto one by one.
+    ///
+    /// Register with [`Dispatcher::register`]; completions and execution
+    /// behave exactly as on a from-scratch build.
+    pub fn empty() -> Self {
+        Self {
+            inner: CommandDispatcher::new(),
+            hidden: None,
+        }
+    }
+
+    /// Validates and registers a single command on this dispatcher.
+    ///
+    /// Same rules as [`build`]: name and permission-node validation, and a
+    /// root literal already present in the tree is rejected as a duplicate
+    /// instead of being silently merged.
+    ///
+    /// # Errors
+    ///
+    /// See [`build`].
+    pub fn register(&mut self, command: &dyn CandyCommand) -> Result<(), CommandError> {
+        register_commands(&mut self.inner, std::slice::from_ref(&command))
+    }
+
+    /// Validates and registers a batch of commands, all-or-nothing.
+    ///
+    /// The batch is validated before the tree is touched; on error this
+    /// dispatcher is left exactly as it was.
+    ///
+    /// # Errors
+    ///
+    /// See [`build`].
+    pub(crate) fn register_slice(
+        &mut self,
+        commands: &[&dyn CandyCommand],
+    ) -> Result<(), CommandError> {
+        register_commands(&mut self.inner, commands)
+    }
+
+    pub(crate) fn attach_hidden(&mut self, runner: impl HiddenRunner + 'static) {
+        self.hidden = Some(Arc::new(runner));
     }
 
     /// Dispatches `input` as the given source.
@@ -109,6 +197,11 @@ impl Dispatcher {
     /// requirement, or when execution fails inside the command.
     pub fn execute(&self, input: &str, source: CommandSource) -> Result<i32, CommandError> {
         let input = strip_leading_slash(input);
+        if let Some(hidden) = &self.hidden
+            && let Some(code) = hidden.run(input, &source)
+        {
+            return Ok(code);
+        }
         Ok(self.inner.execute(input, source)?)
     }
 

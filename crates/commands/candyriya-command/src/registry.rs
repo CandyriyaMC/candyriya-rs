@@ -1,0 +1,93 @@
+//! The proxy's built-in command registry.
+//!
+//! Nothing here is wired by magic, everything by hand:
+//!
+//! - [`CommandRegistry`] holds the shared [`CommandState`] (locales,
+//!   directory, effects) and the one-way [`ShutdownHandle`] `/candyriya end`
+//!   flips; the cli watches the same flag and initiates the real shutdown.
+//! - [`CommandRegistry::register`] validates and attaches every built-in
+//!   command to a [`Dispatcher`] as one atomic batch, then attaches the
+//!   internal pre-dispatch hook. A failure leaves the dispatcher tree
+//!   untouched; the hook is attached only when registration succeeds.
+//! - [`CommandRegistry::dispatcher`] builds a standalone [`Dispatcher`]
+//!   carrying exactly the built-in set.
+
+use std::sync::Arc;
+
+use crate::command::CandyCommand;
+use crate::commands::{CandyriyaCommand, GlistCommand, SendCommand, StaticHidden};
+use crate::dispatcher::Dispatcher;
+use crate::error::CommandError;
+use crate::state::CommandState;
+
+/// Shared registry for every built-in command.
+///
+/// Constructed with the state the commands render from and the shutdown
+/// flag the cli watches. The individual commands are assembled at
+/// registration time, so the registry is cheap to build and clone-free.
+pub struct CommandRegistry {
+    state: CommandState,
+    shutdown: crate::ShutdownHandle,
+}
+
+impl CommandRegistry {
+    /// Creates the registry from the shared state and the shutdown flag.
+    ///
+    /// `shutdown` is the flag the cli hands to its drain path; the same flag
+    /// drives `/candyriya end`.
+    pub fn new(state: CommandState, shutdown: crate::ShutdownHandle) -> Self {
+        Self { state, shutdown }
+    }
+
+    /// The shared shutdown flag, cloned for the drain path to watch.
+    pub fn shutdown_handle(&self) -> crate::ShutdownHandle {
+        self.shutdown.clone()
+    }
+
+    fn built_in_commands(&self) -> Vec<Box<dyn CandyCommand>> {
+        vec![
+            Box::new(GlistCommand::new(self.state.clone())),
+            Box::new(SendCommand::command(self.state.clone())),
+            Box::new(SendCommand::server(self.state.clone())),
+            Box::new(SendCommand::goto(self.state.clone())),
+            Box::new(CandyriyaCommand::new(
+                self.state.clone(),
+                self.shutdown.clone(),
+            )),
+        ]
+    }
+
+    /// Registers every built-in command on `dispatcher`, then attaches the
+    /// internal pre-dispatch hook.
+    ///
+    /// The command batch is validated and registered all-or-nothing (see
+    /// `Dispatcher::register_slice`); on error the tree is unchanged and the
+    /// hook is not attached.
+    ///
+    /// # Errors
+    ///
+    /// The same validation errors [`crate::Dispatcher::new`] reports:
+    /// duplicate root literals (including against commands already on the
+    /// dispatcher), invalid names and invalid permission nodes.
+    pub fn register(&self, dispatcher: &mut Dispatcher) -> Result<(), CommandError> {
+        let commands = self.built_in_commands();
+        let refs: Vec<&dyn CandyCommand> = commands.iter().map(Box::as_ref).collect();
+        dispatcher.register_slice(&refs)?;
+        dispatcher.attach_hidden(StaticHidden {
+            effects: Arc::clone(&self.state.effects),
+        });
+        Ok(())
+    }
+
+    /// Builds a standalone [`Dispatcher`] carrying exactly the built-in
+    /// command set.
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`CommandRegistry::register`].
+    pub fn dispatcher(&self) -> Result<Dispatcher, CommandError> {
+        let mut dispatcher = Dispatcher::empty();
+        self.register(&mut dispatcher)?;
+        Ok(dispatcher)
+    }
+}

@@ -1,34 +1,26 @@
-//! The player-facing built-in commands.
+//! The built-in command set: `/candyriya` (info, servers, switch, end),
+//! `/glist`, `/send`, and its `/server` and `/goto` sender-switch aliases.
 //!
-//! The player command set is intentionally small: `/glist`, `/send`, and its
-//! `/server` and `/goto` aliases. Admin and introspection tooling live in
-//! their own commands and are not part of this module.
+//! `/candyriya` is the admin-facing root; its subcommands are permission
+//! gated. The player-facing commands are ungated, velocity-style: listing
+//! the network (`/glist`) and routing players (`/send`, `/server`, `/goto`)
+//! carry no permission node of their own.
 //!
-//! [`player_commands`] is the entry point the proxy uses to register the
-//! whole set; the individual types stay public so tests can wire them one by
-//! one.
+//! [`crate::CommandRegistry`] is the entry point the proxy uses to register
+//! the whole set; the individual types stay public so tests can wire them
+//! one by one.
 
 pub mod glist;
 pub mod send;
 
+pub(crate) mod candyriya;
+mod common;
+mod hidden;
+mod suggest;
+
+pub(crate) use candyriya::CandyriyaCommand;
+
+pub(crate) use hidden::StaticHidden;
+
 pub use glist::{GlistCommand, GlistReport, GlistServerEntry};
 pub use send::{SendCommand, SendMode};
-
-use crate::command::CandyCommand;
-use crate::state::CommandState;
-
-/// Builds every player-facing command in this crate.
-///
-/// Registration order matches the natural reading order (`glist`, then the
-/// switch commands). The `/send` full form, `/server` and `/goto` share one
-/// implementation; only their root literal, permission gate and self-target
-/// resolution differ.
-#[must_use]
-pub fn player_commands(state: &CommandState) -> Vec<Box<dyn CandyCommand>> {
-    vec![
-        Box::new(GlistCommand::new(state.clone())),
-        Box::new(SendCommand::command(state.clone())),
-        Box::new(SendCommand::server(state.clone())),
-        Box::new(SendCommand::goto(state.clone())),
-    ]
-}

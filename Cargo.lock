@@ -307,6 +307,7 @@ dependencies = [
  "azalea-brigadier",
  "candyriya-i18n",
  "candyriya-permissions",
+ "candyriya-utils",
  "thiserror 2.0.21",
  "uuid",
 ]

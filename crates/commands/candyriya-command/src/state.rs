@@ -3,11 +3,13 @@
 //! Commands in this crate hold no connection state of their own; everything
 //! they need arrives as handles at construction time:
 //!
-//! - the [`I18n`] tables, always from `candyriya-i18n` (never a hardcoded
+//! - the [`Locales`] pair, always from `candyriya-i18n` (never a hardcoded
 //!   string outside this crate's MiniMessage locale files);
-//! - a read-only view over the proxy's configured servers and online players
-//!   ([`NetworkDirectory`]);
-//! - the side effects commands trigger ([`ProxyEffects`]).
+//! - a read-only view over the proxy's configured servers, online players
+//!   and status snapshot ([`NetworkDirectory`]);
+//! - the effects sink ([`ProxyEffects`](crate::ProxyEffects)), which doubles
+//!   as the single output path
+//!   ([`OutputSender`](crate::OutputSender)).
 //!
 //! The proxy implements both traits. Tests provide deterministic fixtures, so
 //! these commands never talk to a network.
@@ -16,7 +18,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::source::{CommandOrigin, PlayerRef};
+use crate::effects::ProxyEffects;
+use crate::locales::Locales;
+use crate::snapshot::ProxySnapshot;
 
 /// A snapshot of one configured backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +74,8 @@ impl OnlinePlayer {
 ///
 /// Implemented by the proxy; the command layer never touches config or the
 /// session map directly. Implementations must be cheap to call (a `Vec`
-/// clone of a small snapshot is fine) and must not block.
+/// clone of a small snapshot is fine) and must not block on the network —
+/// return the most recent known state, stale beats nothing.
 pub trait NetworkDirectory: Send + Sync {
     /// Every configured server, with its `try`-chain priority (0 = first).
     ///
@@ -80,63 +85,28 @@ pub trait NetworkDirectory: Send + Sync {
 
     /// Every player currently on the network, with their current server.
     fn online_players(&self) -> Vec<OnlinePlayer>;
-}
 
-/// What a switch request targets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SwitchTarget {
-    /// Exactly one player, resolved against the online list.
-    One(PlayerRef),
-    /// The literal `ALL` target: every player on the network.
-    All,
-}
-
-/// A request to move player(s) to a server. The proxy applies it through the
-/// routing layer; the command does not and cannot switch anything itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwitchRequest {
-    /// Who gets switched.
-    pub target: SwitchTarget,
-    /// The server to switch to (already validated against the directory).
-    pub server: String,
-}
-
-impl SwitchRequest {
-    /// Creates a switch request from its parts.
-    pub fn new(target: SwitchTarget, server: impl Into<String>) -> Self {
-        Self {
-            target,
-            server: server.into(),
-        }
-    }
-}
-
-/// Side effects a command triggers. Implemented by the proxy.
-///
-/// Messages are delivered verbatim to the given invoker. `message` is a
-/// **MiniMessage string, unparsed**: implementors parse it with `lobsterchat`
-/// at the boundary (see CONTRIBUTING — text never travels half-rendered).
-/// Every interpolated argument must be pre-escaped with
-/// [`escape_minimessage`](crate::escape_minimessage); this crate does not
-/// escape for you.
-///
-/// `switch` hands a validated target/server pair over to the routing layer;
-/// the command layer never applies routes by itself.
-pub trait ProxyEffects: Send + Sync {
-    /// Delivers a user-facing message to the invoking source.
-    fn message(&self, origin: &CommandOrigin, message: String);
-
-    /// Applies a server switch to the given target.
-    fn switch(&self, request: SwitchRequest);
+    /// A consistent status view taken at invocation time.
+    ///
+    /// Carries the `/candyriya info` and `/candyriya servers` payload:
+    /// version, uptime, configured log level, connection counters and the
+    /// per-backend table. Cheap for the same reason the other two methods
+    /// are cheap; never fresher than the last health check.
+    fn snapshot(&self) -> ProxySnapshot;
 }
 
 /// Everything a command implementation needs, built once and cloned into it.
+///
+/// [`CommandState::effects`] is the single sink for both output
+/// ([`OutputSender::send`](crate::OutputSender::send)) and cross-cutting
+/// actions ([`ProxyEffects::switch`](crate::ProxyEffects::switch)).
 #[derive(Clone)]
 pub struct CommandState {
-    /// The locale tables (embedded defaults, possibly with overrides).
-    pub i18n: candyriya_i18n::I18n,
-    /// Read-only view over servers and online players.
+    /// The locale tables, bound per outbound line (embedded defaults or
+    /// overrides, whatever the composition root built).
+    pub locales: Locales,
+    /// Read-only view over servers, online players and the status snapshot.
     pub directory: Arc<dyn NetworkDirectory>,
-    /// Side effects the commands trigger.
+    /// Side effects the commands trigger — output and player moves.
     pub effects: Arc<dyn ProxyEffects>,
 }

@@ -3,8 +3,8 @@
 //! Brigadier command wiring for the proxy: the [`CommandSource`] type Azalea
 //! Brigadier dispatches with, the console source, the `CandyCommand` trait,
 //! [`Dispatcher`] — a thin adapter over `azalea_brigadier` that builds the
-//! command tree from command implementations — and the player-facing
-//! commands in [`player_commands`].
+//! command tree from command implementations — and the built-in command
+//! registry.
 //!
 //! ## What this crate is
 //!
@@ -16,23 +16,25 @@
 //!   state; [`CommandContext`] is the small audit-friendly view
 //!   (`{origin, args_raw}`) of a parsed invocation.
 //! - **Permission enforcement at the tree level.** Commands that declare a
-//!   permission node get a `requires` clause on their root literal, backed by
-//!   the `candyriya-permissions` engine — no per-handler after-the-fact
-//!   checking.
-//! - **The player command set.** [`player_commands`] builds `/glist`,
-//!   `/send <target> <server>` and its `/server` / `/goto` sender-switch
-//!   aliases as [`CandyCommand`]s over a [`CommandState`] the proxy injects
-//!   (i18n tables, read-only server/online-player view, effects sink). No
-//!   network, no async, no I/O inside this crate — parsing and tree building
-//!   are pure, effects are calls into whatever the proxy wires in.
+//!   permission node get a `requires` clause on their node, backed by the
+//!   `candyriya-permissions` engine — no per-handler after-the-fact checking.
+//! - **The built-in commands.** [`CommandRegistry`] assembles the whole set:
+//!   `/candyriya` (`info`, `servers`, `switch`, `end`), `/glist`, `/send` and
+//!   its `/server` and `/goto` aliases. Output goes through the
+//!   [`OutputSender`] seam as MiniMessage lines built from the embedded
+//!   locales ([`Locales`]); live effects (switching a player) go through
+//!   [`ProxyEffects`]; the shutdown flag (`/candyriya end`) is a shared
+//!   [`ShutdownHandle`]. See the `registry` module docs for the wiring
+//!   model.
 //!
 //! ## What this crate is not
 //!
-//! - No network, no async, no I/O. Commands never touch sockets; the effects
-//!   sink ([`ProxyEffects`]) and the directory ([`NetworkDirectory`]) are
-//!   implemented elsewhere.
-//! - No other command implementations. Admin and introspection commands live
-//!   in their own work, not here.
+//! - No network, no async, no I/O. Parsing and tree building are pure; the
+//!   commands read the world through [`NetworkDirectory`] and mutate it
+//!   through [`ProxyEffects`] — both implemented by the composition root
+//!   (the cli), never here.
+//! - No proxy-crate dependency. The registry is assembled over traits
+//!   precisely so this crate builds standalone.
 //! - No Java-like class hierarchies. Brigadier's literal/argument builders
 //!   are the hierarchy; the adapter stays thin.
 //!
@@ -61,7 +63,11 @@
 mod command;
 mod context;
 mod dispatcher;
+mod effects;
 mod error;
+mod locales;
+mod registry;
+mod snapshot;
 mod source;
 mod state;
 mod text;
@@ -71,15 +77,14 @@ pub mod commands;
 pub use azalea_brigadier::builder::argument_builder::ArgumentBuilder;
 
 pub use command::{CandyCommand, argument_with_suggestions};
-pub use commands::{
-    GlistCommand, GlistReport, GlistServerEntry, SendCommand, SendMode, player_commands,
-};
+pub use commands::{GlistCommand, GlistReport, GlistServerEntry, SendCommand, SendMode};
 pub use context::CommandContext;
 pub use dispatcher::{Dispatcher, build};
+pub use effects::{OutputSender, ProxyEffects, ShutdownHandle, SwitchRequest, SwitchResult};
 pub use error::CommandError;
+pub use locales::Locales;
+pub use registry::CommandRegistry;
+pub use snapshot::{BackendSnapshot, BackendState, ConnectionStats, ProxySnapshot};
 pub use source::{CommandOrigin, CommandSource, PlayerRef, SourceKind};
-pub use state::{
-    CommandState, NetworkDirectory, OnlinePlayer, ProxyEffects, ServerInfo, SwitchRequest,
-    SwitchTarget,
-};
+pub use state::{CommandState, NetworkDirectory, OnlinePlayer, ServerInfo};
 pub use text::escape_minimessage;

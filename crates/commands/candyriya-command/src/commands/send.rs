@@ -3,35 +3,35 @@
 //! The `/server <server>` and `/goto <server>` literals are the same command
 //! tree with a different default for the target: instead of naming it, they
 //! switch the **invoking player** (velocity-style sender switch). All three
-//! share the implementation in [`send`].
+//! share the handler in `switch_to` and the `ALL` fan-out in `send`.
 //!
-//! - `/send` requires the `candyriya.command.send` permission (default-deny,
-//!   matching the admin namespace) and takes an explicit target.
-//! - `/server` and `/goto` are open to everyone: switching yourself is the
-//!   expected player affordance. Non-player sources are told (in-chat) that
-//!   only players can switch themselves.
+//! None of the three is gated: switching yourself is the expected player
+//! affordance, and listing/routing is left to server operators via
+//! `/candyriya`. Non-player sources are told (in-chat) that only players
+//! can switch themselves.
 //!
-//! `ALL` as the target switches every online player. A named target must be
-//! online at dispatch time; anything else is rejected before any switch
-//! request reaches the proxy. The server name is always validated against
-//! the configured servers — unknown names are rejected, and no switch is
-//! applied.
+//! `ALL` (case-insensitive) as the target switches every online player. A
+//! named target must be online at dispatch time; anything else is rejected
+//! before any switch request reaches the proxy. The server name is always
+//! validated against the configured servers — unknown names are rejected,
+//! and no switch is applied.
 
 use azalea_brigadier::arguments::string_argument_type::{get_string, word};
 use azalea_brigadier::builder::argument_builder::ArgumentBuilder;
 use azalea_brigadier::context::CommandContext as BrigadierContext;
-use azalea_brigadier::errors::{BuiltInError, CommandSyntaxError};
-use azalea_brigadier::suggestion::{SuggestionProvider, Suggestions, SuggestionsBuilder};
 
 use crate::command::{CandyCommand, argument_with_suggestions};
-use crate::source::{CommandSource, PlayerRef};
-use crate::state::{CommandState, NetworkDirectory, SwitchRequest, SwitchTarget};
+use crate::source::CommandSource;
+use crate::state::CommandState;
 use crate::text::escape_minimessage;
+
+use super::common::{out, resolve_server, switch_to, unknown_server_line};
+use super::suggest::{PlayerNames, ServerNames};
 
 /// Which literal this [`SendCommand`] instance backs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendMode {
-    /// `/send <target> <server>` — the full, permission-gated form.
+    /// `/send <target> <server>` — the full form.
     Command,
     /// `/server <server>` — switch the invoking player.
     Server,
@@ -39,97 +39,88 @@ pub enum SendMode {
     Goto,
 }
 
-/// The shared body of `/send`, `/server` and `/goto`.
+/// The shared body of `/send`.
 ///
-/// `target` is either a player name (matched case-insensitively against the
-/// online list) or the literal `ALL` (matched case-insensitively). `server`
-/// must name a configured server, or the request is rejected before anything
-/// happens.
+/// `server` must name a configured server, or the request is rejected before
+/// anything happens. `target` is either a player name (matched
+/// case-insensitively against the online list) or the literal `ALL`
+/// (matched case-insensitively): the latter fans out one switch request per
+/// online player and prints a moved/failed summary.
 ///
-/// The same code path serves the aliases: they pass the invoking player's
-/// name as `target`.
-///
-/// # Errors
-///
-/// Returns the user-facing problem as a [`CommandSyntaxError`] of kind
-/// `DispatcherParseException { message }`. The message is the MiniMessage
-/// line that was already delivered to the invoking source via the effects
-/// sink, so the error path is for programmatic callers and tests — the
-/// player always sees the rendered chat line.
-pub fn send(
+/// Returns the brigadier exit code (`1` when everything moved, `0` otherwise).
+pub(crate) fn send(
     state: &CommandState,
-    ctx: &BrigadierContext<CommandSource>,
+    source: &CommandSource,
     target: &str,
     server: &str,
-) -> Result<i32, CommandSyntaxError> {
-    let origin = ctx.source.origin().clone();
-    let server = server.trim();
-    let servers = state.directory.servers();
-    if !servers.iter().any(|known| known.name == server) {
-        let message = state.i18n.t(
-            "proxy.send.unknown_server",
-            &[("server", escape_minimessage(server).as_str())],
+) -> i32 {
+    let t = state.locales.pick(source);
+    let Some(resolved) = resolve_server(&*state.directory, server) else {
+        out(
+            state,
+            source,
+            unknown_server_line(t, &*state.directory, server),
         );
-        state.effects.message(&origin, message.clone());
-        // no suitable BuiltInError kind exists for execution-time user errors;
-        // DispatcherParseException carries the (already rendered) message
-        return Err(user_error(message));
-    }
+        return 0;
+    };
 
     let target = target.trim();
-    if target.eq_ignore_ascii_case("ALL") {
-        state
-            .effects
-            .switch(SwitchRequest::new(SwitchTarget::All, server));
-        let message = state.i18n.t(
-            "proxy.send.transferring_all",
-            &[("server", escape_minimessage(server).as_str())],
-        );
-        state.effects.message(&origin, message);
-        return Ok(1);
+    if !target.eq_ignore_ascii_case("all") {
+        return switch_to(state, source, target, &resolved);
     }
 
     let players = state.directory.online_players();
-    let Some(player) = players
-        .iter()
-        .find(|player| player.name.eq_ignore_ascii_case(target))
-    else {
-        let message = state.i18n.t(
-            "proxy.send.player_not_online",
-            &[("player", escape_minimessage(target).as_str())],
+    if players.is_empty() {
+        out(
+            state,
+            source,
+            t.t("candyriya.command.send_none_online", &[]),
         );
-        state.effects.message(&origin, message.clone());
-        return Err(user_error(message));
-    };
-    let recipient = PlayerRef::new(player.uuid, player.name.clone());
-    state
-        .effects
-        .switch(SwitchRequest::new(SwitchTarget::One(recipient), server));
-    let message = state.i18n.t(
-        "proxy.send.transferring",
-        &[
-            ("player", escape_minimessage(&player.name).as_str()),
-            ("server", escape_minimessage(server).as_str()),
-        ],
+        return 0;
+    }
+    out(
+        state,
+        source,
+        t.t(
+            "candyriya.command.send_all",
+            &[
+                ("count", players.len().to_string().as_str()),
+                ("server", escape_minimessage(&resolved).as_str()),
+            ],
+        ),
     );
-    state.effects.message(&origin, message);
-    Ok(1)
+    let mut moved = 0_u32;
+    let mut failed = 0_u32;
+    for player in &players {
+        let request = crate::SwitchRequest::new(
+            crate::PlayerRef::new(player.uuid, player.name.clone()),
+            resolved.clone(),
+        );
+        match state.effects.switch(request) {
+            crate::SwitchResult::Switched { .. } => moved += 1,
+            failure => {
+                failed += 1;
+                let (line, _) = super::common::switch_result_line(t, &*state.directory, failure);
+                out(state, source, line);
+            }
+        }
+    }
+    out(
+        state,
+        source,
+        t.t(
+            "candyriya.command.send_summary",
+            &[
+                ("ok", moved.to_string().as_str()),
+                ("failed", failed.to_string().as_str()),
+            ],
+        ),
+    );
+    if failed == 0 { 1 } else { 0 }
 }
 
-/// Wraps a rendered user-facing line in a brigadier syntax error, for the
-/// dispatcher's error path. The kind carries no parse position — the command
-/// simply failed to run.
-fn user_error(message: String) -> CommandSyntaxError {
-    CommandSyntaxError::create(
-        BuiltInError::DispatcherParseException {
-            message: message.clone(),
-        },
-        message,
-    )
-}
-
-/// The player-facing switch command; one implementation behind three
-/// literals (`/send`, `/server`, `/goto`).
+/// The switch command; one implementation behind three literals
+/// (`/send`, `/server`, `/goto`).
 pub struct SendCommand {
     state: CommandState,
     mode: SendMode,
@@ -175,20 +166,20 @@ impl CandyCommand for SendCommand {
         }
     }
 
-    fn permission(&self) -> Option<&str> {
-        match self.mode {
-            // switching strangers is an admin-ish power; switching yourself is not
-            SendMode::Command => Some("candyriya.command.send"),
-            SendMode::Server | SendMode::Goto => None,
-        }
-    }
-
     fn build(&self, lit: ArgumentBuilder<CommandSource>) -> ArgumentBuilder<CommandSource> {
         let state = self.state.clone();
         let directory = std::sync::Arc::clone(&self.state.directory);
         match self.mode {
             SendMode::Command => lit.then(
-                argument_with_suggestions("target", word(), TargetNames { directory }).then(
+                argument_with_suggestions(
+                    "target",
+                    word(),
+                    PlayerNames {
+                        directory,
+                        include_all: true,
+                    },
+                )
+                .then(
                     argument_with_suggestions(
                         "server",
                         word(),
@@ -196,95 +187,38 @@ impl CandyCommand for SendCommand {
                             directory: std::sync::Arc::clone(&self.state.directory),
                         },
                     )
-                    .executes_result(move |ctx| {
+                    .executes(move |ctx: &BrigadierContext<CommandSource>| {
                         let (Some(target), Some(server)) =
                             (get_string(ctx, "target"), get_string(ctx, "server"))
                         else {
-                            return Err(user_error("missing argument".to_owned()));
+                            return 0;
                         };
-                        send(&state, ctx, &target, &server)
+                        send(&state, &ctx.source, target.as_str(), server.as_str())
                     }),
                 ),
             ),
             SendMode::Server | SendMode::Goto => lit.then(
-                argument_with_suggestions("server", word(), ServerNames { directory })
-                    .executes_result(move |ctx| {
+                argument_with_suggestions("server", word(), ServerNames { directory }).executes(
+                    move |ctx: &BrigadierContext<CommandSource>| {
                         let Some(server) = get_string(ctx, "server") else {
-                            return Err(user_error("missing argument".to_owned()));
+                            return 0;
                         };
                         match ctx.source.player_name() {
-                            Some(name) => send(&state, ctx, name, &server),
+                            Some(name) => {
+                                let name = name.to_owned();
+                                switch_to(&state, &ctx.source, &name, server.as_str())
+                            }
                             // velocity semantics: non-players cannot switch themselves
                             None => {
-                                let origin = ctx.source.origin().clone();
-                                let message = state.i18n.t("proxy.send.only_players", &[]);
-                                state.effects.message(&origin, message.clone());
-                                Err(user_error(message))
+                                let source = &ctx.source;
+                                let t = state.locales.pick(source);
+                                out(&state, source, t.t("candyriya.command.players_only", &[]));
+                                0
                             }
                         }
-                    }),
+                    },
+                ),
             ),
         }
-    }
-}
-
-/// Suggests configured server names, priority order first, filtered by the
-/// typed prefix.
-struct ServerNames {
-    directory: std::sync::Arc<dyn NetworkDirectory>,
-}
-
-impl SuggestionProvider<CommandSource> for ServerNames {
-    fn get_suggestions(
-        &self,
-        _context: BrigadierContext<CommandSource>,
-        builder: SuggestionsBuilder,
-    ) -> Suggestions {
-        let remaining = builder.remaining_lowercase().to_owned();
-        let mut servers = self.directory.servers();
-        servers.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        servers.dedup_by(|a, b| a.name == b.name);
-        servers
-            .iter()
-            .filter(|server| server.name.to_lowercase().starts_with(remaining.as_str()))
-            .fold(builder, |builder, server| builder.suggest(&server.name))
-            .build()
-    }
-}
-
-/// Suggests online player names plus the `ALL` token, filtered by the typed
-/// prefix.
-struct TargetNames {
-    directory: std::sync::Arc<dyn NetworkDirectory>,
-}
-
-impl SuggestionProvider<CommandSource> for TargetNames {
-    fn get_suggestions(
-        &self,
-        _context: BrigadierContext<CommandSource>,
-        builder: SuggestionsBuilder,
-    ) -> Suggestions {
-        let remaining = builder.remaining_lowercase().to_owned();
-        let mut names: Vec<String> = self
-            .directory
-            .online_players()
-            .into_iter()
-            .map(|player| player.name)
-            .collect();
-        names.sort();
-        names.dedup();
-        let builder = names
-            .iter()
-            .filter(|name| name.to_lowercase().starts_with(remaining.as_str()))
-            .fold(builder, |builder, name| builder.suggest(name));
-        // ALL first-class token, always offered when the prefix matches
-        if "all".starts_with(remaining.as_str()) {
-            return builder.suggest("ALL").build();
-        }
-        builder.build()
     }
 }
