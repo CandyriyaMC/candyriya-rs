@@ -54,18 +54,40 @@
 //!   rejects anything lobsterchat would silently truncate.
 //! - [`escape_minimessage`] — escapes untrusted text for interpolation
 //!   into MiniMessage strings.
+//! - [`TitlePacket`] / [`TitleKind`] / [`TitleTimes`] — the title packet
+//!   bodies (title, subtitle, action bar, clear, reset, timings).
+//! - [`BossBarPacket`] / [`BossBarAction`] / [`BossBarColor`] /
+//!   [`BossBarDivision`] / [`BossBarFlag`] / [`BossBarFlags`] — the boss
+//!   bar packet body and its parts.
+//! - [`PlayerInfoUpdate`] / [`PlayerInfoRemove`] / [`PlayerInfoEntry`] /
+//!   [`PlayerInfoActionMask`] / [`AddPlayerData`] / [`GameProfileProperty`]
+//!   — the tab list (player info) packet bodies.
+//! - [`VisualPacketError`] — the shared error type of the packet codecs.
 //!
-//! Errors are reported as [`MetadataError`]: manifest validation problems
-//! and MiniMessage acceptance failures.
+//! The packet types are *bodies* only: no packet ids, no framing, no
+//! transport. The proxy resolves the packet id for the negotiated
+//! protocol version from its own per-version registry and writes it
+//! itself; everything in these types starts after the id.
+//!
+//! Errors are reported as [`MetadataError`] (ABI manifest/MiniMessage) or
+//! [`VisualPacketError`] (wire codecs): manifest validation problems,
+//! MiniMessage acceptance failures, and packet encode/decode failures.
 #![forbid(unsafe_code)]
 
+mod bossbar;
 mod events;
 mod kick;
 mod message;
 mod metadata;
 mod minimessage;
+mod tablist;
+mod title;
 mod version;
+mod wire;
 
+pub use crate::bossbar::{
+    BossBarAction, BossBarColor, BossBarDivision, BossBarFlag, BossBarFlags, BossBarPacket,
+};
 pub use crate::events::{
     ConnectAllowedEvent, DisconnectEvent, EventCancellation, EventEnvelope, EventIdRegistry,
     EventKind, EventPayload, KickEvent, LoginEvent, MinecraftEvent, OutcomeReport, PlayerRef,
@@ -75,7 +97,15 @@ pub use crate::kick::{DisconnectReason, KickReason};
 pub use crate::message::{ComponentBuilder, MessageMode, text, translatable};
 pub use crate::metadata::{ApiExport, ApiInfo, MetadataError, PluginMetadata};
 pub use crate::minimessage::{escape_minimessage, parse_minimessage};
+pub use crate::tablist::{
+    ACTION_ADD_PLAYER, ACTION_INITIALIZE_CHAT, ACTION_UPDATE_DISPLAY_NAME, ACTION_UPDATE_GAME_MODE,
+    ACTION_UPDATE_HAT, ACTION_UPDATE_LATENCY, ACTION_UPDATE_LIST_PRIORITY, ACTION_UPDATE_LISTED,
+    AddPlayerData, GameProfileProperty, PlayerInfoActionMask, PlayerInfoEntry, PlayerInfoRemove,
+    PlayerInfoUpdate,
+};
+pub use crate::title::{TitleKind, TitlePacket, TitleTimes};
 pub use crate::version::{API_VERSION, IMPLEMENTATION, ProxyVersion};
+pub use crate::wire::VisualPacketError;
 
 // lobsterchat is the project-wide component library; the ABI carries its
 // types directly, so re-export the ones the host functions and the

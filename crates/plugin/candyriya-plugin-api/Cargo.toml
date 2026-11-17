@@ -1,6 +1,6 @@
 [package]
 name = "candyriya-plugin-api"
-description = "Shared candyriya plugin ABI contract types: proxy version, plugin metadata, events and the chat/message-level building blocks (components, kick reasons, MiniMessage) the proxy renders host-side."
+description = "Shared candyriya plugin ABI contract types: proxy version, plugin metadata, events, chat/message-level building blocks (components, kick reasons, MiniMessage) and the visual packet field types (title, boss bar, player info / tab list) the proxy serializes onto the wire."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,13 +10,16 @@ authors.workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 semver = { workspace = true }
 lobsterchat = { workspace = true }
 candyriya-i18n = { path = "../../common/candyriya-i18n" }
+candyriya-protocol = { path = "../../protocol/candyriya-protocol" }
+bytes = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 toml = { workspace = true }
 
 [lints]

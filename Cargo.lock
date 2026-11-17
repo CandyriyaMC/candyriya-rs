@@ -506,13 +506,16 @@ dependencies = [
 name = "candyriya-plugin-api"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "candyriya-i18n",
+ "candyriya-protocol",
  "lobsterchat",
  "semver",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "toml 1.2.1+spec-1.1.0",
+ "uuid",
 ]
 
 [[package]]
