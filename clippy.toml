@@ -1,0 +1,25 @@
+# Workspace clippy configuration.
+#
+# A shared denylist of kernel-illegal spawn paths. The clippy CI job runs with
+# `-D warnings`, so a hit fails the build; the no-ad-hoc-spawn CI job greps
+# non-test source for the rest of the ban.
+#
+# Deliberately narrow, so the tree stays green:
+# `tokio::spawn` and `std::thread::spawn` are missing on purpose. Both fire on
+# cfg(test) code and on the loopback integration-test harness, and clippy
+# compiles those targets too, so listing them would demand per-site allows on
+# code we must not touch without sign-off. The grep gate covers those two in
+# non-test source. Add a path here only when nothing outside the kernel calls it.
+#
+# Path matching is not def-path based: with both entries present, every call
+# site was tagged onto `tokio::spawn` (the re-export) and none onto
+# `tokio::task::spawn` (verified against stable clippy). That is why the entry
+# named `tokio::task::spawn` alone would be theatre; the re-export entry is
+# the one to add once test code can carry allows.
+disallowed-methods = [
+    { path = "tokio::task::spawn_blocking", reason = "ad-hoc blocking work cannot be named, prioritized, cancelled or drained; route it through the task service", replacement = "candyriya_scheduler::TaskService::spawn_blocking" },
+    { path = "rayon::spawn", reason = "ad-hoc rayon jobs bypass the kernel's configured blocking pool; route them through the task service" },
+    { path = "rayon::ThreadPool::spawn", reason = "ad-hoc rayon pools bypass the kernel's configured blocking pool; route work through the task service" },
+    { path = "tokio::task::JoinSet::spawn", reason = "a local join set is an invisible task group: nothing can name, count or cancel it; route work through the task service" },
+    { path = "tokio::task::JoinSet::spawn_blocking", reason = "a local join set is an invisible task group: nothing can name, count or cancel it; route work through the task service" },
+]

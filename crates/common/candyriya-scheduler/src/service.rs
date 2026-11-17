@@ -426,6 +426,10 @@ impl TaskService {
     /// Cancellation flips the token but cannot interrupt the closure; the
     /// closure runs to completion on a pool thread. Panics are contained:
     /// the task is counted as panicked and the pool is unaffected.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this is the kernel itself; its rayon pool is the sanctioned blocking pool"
+    )]
     pub fn spawn_blocking(
         &self,
         name: impl Into<std::borrow::Cow<'static, str>>,

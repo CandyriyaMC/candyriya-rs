@@ -212,6 +212,10 @@ impl ScopeShared {
 
 impl QueuedTask {
     /// Spawn the wrapper for a dequeued task.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this is the kernel itself; its rayon pool is the sanctioned blocking pool"
+    )]
     fn spawn(self, scope: &Arc<ScopeShared>) {
         let QueuedTask {
             id,
