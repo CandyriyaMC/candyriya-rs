@@ -5,10 +5,13 @@ use thiserror::Error;
 /// Everything that can go wrong while generating keys, exchanging them or
 /// encoding them.
 ///
-/// Data-level failures on the peer side (undecryptable `Encryption Response`,
-/// for example) surface through [`EncryptionError::Decryption`]; they are
+/// Data-level failures on the peer side (malformed `Encryption Response`, for
+/// example) surface through [`EncryptionError::Decryption`]; they are
 /// normal protocol events, not bugs, and callers are expected to disconnect
-/// the offending connection instead of panicking.
+/// the offending connection instead of panicking. Note that since rsa 0.10
+/// PKCS#1 v1.5 uses implicit rejection, so *bad padding* does not raise this
+/// error — it yields a deterministic synthetic plaintext instead (see
+/// `keypair::EncryptionKeypair::decrypt_with_private`).
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum EncryptionError {
@@ -23,9 +26,10 @@ pub enum EncryptionError {
     #[error("failed to encrypt with the public key: {0}")]
     Encryption(rsa::Error),
 
-    /// Decrypting with the private key failed: the ciphertext was malformed,
-    /// the padding check found garbage (wrong key or tampered input), or the
-    /// ciphertext was longer than the key is wide.
+    /// Decrypting with the private key failed: the ciphertext was malformed
+    /// (too short for the modulus) or the operation itself failed. Bad
+    /// padding no longer surfaces here since rsa 0.10 implicit rejection —
+    /// it returns synthetic plaintext, not an error.
     #[error("failed to decrypt with the private key: {0}")]
     Decryption(rsa::Error),
 

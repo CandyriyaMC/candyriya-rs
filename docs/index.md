@@ -37,6 +37,8 @@ landed crate by crate.
 - [Installation](installation) — building from source, running the proxy,
   connecting a backend
 - [Configuration](configuration) — configuration file reference and hot reload
+- [Development](development) — notes for hacking on candyriya-rs,
+  including the audit pipeline
 - [Permissions](permissions) — the permission engine: nodes, contexts,
   inheritance and wildcards
 - [Plugins](plugins) — writing plugins against the WebAssembly API

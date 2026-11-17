@@ -14,8 +14,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 semver = { workspace = true }
 lobsterchat = { workspace = true }
-candyriya-i18n = { path = "../../common/candyriya-i18n" }
-candyriya-protocol = { path = "../../protocol/candyriya-protocol" }
+# version is required for publishability; deny treats a bare path dep as a wildcard
+candyriya-i18n = { version = "0.1.0", path = "../../common/candyriya-i18n" }
+candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
 bytes = { workspace = true }
 uuid = { workspace = true }
 

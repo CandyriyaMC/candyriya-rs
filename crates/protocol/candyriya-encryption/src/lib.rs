@@ -35,6 +35,7 @@
 mod cfb8;
 mod error;
 mod keypair;
+mod rng;
 mod server_id;
 mod shared_secret;
 

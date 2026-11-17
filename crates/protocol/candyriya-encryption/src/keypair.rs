@@ -2,9 +2,10 @@
 //! handshake.
 
 use rsa::pkcs8::EncodePublicKey;
-use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use rsa::{Pkcs1v15Encrypt, PrivateKey, PublicKey};
 
 use crate::error::EncryptionError;
+use crate::rng;
 
 /// Width of a freshly generated keypair. Vanilla uses 1024 bits, but the
 /// protocol page notes that longer keys do not break official clients, and
@@ -24,7 +25,7 @@ const KEY_BITS: usize = 2048;
 /// handled by `rsa` on drop.
 pub struct EncryptionKeypair {
     /// The server's RSA-2048 private key.
-    pub private: RsaPrivateKey,
+    pub private: PrivateKey,
     /// The public key as DER-encoded `SubjectPublicKeyInfo` (X.509). This is
     /// the on-the-wire format for the Encryption Request packet.
     pub public_der: Vec<u8>,
@@ -36,10 +37,10 @@ impl EncryptionKeypair {
     /// Key generation is CPU-heavy; call it once at startup, not per
     /// connection.
     pub fn generate() -> Result<Self, EncryptionError> {
-        let mut rng = rsa::rand_core::OsRng;
-        let private =
-            RsaPrivateKey::new(&mut rng, KEY_BITS).map_err(EncryptionError::KeyGeneration)?;
-        let public_der = RsaPublicKey::from(&private)
+        let private = PrivateKey::new(&mut rng::thread_rng(), KEY_BITS)
+            .map_err(EncryptionError::KeyGeneration)?;
+        let public_der = private
+            .to_public_key()
             .to_public_key_der()
             .map_err(EncryptionError::PublicKeyDer)?
             .as_bytes()
@@ -58,21 +59,29 @@ impl EncryptionKeypair {
     /// Each call pads with fresh randomness, so equal plaintexts produce
     /// different ciphertexts.
     pub fn encrypt_with_public(&self, plaintext: &[u8]) -> Result<Vec<u8>, EncryptionError> {
-        let mut rng = rsa::rand_core::OsRng;
-        RsaPublicKey::from(&self.private)
-            .encrypt(&mut rng, Pkcs1v15Encrypt, plaintext)
+        PublicKey::from(&self.private)
+            .encrypt(&mut rng::thread_rng(), Pkcs1v15Encrypt, plaintext)
             .map_err(EncryptionError::Encryption)
     }
 
     /// Decrypt `ciphertext` with the private key, expecting PKCS#1 v1.5
     /// padding.
     ///
-    /// Any deviation — wrong key, truncated or modified ciphertext, bad
-    /// padding — is reported as [`EncryptionError::Decryption`]; callers
-    /// should treat that as a protocol error from the peer.
+    /// Blinding is passed explicitly (rsa is built without its `getrandom`
+    /// feature; see `rng`), so the private operation never runs unblinded.
+    ///
+    /// Note: since rsa 0.10, PKCS#1 v1.5 uses implicit rejection — invalid
+    /// padding no longer returns an error. A tampered ciphertext (or one
+    /// encrypted to a different key) decrypts to a deterministic *synthetic*
+    /// plaintext instead. Callers must treat the returned bytes as
+    /// attacker-controlled: online-mode authenticates them implicitly
+    /// (the session-server `serverId` hash will not match a synthetic
+    /// shared secret, so `hasJoined` fails), and offline-mode fails at
+    /// the first AES-CFB8-decrypted packet. Only length/format violations
+    /// come back as [`EncryptionError::Decryption`].
     pub fn decrypt_with_private(&self, ciphertext: &[u8]) -> Result<Vec<u8>, EncryptionError> {
         self.private
-            .decrypt(Pkcs1v15Encrypt, ciphertext)
+            .decrypt_blinded(&mut rng::thread_rng(), Pkcs1v15Encrypt, ciphertext)
             .map_err(EncryptionError::Decryption)
     }
 }
@@ -115,24 +124,46 @@ mod tests {
     }
 
     #[test]
-    fn tampered_ciphertext_fails() {
+    fn tampered_ciphertext_does_not_yield_original_plaintext() {
         let keypair = EncryptionKeypair::generate().expect("keygen should succeed");
         let mut ciphertext = keypair
             .encrypt_with_public(b"verify-token-verify-token!")
             .expect("encrypt should succeed");
-        // break the leading 0x00 0x02 padding marker — guaranteed rejection
+        // break the leading 0x00 0x02 padding marker
         ciphertext[0] ^= 0x01;
-        assert!(keypair.decrypt_with_private(&ciphertext).is_err());
+        // rsa 0.10 applies implicit rejection: invalid padding returns a
+        // deterministic synthetic plaintext, not an error. What is guaranteed
+        // is that the original bytes do NOT come back — and that the output
+        // is stable for the same (key, ciphertext) pair.
+        let first = keypair
+            .decrypt_with_private(&ciphertext)
+            .expect("implicit rejection never errors here");
+        let second = keypair
+            .decrypt_with_private(&ciphertext)
+            .expect("implicit rejection never errors here");
+        assert_ne!(first, b"verify-token-verify-token!");
+        assert_eq!(first, second);
     }
 
     #[test]
-    fn wrong_key_fails() {
+    fn wrong_key_does_not_yield_original_plaintext() {
         let alice = EncryptionKeypair::generate().expect("keygen should succeed");
         let bob = EncryptionKeypair::generate().expect("keygen should succeed");
         let ciphertext = alice
             .encrypt_with_public(b"for alice only")
             .expect("encrypt should succeed");
-        assert!(bob.decrypt_with_private(&ciphertext).is_err());
+        // same implicit-rejection semantics: no error, but no secret either
+        let synthetic = bob
+            .decrypt_with_private(&ciphertext)
+            .expect("implicit rejection never errors here");
+        assert_ne!(synthetic, b"for alice only");
+    }
+
+    #[test]
+    fn short_ciphertext_still_errors() {
+        let keypair = EncryptionKeypair::generate().expect("keygen should succeed");
+        // shorter than the 2048-bit modulus is the one hard length failure
+        assert!(keypair.decrypt_with_private(b"tiny").is_err());
     }
 
     #[test]

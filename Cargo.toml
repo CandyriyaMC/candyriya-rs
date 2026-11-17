@@ -83,8 +83,12 @@ anyhow = "1"
 zeroize = "1"
 aes = "0.9"
 cfb8 = "0.9"
+# 0.10 fixes RUSTSEC-2023-0071 (Marvin Attack). pkcs1v15 is required by the
+# Minecraft handshake, which encrypts the shared secret with PKCS#1 v1.5.
+# default-features off: no getrandom 0.4 on this stack - every RNG use is
+# passed explicitly by callers (see candyriya-encryption).
+rsa = { version = "0.10", default-features = false, features = ["std", "encoding", "pkcs1v15"] }
 rand = "0.9"
-rsa = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 tracing-appender = "0.2"
 semver = "1"

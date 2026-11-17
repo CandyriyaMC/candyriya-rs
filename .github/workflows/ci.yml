@@ -64,3 +64,46 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build documentation
         run: cargo doc --no-deps --workspace
+
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # EmbarkStudios/cargo-deny-action v2.1.2, pinned by commit SHA
+      - name: cargo deny check advisories
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9
+        with:
+          command: check
+          command-arguments: advisories
+      - name: cargo deny check licenses
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9
+        with:
+          command: check
+          command-arguments: licenses
+      - name: cargo deny check bans
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9
+        with:
+          command: check
+          command-arguments: bans
+      - name: cargo deny check sources
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9
+        with:
+          command: check
+          command-arguments: sources
+
+  audit-check:
+    name: audit-check
+    runs-on: ubuntu-latest
+    # audit-check creates a check run; without this the annotations are lost.
+    # (forked PRs fall back to stdout, as documented by the action)
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      # RustSec/audit-check v2.0.0, pinned by commit SHA
+      - name: Scan Cargo.lock for vulnerabilities
+        uses: RustSec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

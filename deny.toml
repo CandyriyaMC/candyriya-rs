@@ -1,0 +1,128 @@
+# cargo-deny rules for the candyriya workspace.
+# Enforced by the `security` CI job (.github/workflows/ci.yml) on every push and PR.
+# See docs/development.md ("Audit pipeline") for the policy overview.
+#
+# Tighten freely; loosening (adding ignores or exceptions) needs a documented
+# reason in the PR — not a silent config change.
+
+[advisories]
+# No advisory, yanked crate, or unmaintained/unsound crate is exempt.
+# If an exception is ever needed it goes in `ignore` with a reason and an
+# expiry, and it must be argued in the PR.
+ignore = []
+unmaintained = "all"
+unsound = "all"
+
+[bans]
+# Duplicate versions of the same crate are banned. The skip list covers the
+# duplicates already in the tree that cannot be unified yet (all transitive,
+# blocked on upstream); skipping is what keeps the gate enforceable, so any
+# NEW duplicate fails the build.
+multiple-versions = "deny"
+wildcards = "deny"
+# Path-only dependencies inside the workspace carry no version requirement;
+# that is not a supply-chain hazard. Registry wildcards remain denied.
+allow-wildcard-paths = true
+
+# newest version wins; older ones are transitive-only and blocked on upstream
+skip = [
+    { crate = "base64:<0.23", reason = "transitive: 0.13/0.22 from older deps, unify blocked on upstream" },
+    { crate = "block-buffer:<0.12", reason = "rsa 0.10 security bump uses digest 0.11; workspace HMAC stack pins digest 0.10" },
+    { crate = "cpufeatures:<0.3", reason = "transitive: sha2/aes chains disagree, unify blocked on upstream" },
+    { crate = "crypto-common:<0.2", reason = "transitive: digest 0.9 vs 0.10 chains, unify blocked on upstream" },
+    { crate = "digest:<0.11", reason = "rsa 0.10 security bump uses digest 0.11; workspace HMAC stack pins digest 0.10" },
+    { crate = "getrandom:<0.4", reason = "transitive: rand 0.9 (metrics-util) vs 0.10 chains, unify blocked on upstream" },
+    { crate = "hashbrown:<0.17", reason = "transitive: indexmap 1.x and older hashbrown consumers" },
+    { crate = "hmac:<0.13", reason = "rsa 0.10 security bump uses hmac 0.13; workspace pins hmac 0.12 for HMAC forwarding" },
+    { crate = "io-lifetimes:<3", reason = "transitive: deprecated by rustix; remaining consumers not yet bumped" },
+    { crate = "itertools:<0.15", reason = "transitive: brigadier/command chain, unify blocked on upstream" },
+    { crate = "r-efi:<6", reason = "transitive: windows target cfg chain" },
+    { crate = "rand:<0.10", reason = "transitive: metrics-exporter-prometheus pins rand 0.9, workspace is on rand 0.10" },
+    { crate = "rand_core:<0.10", reason = "transitive: accompanies rand 0.9 chain via metrics-exporter-prometheus" },
+    { crate = "regex-syntax:<0.8", reason = "transitive: older regex-syntax from tracing-subscriber chain" },
+    { crate = "serde_spanned:<1", reason = "transitive: figment/toml 0.8 chain" },
+    { crate = "sha2:<0.11", reason = "rsa 0.10 security bump uses sha2 0.11; workspace pins sha2 0.10 for HMAC forwarding" },
+    { crate = "syn:<3", reason = "transitive: proc-macro2 consumers split across syn 1/2/3" },
+    { crate = "thiserror:<2", reason = "transitive: older thiserror from upstream crates not yet on v2" },
+    { crate = "thiserror-impl:<2", reason = "transitive: accompanies thiserror 1.x" },
+    { crate = "toml:<1", reason = "transitive: figment pins toml 0.8/0.9, workspace uses toml 1" },
+    { crate = "toml_datetime:<1", reason = "transitive: accompanies toml 0.8/0.9" },
+    { crate = "toml_edit:<0.25", reason = "transitive: toml 0.8/0.9 edit chains" },
+    { crate = "wast@35.0.2", reason = "transitive: wat/wast split in wasmtime, unify blocked on upstream" },
+    { crate = "winnow:<1", reason = "transitive: toml 0.8 edit chain" },
+    # windows-targets 0.52 family: pre-2024 link set, all cfg(windows)-gated
+    { crate = "windows-targets:<0.53", reason = "transitive: windows 0.52 link set" },
+    { crate = "windows_aarch64_gnullvm:<0.53", reason = "transitive: windows 0.52 link set" },
+    { crate = "windows_aarch64_msvc:<0.53", reason = "transitive: windows 0.52 link set" },
+    { crate = "windows_i686_gnu:<0.53", reason = "transitive: windows 0.52 link set" },
+    { crate = "windows_i686_gnullvm:<0.53", reason = "transitive: windows 0.52 link set" },
+    { crate = "windows_i686_msvc:<0.53", reason = "transitive: windows 0.52 link set" },
+    { crate = "windows_x86_64_gnu:<0.53", reason = "transitive: windows 0.52 link set" },
+    { crate = "windows_x86_64_gnullvm:<0.53", reason = "transitive: windows 0.52 link set" },
+    { crate = "windows_x86_64_msvc:<0.53", reason = "transitive: windows 0.52 link set" },
+    { crate = "windows-sys:<0.61", reason = "transitive: multiple windows-sys generations pulled by upstream" },
+]
+
+[sources]
+# Crates may only come from crates.io or this repository; everything else is
+# denied. There are no git dependencies in the tree today - if one is ever
+# needed, it must be added to allow-git pinned to the exact repository and
+# use a tag or rev (required-git-spec), never a floating branch.
+# The allow-git entry is policy, not inventory: it pins which github sources
+# would be tolerated, and currently matches nothing.
+unknown-registry = "deny"
+unknown-git = "deny"
+required-git-spec = "tag"
+allow-registry = [
+    "https://github.com/rust-lang/crates.io-index",
+]
+allow-git = [
+    "https://github.com/bejiihiu/candyriya-rs",
+]
+unused-allowed-source = "allow"
+
+[licenses]
+# The workspace itself is GPL-3.0-only; dependencies may use permissive
+# licenses from the allowlist. Other copyleft than GPL-3.0-only is NOT allowed.
+# Unicode-3.0 is required by the unicode-ident/ICU crate family; it is an
+# OSI-approved permissive license, same family as Unicode-DFS-2016.
+# MPL-2.0 WITH LLVM-exception mirrors the Apache-2.0 WITH LLVM-exception grant.
+# The allowlist is policy, not inventory: unused entries are intentional.
+unused-allowed-license = "allow"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "MPL-2.0 WITH LLVM-exception",
+    "GPL-3.0-only",
+]
+
+# libfuzzer-sys is LLVM's libFuzzer bindings; NCSA is the permissive
+# University of Illinois/NCSA Open Source License. Scoped exception instead of
+# widening the global allowlist.
+[[licenses.exceptions]]
+allow = ["NCSA"]
+name = "libfuzzer-sys"
+version = "*"
+
+# walkdir and same-file ship "Unlicense/MIT" (non-SPDX); their actual grant
+# is Unlicense OR MIT, so clarify the expression instead of accepting it.
+[[licenses.clarify]]
+name = "walkdir"
+version = "2.5.0"
+expression = "Unlicense OR MIT"
+license-files = []
+
+[[licenses.clarify]]
+name = "same-file"
+version = "1.0.6"
+expression = "Unlicense OR MIT"
+license-files = []
