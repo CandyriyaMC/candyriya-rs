@@ -56,7 +56,7 @@ use candyriya_plugin::{
     PluginSet, ProxyEventDispatcher, SERVERS_NAMES_KEY, ServiceRegistry, SharedLocales,
     resolve_plugins,
 };
-use candyriya_plugin_api::PlayerRef;
+use candyriya_plugin_api::{EventDispatcher, PlayerRef};
 use candyriya_proxy::{FaviconCache, ProxySocket, ProxyState, SocketConfig, serve};
 use candyriya_route::BackendRegistry;
 use candyriya_scheduler::TaskService;
@@ -354,17 +354,38 @@ async fn run_async(
         );
     }
 
+    // ---- command locales + the shared pair the plugin host functions
+    // resolve through (built before the plugin load so the loader can
+    // register plugin locale files into the same machines)
+    let (locales, plugin_locales) = build_locales(data_dir)?;
+
+    // ---- plugins: startup load (before the proxy state is built: the
+    // shared dispatcher gets wired into it at construction time)
+    let plugin_set = load_plugins(data_dir, &config, &cache, plugin_locales.clone());
+    registry.register_service(
+        "plugins.set".to_string(),
+        Arc::clone(&plugin_set) as Arc<dyn std::any::Any + Send + Sync>,
+    );
+    // one dispatcher per process: the registry carries it for the host
+    // functions, the proxy state carries it for the lifecycle events —
+    // both hold handles to the same instance (registered inside
+    // register_plugin_host_services below), so `/candyriya reload`
+    // swaps what they both see without any re-registration
+    let event_dispatcher = Arc::new(ProxyEventDispatcher::new((*plugin_set).clone()));
+    let kick_i18n = build_kick_i18n(data_dir, &config)?;
+
     // ---- shared proxy state
     let started = Instant::now();
     let mut proxy_state = ProxyState::new(Arc::clone(&config));
     proxy_state.auth = auth;
     proxy_state.set_router(router.clone());
     proxy_state.favicon_cache = favicon_cache.clone();
+    proxy_state.event_dispatcher = Some(Arc::clone(&event_dispatcher) as Arc<dyn EventDispatcher>);
+    proxy_state.event_i18n = Some(Arc::new(kick_i18n));
     let proxy_state = Arc::new(proxy_state);
 
     // ---- command tree: the registry itself is built after the plugin set
     // exists, so `/candyriya reload` can run both phases
-    let (locales, plugin_locales) = build_locales(data_dir)?;
     let shutdown = ShutdownHandle::new();
     let directory = Arc::new(CliDirectory::new(
         Arc::clone(&store),
@@ -380,23 +401,16 @@ async fn run_async(
         effects: effects.clone() as Arc<dyn candyriya_command::ProxyEffects>,
     };
 
-    // ---- plugins: startup load
-    let plugin_set = load_plugins(data_dir, &config, &cache, plugin_locales.clone());
-    registry.register_service(
-        "plugins.set".to_string(),
-        Arc::clone(&plugin_set) as Arc<dyn std::any::Any + Send + Sync>,
-    );
     // ---- plugin host services: without these, the candyriya:* host
     // functions fall back to their built-in answers (callApi errors out,
     // the roster reads empty, listServers answers ["local"])
     register_plugin_host_services(
         &registry,
         &service,
-        &plugin_set,
         &proxy_state,
         router.as_deref(),
+        &event_dispatcher,
     );
-
     // ---- hot reload: the same machinery, on demand
     let reload_fn = build_reload_fn(
         Arc::clone(&store),
@@ -507,12 +521,11 @@ fn roster_snapshot(state: &ProxyState) -> Vec<PlayerRef> {
 /// Register the host services the `candyriya:*` plugin host functions
 /// resolve through the registry.
 ///
-/// - `plugin.dispatcher` — built from the very [`PluginSet`] hot reload
-///   mutates in place (a cheap `Arc`-shared clone), so the dispatcher
-///   always fans out into the current plugin records with no refresh of
-///   its own. Reusing the same `plugin.dispatcher` key another component
-///   may register under keeps the two registrations interchangeable; the
-///   registry just replaces on re-register.
+/// - `plugin.dispatcher` — the process-wide dispatcher built at startup
+///   from the very [`PluginSet`] hot reload mutates in place; the proxy
+///   state holds the same instance for the lifecycle events, so both
+///   sides see the same fan-out with no re-registration. The registry
+///   just replaces on re-register.
 /// - `players.roster` — an initial snapshot is registered here, then a
 ///   named task rebuilds it every [`ROSTER_REFRESH_INTERVAL`] from
 ///   `proxy_state.roster` (the accept/login pipeline owns that roster;
@@ -536,14 +549,13 @@ fn roster_snapshot(state: &ProxyState) -> Vec<PlayerRef> {
 fn register_plugin_host_services(
     registry: &ServiceRegistry,
     service: &TaskService,
-    plugin_set: &Arc<PluginSet>,
     proxy_state: &Arc<ProxyState>,
     router: Option<&BackendRegistry>,
+    dispatcher: &Arc<ProxyEventDispatcher>,
 ) {
-    let dispatcher = Arc::new(ProxyEventDispatcher::new(plugin_set.as_ref().clone()));
     registry.register_service(
         DISPATCHER_SERVICE_KEY.to_owned(),
-        dispatcher as Arc<dyn std::any::Any + Send + Sync>,
+        Arc::clone(dispatcher) as Arc<dyn std::any::Any + Send + Sync>,
     );
 
     let roster = roster_snapshot(proxy_state);
@@ -851,6 +863,31 @@ fn warm_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) {
         return;
     }
     let _ = refresh_favicon(config, Some(cache));
+}
+
+/// Build the locale handle the proxy uses to render kick screens for
+/// plugin-vetoed actions.
+///
+/// Same shape as the command locales: the configured locale, with the
+/// data-dir `locales/` overrides layered on top when the directory
+/// exists. An unusable override directory degrades to the embedded
+/// tables with a warning; an embedded failure is a build defect and
+/// fails hard, exactly like [`build_locales`].
+fn build_kick_i18n(data_dir: &Path, config: &Config) -> Result<I18n, CliError> {
+    let dir = data_dir.join("locales");
+    match I18n::with_override_dir(&config.locale, &dir) {
+        Ok(i18n) => Ok(i18n),
+        Err(error) => {
+            warn!(
+                %error,
+                locale = %config.locale,
+                "failed to build the kick locale from the override directory; using the embedded default"
+            );
+            I18n::new("en").map_err(|embedded| {
+                CliError::Runtime(format!("embedded locales are broken: {embedded}"))
+            })
+        }
+    }
 }
 
 /// Build the command locales plus the shared pair the plugin host

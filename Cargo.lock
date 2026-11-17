@@ -625,8 +625,10 @@ dependencies = [
  "candyriya-config",
  "candyriya-encryption",
  "candyriya-forwarding",
+ "candyriya-i18n",
  "candyriya-it",
  "candyriya-player",
+ "candyriya-plugin",
  "candyriya-plugin-api",
  "candyriya-protocol",
  "candyriya-protocol-registry",
@@ -643,6 +645,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "wat",
 ]
 
 [[package]]

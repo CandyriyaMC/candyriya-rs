@@ -18,6 +18,7 @@ use tracing::{debug, info, warn};
 
 use candyriya_auth::AuthConfig;
 use candyriya_config::Config;
+use candyriya_plugin_api::{EventDispatcher, EventIdRegistry};
 use candyriya_ratelimit::ConnectionLimiter;
 use candyriya_route::BackendRegistry;
 use candyriya_scheduler::{TaskId, TaskService};
@@ -76,6 +77,18 @@ pub struct ProxyState {
     /// on. Populated on the transition to play, drained when the byte pump
     /// ends; the source of truth for `glist` and the player counters.
     pub roster: PlayerRoster,
+    /// The shared plugin event dispatcher. `None` until the composition
+    /// root wires one in at boot — without it the proxy fires no events
+    /// and behaves exactly as if plugins did not exist.
+    pub event_dispatcher: Option<Arc<dyn EventDispatcher>>,
+    /// Localized kick text for plugin-vetoed actions. Built by the
+    /// composition root from the configured locale (embedded locale plus
+    /// the `locales/` override directory). `None` in tests and embedded
+    /// tooling; the kick falls back to the embedded English string then.
+    pub event_i18n: Option<Arc<candyriya_i18n::I18n>>,
+    /// Monotonic ids for the events the proxy fires (the dispatch ABI
+    /// requires envelope ids to increase by one per event).
+    pub(crate) event_ids: EventIdRegistry,
 }
 
 impl core::fmt::Debug for ProxyState {
@@ -121,6 +134,9 @@ impl ProxyState {
             router: ArcSwap::from_pointee(None),
             connection_rejections: AtomicU64::new(0),
             roster: PlayerRoster::new(),
+            event_dispatcher: None,
+            event_i18n: None,
+            event_ids: EventIdRegistry::new(),
         }
     }
 

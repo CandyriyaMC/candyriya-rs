@@ -556,15 +556,35 @@ DispatchResult {
 }
 ```
 
-**Status, plainly:** none of the five events are wired into the live
-connection pipeline yet. The dispatcher (`ProxyEventDispatcher`) is a
-tested library - the tests prove the fan-out, the timeout behavior, the
-load-order accounting and the cancellation aggregation with real modules -
-but no production call site fires an event today, so today your `on_event`
-never runs. When the wiring lands (connection admission, kick paths,
-login completion, backend switching, disconnect), the contract above is
-the one it will use: cancelled means the action does not happen and
-`cancel_reason` is what the client is told.
+**Status, plainly: the five events are wired.** `candyriya-proxy` fires
+them through a shared dispatcher registered at composition time (under
+the `plugin.dispatcher` service key as well as the proxy's lifecycle
+handle). The fire points and what a veto does:
+
+- `connection_allowed` — after the profile is resolved, before any
+  backend is contacted. A veto denies the join: the client gets a login
+  disconnect with the plugin's reason.
+- `connection_kicked` — whenever the proxy kicks a connection it knows
+  the identity of. Observation only; a kick cannot be un-kicked.
+- `login` — after the backend answers Login Success (the
+  modern-forwarding exchange is already acked at that point) but before
+  the client is told. A veto denies the login: no Login Success reaches
+  the client, it gets a login disconnect with the plugin's reason, and
+  no backend is kept.
+- `switch_server` — on a kick-fallback hop, before the next candidate
+  is dialed (`from_server` = the unreachable backend, `to_server` = the
+  candidate). A veto denies the hop: the candidate is skipped without
+  connecting; when nothing is left the final disconnect carries the
+  plugin's reason.
+- `disconnect` — when the connection task ends, with the best-known
+  identity. Observation only.
+
+Events fire only for connections that produced an account identity
+(Login Start read and parsed); handshakes without one fire nothing, and
+a connection with no dispatcher wired fires nothing. The kick text for
+a plugin-denied action is the plugin's `cancel_reason` verbatim, or the
+localized `candyriya.kick.plugin_cancelled` string when the plugin
+cancelled silently.
 
 ## I18n
 
