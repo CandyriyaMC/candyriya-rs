@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+documentation.workspace = true
+keywords = ["opentelemetry", "tracing", "telemetry", "proxy", "minecraft"]
+categories = ["network-programming", "development-tools", "games"]
+readme = "../../../README.md"
+exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 
 [dependencies]
 tracing = { workspace = true }

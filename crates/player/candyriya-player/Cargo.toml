@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+documentation.workspace = true
+keywords = ["minecraft", "proxy", "player", "papermc", "velocity"]
+categories = ["games", "game-development"]
+readme = "../../../README.md"
+exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 
 [dependencies]
 uuid = { workspace = true }

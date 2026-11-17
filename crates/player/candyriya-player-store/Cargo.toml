@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+documentation.workspace = true
+keywords = ["minecraft", "proxy", "player", "store", "json"]
+categories = ["games", "filesystem", "game-development"]
+readme = "../../../README.md"
+exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 
 [dependencies]
 candyriya-player = { version = "0.1.0", path = "../candyriya-player" }

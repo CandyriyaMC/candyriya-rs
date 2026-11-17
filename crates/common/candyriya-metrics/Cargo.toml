@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+documentation.workspace = true
+keywords = ["metrics", "prometheus", "proxy", "minecraft", "papermc"]
+categories = ["web-programming", "network-programming", "games"]
+readme = "../../../README.md"
+exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 
 [dependencies]
 metrics = { workspace = true }

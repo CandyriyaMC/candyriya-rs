@@ -40,6 +40,7 @@ edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/bejiihiu/candyriya-rs"
 homepage = "https://bejiihiu.github.io/candyriya-rs"
+documentation = "https://bejiihiu.github.io/candyriya-rs"
 authors = ["bejiihiu"]
 
 [workspace.dependencies]

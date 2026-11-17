@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+documentation.workspace = true
+keywords = ["bungeecord", "messaging", "minecraft", "proxy", "plugin"]
+categories = ["network-programming", "games"]
+readme = "../../../README.md"
+exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 
 [dependencies]
 bytes = { workspace = true }
