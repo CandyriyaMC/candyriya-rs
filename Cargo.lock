@@ -524,32 +524,12 @@ dependencies = [
 name = "candyriya-proxy"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
- "bytes",
- "candyriya-auth",
- "candyriya-cache",
- "candyriya-compression",
  "candyriya-config",
- "candyriya-encryption",
- "candyriya-eventbus",
- "candyriya-forwarding",
- "candyriya-messaging",
- "candyriya-messaging-bungeecord",
- "candyriya-messaging-candyriya",
- "candyriya-messaging-velocity",
- "candyriya-metrics",
- "candyriya-permissions",
- "candyriya-player",
- "candyriya-plugin",
- "candyriya-protocol",
- "candyriya-protocol-registry",
  "candyriya-ratelimit",
- "candyriya-route",
- "candyriya-telemetry",
+ "candyriya-scheduler",
  "socket2",
  "thiserror 2.0.21",
  "tokio",
- "tokio-util",
  "tracing",
 ]
 
