@@ -9,7 +9,8 @@
 //! registry. Critical sections are short (map updates, counter bumps,
 //! small vector allocations) and never contain an `.await`, so contention
 //! is negligible and lock ordering against the task service is always
-//! tree → service.
+//! tree → service. Grant rows (`holder → targets`, mirrored for pruning)
+//! live in the same state behind the same lock.
 //!
 //! Bootstrap units are not implemented here: this module is the tree
 //! mechanics only. The root unit (pid 1) is created eagerly and never
@@ -20,16 +21,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
 use candyriya_scheduler::{TaskId, TaskService};
 
 use crate::error::InitError;
 use crate::exit::{ExitRecord, ExitStatus};
-use crate::node::{UnitInfo, UnitKind, UnitState};
+use crate::ipc::{DEFAULT_MAILBOX_CAPACITY, Envelope, Grants, NodeCallView, ServiceWiring};
+use crate::node::{ServiceKind, UnitInfo, UnitKind, UnitState};
 use crate::pid::Pid;
 use crate::policy::{AttemptWindow, PolicyDecision, RestartLimits, RestartPolicy, evaluate};
 use crate::ring::RecentExits;
-use crate::spec::{UnitBodyFactory, UnitSpec};
+use crate::spec::{UnitBody, UnitBodyFactory, UnitSpec};
 
 /// Upper bound of a unit name, in bytes. Names go into logs, metrics
 /// labels and the process table; 128 bytes is generous and keeps labels sane.
@@ -135,6 +138,14 @@ pub(crate) struct UnitNode {
     attempts: AttemptWindow,
     stop_requested: bool,
     service_id: Option<TaskId>,
+    // ipc plane: every node owns a bounded mailbox; the receiver is held by
+    // the service loop (service units) or dropped at build time (plain
+    // units, whose sends fail fast with Closed)
+    mailbox: Option<mpsc::Sender<Envelope>>,
+    mailbox_capacity: usize,
+    service_kind: Option<ServiceKind>,
+    call_timeout: Option<Duration>,
+    service: Option<Arc<dyn ServiceWiring>>,
 }
 
 impl UnitNode {
@@ -163,10 +174,14 @@ pub(crate) struct TreeState {
     restarts_total: u64,
     failed_terminal_total: u64,
     options: InitOptions,
+    grants: Grants,
 }
 
 impl TreeState {
     fn new(options: InitOptions) -> Self {
+        // the root owns a mailbox like everyone else; nobody services it
+        let (mailbox, dead_rx) = mpsc::channel(DEFAULT_MAILBOX_CAPACITY);
+        drop(dead_rx);
         let root = UnitNode {
             pid: Pid::INIT,
             ppid: Pid::NONE,
@@ -183,6 +198,11 @@ impl TreeState {
             attempts: AttemptWindow::new(),
             stop_requested: false,
             service_id: None,
+            mailbox: Some(mailbox),
+            mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
+            service_kind: None,
+            call_timeout: None,
+            service: None,
         };
         let mut nodes = HashMap::with_capacity(16);
         nodes.insert(Pid::INIT, root);
@@ -195,6 +215,7 @@ impl TreeState {
             restarts_total: 0,
             failed_terminal_total: 0,
             options,
+            grants: Grants::default(),
         }
     }
 
@@ -213,6 +234,60 @@ impl TreeState {
     fn emit_zombie_metrics(&self) {
         metrics::gauge!("candyriya_zombies").set(self.zombies_current as f64);
         metrics::gauge!("candyriya_zombies_stuck").set(self.stuck_count(Instant::now()) as f64);
+    }
+
+    /// Resolve a node's call-relevant state into an owned view (or `None`).
+    ///
+    /// The caller clones the mailbox sender, so the returned view can
+    /// outlive the critical section — the lock is never held across an
+    /// await or a send.
+    pub(crate) fn get_node(&self, pid: Pid) -> Option<NodeCallView> {
+        self.nodes.get(&pid).map(|node| NodeCallView {
+            state: node.state,
+            mailbox: node.mailbox.clone(),
+            service_kind: node.service_kind,
+            call_timeout: node.call_timeout,
+        })
+    }
+
+    /// Whether `ancestor` is on the ppid chain above `of`.
+    ///
+    /// Self does not count (the caller checks self-calls separately); the
+    /// walk stops at the root (`Pid::NONE`) or at a missing link.
+    pub(crate) fn is_ancestor(&self, ancestor: Pid, of: Pid) -> bool {
+        let mut current = of;
+        loop {
+            let Some(node) = self.nodes.get(&current) else {
+                return false;
+            };
+            if node.ppid == Pid::NONE {
+                return false;
+            }
+            if node.ppid == ancestor {
+                return true;
+            }
+            current = node.ppid;
+        }
+    }
+
+    /// Whether `holder` currently holds a grant to `target`.
+    pub(crate) fn has_grant(&self, holder: Pid, target: Pid) -> bool {
+        self.grants.contains(holder, target)
+    }
+
+    /// Install a grant row, both directions.
+    pub(crate) fn insert_grant(&mut self, holder: Pid, target: Pid) {
+        self.grants.insert(holder, target);
+    }
+
+    /// The pids `holder` holds grants to, sorted ascending.
+    pub(crate) fn grants_of(&self, holder: Pid) -> Vec<Pid> {
+        self.grants.grants_of(holder)
+    }
+
+    /// Drop every grant involving `pid`, both directions.
+    pub(crate) fn prune_grants(&mut self, pid: Pid) {
+        self.grants.prune_involving(pid);
     }
 
     /// Record an exit reported by a unit wrapper.
@@ -311,6 +386,8 @@ impl TreeState {
         ) {
             PolicyDecision::Remove => {
                 self.nodes.remove(&pid);
+                // node is gone for good: its grants (both directions) die here
+                self.prune_grants(pid);
                 self.emit_zombie_metrics();
                 Ok(ReapOutcome::Reaped(record))
             }
@@ -353,6 +430,7 @@ impl TreeState {
                     None
                 } else if node.stop_requested {
                     self.nodes.remove(&pid);
+                    self.prune_grants(pid);
                     tracing::info!(%pid, "stop requested during backoff; unit not restarted");
                     return false;
                 } else {
@@ -362,18 +440,26 @@ impl TreeState {
                     node.started_at = now;
                     node.exited_at = None;
                     node.state = UnitState::Running;
-                    Some((node.name.clone(), node.factory.clone(), node.timeout))
+                    Some((
+                        node.name.clone(),
+                        node.factory.clone(),
+                        node.service.clone(),
+                        node.mailbox_capacity,
+                        node.timeout,
+                    ))
                 }
             }
         };
-        let Some((name, factory, timeout)) = decision else {
+        let Some((name, factory, wiring, capacity, timeout)) = decision else {
             return false;
         };
         self.restarts_total += 1;
         metrics::counter!("candyriya_services_restarts_total").increment(1);
+        let (mailbox, body) = build_run(wiring, capacity, factory, pid);
         let service_id =
-            crate::runner::spawn_wrapper(service, Arc::clone(tree), pid, &name, factory, timeout);
+            crate::runner::spawn_wrapper(service, Arc::clone(tree), pid, &name, body, timeout);
         if let Some(node) = self.nodes.get_mut(&pid) {
+            node.mailbox = Some(mailbox);
             node.service_id = Some(service_id);
         }
         true
@@ -421,6 +507,7 @@ impl Init {
 
     /// Create the tree with explicit options.
     pub fn with_options(service: TaskService, options: InitOptions) -> Self {
+        crate::metrics::describe();
         Self {
             inner: Arc::new(Mutex::new(TreeState::new(options))),
             service,
@@ -445,12 +532,27 @@ impl Init {
         self.inner.lock().options
     }
 
+    /// Crate-private access to the registry for sibling modules.
+    ///
+    /// Callers must never hold the guard across an await; it is used the
+    /// same way everywhere: one short critical section, then release.
+    pub(crate) fn lock_state(&self) -> parking_lot::MutexGuard<'_, TreeState> {
+        self.inner.lock()
+    }
+
     /// Spawn a unit as a child of `parent`.
     ///
     /// The parent must exist and be `Running` — a zombie cannot supervise
     /// anything, and pid reuse does not exist. The body is created
     /// immediately and runs through the central task service; the tree only
-    /// tracks its lifecycle.
+    /// tracks its lifecycle. Body factories are invoked synchronously at
+    /// registration time so the unit's mailbox is armed before any caller
+    /// can resolve it; a panicking factory aborts the spawn instead of
+    /// being misreported as a body exit.
+    ///
+    /// Grants listed in [`UnitSpec::with_grant`] are installed only after
+    /// the whole spawn succeeds; a spawn that fails for any reason installs
+    /// nothing.
     ///
     /// # Errors
     ///
@@ -458,6 +560,11 @@ impl Init {
     /// - [`InitError::ParentNotRunning`] — the parent is not (or no longer) running.
     /// - [`InitError::InvalidName`] — the name is empty, over 128 bytes or
     ///   contains control characters.
+    /// - [`InitError::NoSuchUnit`] — a grant in the spec points at a unit
+    ///   that does not exist.
+    /// - [`InitError::GrantNotHeld`] — a grant in the spec is not passable
+    ///   by `parent`: it is neither an ancestor of the grant target nor
+    ///   itself holds a grant to it.
     pub fn spawn_unit(&self, parent: Pid, spec: UnitSpec) -> Result<Pid, InitError> {
         validate_name(&spec.name)?;
         let mut st = self.inner.lock();
@@ -468,18 +575,40 @@ impl Init {
         if parent_node.state != UnitState::Running {
             return Err(InitError::ParentNotRunning(parent));
         }
+        // grants are validated BEFORE the pid is allocated and before any
+        // side effect exists: a failed spawn must leave the tree untouched.
+        // A handle can only be passed down by a parent that is an ancestor
+        // of the target (subtree rule) or itself holds one — a unit can
+        // never mint a handle to something it doesn't already reach.
+        for &grant in &spec.grants {
+            if !st.nodes.contains_key(&grant) {
+                return Err(InitError::NoSuchUnit(grant));
+            }
+            let legal = st.is_ancestor(parent, grant) || st.has_grant(parent, grant);
+            if !legal {
+                return Err(InitError::GrantNotHeld {
+                    parent,
+                    target: grant,
+                });
+            }
+        }
         let pid = Pid::new(st.next_raw_pid);
         st.next_raw_pid += 1;
+        let capacity = spec.mailbox_capacity.unwrap_or(DEFAULT_MAILBOX_CAPACITY);
+        let (mailbox, body) = build_run(spec.service.clone(), capacity, spec.factory.clone(), pid);
         // The tree lock is held across the spawn: the wrapper can never run
         // before the node exists (a fast exit would otherwise race the
         // insert and lose its status), and a concurrent cancel() blocks
-        // until the unit is fully registered.
+        // until the unit is fully registered. The body factory is called
+        // synchronously so the mailbox is armed before any caller can
+        // resolve the sender — a call made right after spawn never sees a
+        // half-registered target.
         let service_id = crate::runner::spawn_wrapper(
             &self.service,
             Arc::clone(&self.inner),
             pid,
             &spec.name,
-            spec.factory.clone(),
+            body,
             spec.timeout,
         );
         st.nodes.insert(
@@ -500,8 +629,16 @@ impl Init {
                 attempts: AttemptWindow::new(),
                 stop_requested: false,
                 service_id: Some(service_id),
+                mailbox: Some(mailbox),
+                mailbox_capacity: capacity,
+                service_kind: spec.service_kind,
+                call_timeout: spec.call_timeout,
+                service: spec.service.clone(),
             },
         );
+        for &grant in &spec.grants {
+            st.insert_grant(pid, grant);
+        }
         Ok(pid)
     }
 
@@ -673,6 +810,36 @@ impl Init {
                 let mut st = tree.lock();
                 st.respawn_locked(pid, &tree, &service);
             });
+    }
+}
+
+/// Build one body run's mailbox and body.
+///
+/// One code path for spawn and restart. Units with a service handler rebuild
+/// both halves from the stored wiring; plain units get a mailbox whose
+/// receiver is dropped at once (calls fail fast with `NotRunning`, since
+/// `try_send` reports the channel closed). The body factory is invoked
+/// synchronously here — before the unit is registered and before any caller
+/// can resolve the sender — so a call issued right after spawn never sees a
+/// half-armed target.
+///
+/// A factory panic surfaces at the spawn/restart site rather than inside the
+/// task service. That is deliberate: factories are construction closures,
+/// and pretending a construction failure is a body exit would misreport it
+/// as `Panicked` in the exit ring.
+fn build_run(
+    wiring: Option<Arc<dyn ServiceWiring>>,
+    capacity: usize,
+    factory: UnitBodyFactory,
+    pid: Pid,
+) -> (mpsc::Sender<Envelope>, UnitBody) {
+    match wiring {
+        Some(wiring) => wiring.build(pid, capacity),
+        None => {
+            let (tx, rx) = mpsc::channel(capacity);
+            drop(rx);
+            (tx, factory())
+        }
     }
 }
 

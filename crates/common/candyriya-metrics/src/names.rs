@@ -188,6 +188,42 @@ pub const NAME_PLUGIN_BUSY_TOTAL: &str = "candyriya_plugin_busy_total";
 /// - `plugin` (required): the plugin id from the manifest.
 pub const NAME_PLUGIN_LOADED: &str = "candyriya_plugin_loaded";
 
+/// Counter. Calls from one unit in the supervision tree to another unit,
+/// counted once per call, labelled by the outcome the call settled on.
+///
+/// Labels:
+///
+/// - `target` (required): the bounded service-kind vocabulary of the called
+///   unit - one of `config`, `cache`, `auth`, `router`, `plugins`, `accept`,
+///   `repl`, `stats`, `roster`, `console` or `unit` (the last is the fallback
+///   for units that declare no service kind). Never a unit name, never a
+///   pid, never per-instance state.
+/// - `outcome` (required): one of `ok`, `timeout`, `busy`, `not_running`,
+///   `panicked`, `type_mismatch` or `not_cappable`. `busy` is a
+///   mailbox-full rejection (the call never ran); `not_cappable` is a
+///   capability-check failure (caller is neither an ancestor of the target
+///   nor holds a grant for it); `not_running` covers absent, reaped, zombie
+///   or otherwise uncallable targets; `panicked` covers handler panics
+///   contained by the task service and bodies dropped mid-call.
+pub const NAME_IPC_CALLS_TOTAL: &str = "candyriya_ipc_calls_total";
+
+/// Histogram. Wall-clock time for one unit-to-unit call, from the caller's
+/// entry into the call until the answer (or the failure) comes back, in
+/// seconds.
+///
+/// Labels:
+///
+/// - `target` (required): same bounded vocabulary as in
+///   [`NAME_IPC_CALLS_TOTAL`].
+/// - `outcome` (required): same bounded vocabulary as in
+///   [`NAME_IPC_CALLS_TOTAL`]. Calls rejected by the capability check or by
+///   a full/closed mailbox are observed with their outcome label; they are
+///   ~0 and do not move the distribution's body.
+///
+/// Rendered as a true Prometheus histogram with
+/// [`crate::DEFAULT_HISTOGRAM_BUCKETS`] as the bucket bounds.
+pub const NAME_IPC_CALL_DURATION_SECONDS: &str = "candyriya_ipc_call_duration_seconds";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +245,8 @@ mod tests {
         NAME_PLUGIN_ACTIVE_CALLS,
         NAME_PLUGIN_BUSY_TOTAL,
         NAME_PLUGIN_LOADED,
+        NAME_IPC_CALLS_TOTAL,
+        NAME_IPC_CALL_DURATION_SECONDS,
     ];
 
     // prometheus data model: metric names must match [a-zA-Z_:][a-zA-Z0-9_:]*

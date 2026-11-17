@@ -37,6 +37,66 @@ impl fmt::Display for UnitKind {
     }
 }
 
+/// Bounded vocabulary of service kinds, used as the `target` label on IPC
+/// metrics.
+///
+/// The label must never carry a unit name, a pid or any per-instance value,
+/// so the vocabulary is deliberately closed: adding a variant is an explicit,
+/// reviewable change, which keeps the label cardinality bounded by
+/// construction. Units that declare no service kind are reported as
+/// [`ServiceKind::Unit`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ServiceKind {
+    /// The config holder.
+    Config,
+    /// The cache (cachegirl) front.
+    Cache,
+    /// Authentication / session verification.
+    Auth,
+    /// The routing plane (backend selection, forced hosts).
+    Router,
+    /// The plugin set.
+    Plugins,
+    /// The TCP accept loop.
+    Accept,
+    /// The console REPL.
+    Repl,
+    /// The stats collector.
+    Stats,
+    /// The player roster.
+    Roster,
+    /// The operator console surface.
+    Console,
+    /// Fallback for units that declare no service kind.
+    Unit,
+}
+
+impl ServiceKind {
+    /// The bounded `target` label value for this kind.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Cache => "cache",
+            Self::Auth => "auth",
+            Self::Router => "router",
+            Self::Plugins => "plugins",
+            Self::Accept => "accept",
+            Self::Repl => "repl",
+            Self::Stats => "stats",
+            Self::Roster => "roster",
+            Self::Console => "console",
+            Self::Unit => "unit",
+        }
+    }
+}
+
+impl fmt::Display for ServiceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Lifecycle state of a unit.
 ///
 /// The happy path is `Running` → `Zombie` → removed at reap. A unit with a

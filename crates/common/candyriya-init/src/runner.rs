@@ -28,12 +28,21 @@ use parking_lot::Mutex;
 use candyriya_scheduler::{TaskId, TaskService};
 
 use crate::exit::ExitStatus;
+use crate::ipc::CURRENT_UNIT;
 use crate::pid::Pid;
-use crate::spec::UnitBodyFactory;
+use crate::spec::UnitBody;
 use crate::tree::TreeState;
 
 /// Spawn one run of a unit body through the task service and return the id
 /// it assigned.
+///
+/// The body arrives already built — the factory is invoked synchronously at
+/// registration time (see `build_run` in `tree.rs`), never inside the spawned
+/// task. This function wraps the body in the exit-classification future and
+/// arms the `CURRENT_UNIT` task-local for the duration of the run, so
+/// [`crate::ipc::current_unit`] works inside unit bodies. Bodies created
+/// inside this scope inherit nothing beyond their own code; helpers they
+/// spawn belong to them.
 ///
 /// The wrapper future carries an [`ExitGuard`]; when the future completes
 /// (or unwinds, or is dropped) the guard records the outcome into the tree.
@@ -43,7 +52,7 @@ pub(crate) fn spawn_wrapper(
     tree: Arc<Mutex<TreeState>>,
     pid: Pid,
     name: &str,
-    factory: UnitBodyFactory,
+    body: UnitBody,
     timeout: Option<Duration>,
 ) -> TaskId {
     let slot = Arc::new(Mutex::new(None::<ExitStatus>));
@@ -53,9 +62,8 @@ pub(crate) fn spawn_wrapper(
         slot: slot.clone(),
     };
     let task_name = name.to_string();
-    let future = async move {
+    let future = CURRENT_UNIT.scope(pid, async move {
         let guard = guard;
-        let body = factory();
         let status = match timeout {
             Some(limit) => match tokio::time::timeout(limit, body).await {
                 Ok(status) => status,
@@ -65,7 +73,7 @@ pub(crate) fn spawn_wrapper(
         };
         // normal path: the guard takes over from here and records
         *guard.slot.lock() = Some(status);
-    };
+    });
     service.spawn_named(task_name, future)
 }
 

@@ -39,4 +39,17 @@ pub enum InitError {
     /// guard; a well-formed tree never produces this.
     #[error("zombie {0} carries no exit status (internal invariant violated)")]
     MissingExitStatus(Pid),
+
+    /// The spawner asked to install a grant to `target` that it is not
+    /// allowed to pass down: the spawner is neither an ancestor of `target`
+    /// nor itself holds a grant to it.
+    #[error(
+        "unit {parent} cannot grant a handle to {target}: not an ancestor and not a grant holder"
+    )]
+    GrantNotHeld {
+        /// The unit that tried to pass the handle down.
+        parent: Pid,
+        /// The unit the handle points at.
+        target: Pid,
+    },
 }

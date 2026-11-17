@@ -16,6 +16,7 @@ exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 [dependencies]
 candyriya-scheduler = { version = "0.1.0", path = "../candyriya-scheduler" }
 candyriya-utils = { version = "0.1.0", path = "../candyriya-utils" }
+candyriya-metrics = { version = "0.1.1", path = "../candyriya-metrics" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
