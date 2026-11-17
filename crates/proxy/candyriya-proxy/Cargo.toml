@@ -20,11 +20,20 @@ bytes = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
 candyriya-config = { version = "0.1.0", path = "../../config/candyriya-config" }
 candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
 candyriya-protocol-registry = { version = "0.1.0", path = "../../protocol/candyriya-protocol-registry" }
 candyriya-ratelimit = { version = "0.1.0", path = "../../network/candyriya-ratelimit" }
 candyriya-scheduler = { version = "0.1.0", path = "../../common/candyriya-scheduler" }
+candyriya-cache = { version = "0.1.0", path = "../../common/candyriya-cache" }
+# the strict MiniMessage acceptance gate already used for config strings
+candyriya-plugin-api = { version = "0.1.0", path = "../../plugin/candyriya-plugin-api" }
+
+[dev-dependencies]
+candyriya-it = { version = "0.1.0", path = "../../it/candyriya-it" }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

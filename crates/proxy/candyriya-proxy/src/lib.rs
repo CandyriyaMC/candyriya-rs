@@ -13,16 +13,19 @@
 //!   global cap (a [`candyriya_ratelimit::ConnectionLimiter`] for the
 //!   per-IP side plus a semaphore for the global side), applied before a
 //!   connection is handed to the service.
-//! - The per-connection task itself, [`handle_connection`], which today
-//!   holds the socket open and drains inbound bytes until EOF — a valid
-//!   checkpoint that later slices replace with the handshake/login
-//!   pipeline.
+//! - [`handle_connection`] — the per-connection task: reads the handshake,
+//!   routes on its intent. A status-intent handshake is answered by
+//!   [`handle_status`]; other intents have no handler yet and the
+//!   connection is closed.
 //! - [`read_handshake`] — reading and validating the client's first frame:
 //!   framing through [`candyriya_protocol::PacketCodec`], the frame-size
 //!   cap, the packet id and intent checks, and the `server_address`
 //!   validation. [`HandshakeRead`] is the incremental state machine behind
-//!   it; the routing of a validated [`HandshakeResult`] to status or login
-//!   is a later slice.
+//!   it; [`handle_status`] is the status-intent handler it feeds.
+//! - [`handle_status`] — the status-intercept slice: after a
+//!   status-intent handshake, validates the status request, answers it
+//!   immediately from configuration (version echo, MOTD, favicon) without
+//!   contacting any backend, and echoes the ping.
 //!
 //! Everything is audited-library-backed (`socket2`, `tokio`,
 //! `candyriya-ratelimit`); nothing here re-implements protocol work it
@@ -53,6 +56,7 @@ mod accept;
 mod handshake;
 mod limit;
 mod socket;
+mod status;
 
 pub use crate::accept::{ProxyState, accept_loop, handle_connection, serve};
 pub use crate::handshake::{
@@ -60,6 +64,7 @@ pub use crate::handshake::{
 };
 pub use crate::limit::{ConnectionSlot, DEFAULT_PER_IP_MAX, SlotAcquireError, try_acquire_slot};
 pub use crate::socket::{ProxySocket, REUSE_PORT_SUPPORTED, SocketConfig};
+pub use crate::status::{FaviconCache, handle_status};
 
 /// Errors the proxy core can return.
 #[derive(Debug, thiserror::Error)]
@@ -125,10 +130,22 @@ pub enum ProxyError {
     #[error("illegal handshake server address: {0}")]
     IllegalAddress(String),
 
-    /// The client did not finish the handshake within the configured
-    /// timeout.
-    #[error("handshake timed out")]
+    /// The peer did not finish the frame it was asked for (handshake or
+    /// any status-state frame) within the configured timeout.
+    #[error("timed out")]
     Timeout,
+
+    /// The proxy is misconfigured in a way that makes serving impossible —
+    /// e.g. the MOTD is empty or is not valid MiniMessage, so the status
+    /// response cannot be produced. Details are safe to log, never sent
+    /// to the client.
+    #[error("proxy is misconfigured: {0}")]
+    Misconfigured(String),
+
+    /// The embedded protocol registry failed to load. This is a build
+    /// bug, not a runtime condition: the compiled-in tables are invalid.
+    #[error("protocol registry unavailable: {0}")]
+    Registry(String),
 
     /// Socket I/O failed while reading the handshake.
     #[error("handshake I/O failed: {0}")]

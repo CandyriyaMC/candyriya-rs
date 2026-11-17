@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tracing::{debug, info, warn};
@@ -20,10 +19,10 @@ use candyriya_config::Config;
 use candyriya_ratelimit::ConnectionLimiter;
 use candyriya_scheduler::{TaskId, TaskService};
 
+use crate::handshake::{HandshakeLimits, read_handshake};
 use crate::limit::{ConnectionSlot, SlotAcquireError, try_acquire_slot};
-
-/// Inbound drain buffer size for the connection task (64 KiB).
-const DRAIN_BUFFER_SIZE: usize = 64 * 1024;
+use crate::status::{FaviconCache, handle_status};
+use candyriya_protocol::Intent;
 
 /// How long to pause the loop after a failed `accept(2)`.
 ///
@@ -49,6 +48,10 @@ pub struct ProxyState {
     /// semaphore the accept loop creates from `[advanced]
     /// max-connections`.
     pub limiter: ConnectionLimiter,
+    /// Optional binary favicon cache (cachegirl). `None` by default; the
+    /// composition root wires it when it owns a `CacheManager`. Without
+    /// one, favicons are read from disk per ping.
+    pub favicon_cache: Option<Arc<FaviconCache>>,
 }
 
 impl core::fmt::Debug for ProxyState {
@@ -83,6 +86,7 @@ impl ProxyState {
             config,
             conn_counter: AtomicU64::new(0),
             limiter,
+            favicon_cache: None,
         }
     }
 
@@ -215,11 +219,12 @@ pub fn serve(
 /// `TCP_NODELAY` is applied here rather than only on the listener,
 /// because accepted sockets do not reliably inherit it.
 ///
-/// The body then drains inbound bytes until EOF (or a read error) and
-/// closes the connection. That is the whole job of this slice — the
-/// handshake pipeline takes over in a later one. An idle client that
-/// never sends anything holds the connection open, which is the correct
-/// behaviour for a proxy whose next step is the handshake timeout.
+/// The body reads the client's handshake, routes on its intent and takes
+/// over the connection from there. A status-intent handshake is served by
+/// [`handle_status`](crate::handle_status); other intents have no handler
+/// in this slice yet, and the connection is closed instead of held open.
+/// Any handshake failure closes the connection with a debug log — a peer
+/// that cannot complete a frame is never tolerated.
 pub async fn handle_connection(
     state: Arc<ProxyState>,
     mut stream: TcpStream,
@@ -233,24 +238,38 @@ pub async fn handle_connection(
         warn!(conn = conn_id, %peer, %error, "failed to set TCP_NODELAY; continuing");
     }
 
-    let mut buffer = vec![0_u8; DRAIN_BUFFER_SIZE];
-    let mut drained: u64 = 0;
-    loop {
-        match stream.read(&mut buffer).await {
-            Ok(0) => break, // clean EOF: the peer closed the connection
-            Ok(n) => drained += n as u64,
-            Err(error) => {
-                debug!(conn = conn_id, %peer, %error, "read failed; closing the connection");
-                break;
+    let limits = HandshakeLimits::from_config(&state.config);
+    match read_handshake(&mut stream, &limits).await {
+        Ok(handshake) => {
+            debug!(
+                conn = conn_id,
+                %peer,
+                protocol = handshake.protocol,
+                intent = ?handshake.intent,
+                "handshake complete"
+            );
+            match handshake.intent {
+                Intent::Status => {
+                    if let Err(error) = handle_status(&state, &mut stream, &handshake).await {
+                        debug!(conn = conn_id, %peer, %error, "status exchange ended with an error");
+                    }
+                }
+                // the login pipeline lands in the next slice; until then
+                // there is nothing honest to do with a login intent but close
+                other => {
+                    debug!(conn = conn_id, %peer, intent = ?other, "no handler for this intent yet; closing");
+                }
             }
+        }
+        Err(error) => {
+            debug!(conn = conn_id, %peer, %error, "handshake failed; closing the connection");
         }
     }
 
     debug!(
         conn = conn_id,
         %peer,
-        bytes_drained = drained,
         connections_in_flight = state.limiter.current_connections(),
-        "connection closed after drain"
+        "connection closed"
     );
 }

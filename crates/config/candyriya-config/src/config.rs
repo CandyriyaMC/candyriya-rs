@@ -292,6 +292,11 @@ pub struct Config {
     /// Note: despite the name this is not a hard connection cap; see
     /// `[advanced] max-connections` for that.
     pub show_max_players: u32,
+    /// Path of the PNG favicon served in the server list ping. Relative
+    /// paths are resolved against the process working directory. Defaults
+    /// to `"assets/favicon.png"`; a missing or unreadable file is not an
+    /// error — the proxy serves an embedded transparent 64x64 icon instead.
+    pub motd_favicon: String,
     /// Online mode: verify player identities against Mojang session
     /// servers. Setting this to `false` is required for offline accounts
     /// and must be combined with backend `online-mode=false`. Defaults to
@@ -359,6 +364,7 @@ impl Default for Config {
             bind: "0.0.0.0:25565".to_string(),
             motd: "<aqua>A Candyriya network".to_string(),
             show_max_players: 100,
+            motd_favicon: "assets/favicon.png".to_string(),
             online_mode: true,
             force_key_authentication: true,
             player_info_forwarding_mode: ForwardingMode::Modern,

@@ -38,6 +38,11 @@ motd = "<aqua>A Candyriya network"
 # the real connection cap is [advanced] max-connections.
 show-max-players = 100
 
+# PNG image shown in the server list next to the MOTD. Relative paths
+# resolve against the process working directory. If the file is missing,
+# unreadable or not a PNG, the proxy serves an embedded transparent icon.
+motd-favicon = "assets/favicon.png"
+
 # Online mode against Mojang session servers: true = premium players only.
 # If you set this to false you must also set online-mode=false on every
 # backend, or the backends will reject proxied connections.

@@ -568,13 +568,19 @@ dependencies = [
 name = "candyriya-proxy"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
+ "candyriya-cache",
  "candyriya-config",
+ "candyriya-it",
+ "candyriya-plugin-api",
  "candyriya-protocol",
  "candyriya-protocol-registry",
  "candyriya-ratelimit",
  "candyriya-scheduler",
+ "serde_json",
  "socket2",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

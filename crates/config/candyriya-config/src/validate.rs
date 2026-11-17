@@ -140,6 +140,13 @@ pub(crate) fn validate(config: &Config) -> Vec<ValidationProblem> {
     }
 
     check_no_control(&mut problems, "motd", &config.motd);
+    check_no_control(&mut problems, "motd-favicon", &config.motd_favicon);
+    if config.motd_favicon.chars().count() > 1024 {
+        problems.push(ValidationProblem::new(
+            "motd-favicon",
+            "path is longer than 1024 characters",
+        ));
+    }
 
     if config.show_max_players == 0 {
         problems.push(ValidationProblem::new(
