@@ -33,7 +33,14 @@
 //! - [`ApiInfo`] / [`ApiExport`] — the `[api]` section listing exports
 //!   other plugins may call through the host.
 //! - [`EventKind`] / [`EventPayload`] (alias [`PluginEvent`]) /
-//!   [`PlayerRef`] — events the host dispatches into plugins.
+//!   [`EventEnvelope`] / [`ProxyEvent`] / [`EventCancellation`] /
+//!   [`OutcomeReport`] / [`MinecraftEvent`] / [`EventIdRegistry`] /
+//!   [`PlayerRef`] — the typed event model the host fires into
+//!   plugins: structured kinds, monotonic envelope ids, and the two
+//!   response shapes a plugin can hand back.
+//! - [`LoginEvent`] / [`KickEvent`] / [`DisconnectEvent`] /
+//!   [`ConnectAllowedEvent`] / [`SwitchServerEvent`] — convenience
+//!   aliases for [`ProxyEvent`], one per game event.
 //! - [`ComponentBuilder`] — fluent wrapper around lobsterchat's component
 //!   construction for the typical chat/kick/title line; components are
 //!   built, serialized and handed over whole.
@@ -52,14 +59,18 @@
 //! and MiniMessage acceptance failures.
 #![forbid(unsafe_code)]
 
-mod event;
+mod events;
 mod kick;
 mod message;
 mod metadata;
 mod minimessage;
 mod version;
 
-pub use crate::event::{EventKind, EventPayload, PlayerRef, PluginEvent};
+pub use crate::events::{
+    ConnectAllowedEvent, DisconnectEvent, EventCancellation, EventEnvelope, EventIdRegistry,
+    EventKind, EventPayload, KickEvent, LoginEvent, MinecraftEvent, OutcomeReport, PlayerRef,
+    PluginEvent, ProxyEvent, SwitchServerEvent,
+};
 pub use crate::kick::{DisconnectReason, KickReason};
 pub use crate::message::{ComponentBuilder, MessageMode, text, translatable};
 pub use crate::metadata::{ApiExport, ApiInfo, MetadataError, PluginMetadata};
