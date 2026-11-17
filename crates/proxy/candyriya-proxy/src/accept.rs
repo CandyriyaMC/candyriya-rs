@@ -15,8 +15,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tracing::{debug, info, warn};
 
+use candyriya_auth::AuthConfig;
 use candyriya_config::Config;
 use candyriya_ratelimit::ConnectionLimiter;
+use candyriya_route::BackendRegistry;
 use candyriya_scheduler::{TaskId, TaskService};
 
 use crate::handshake::{HandshakeLimits, read_handshake};
@@ -52,6 +54,14 @@ pub struct ProxyState {
     /// composition root wires it when it owns a `CacheManager`. Without
     /// one, favicons are read from disk per ping.
     pub favicon_cache: Option<Arc<FaviconCache>>,
+    /// Authentication endpoint configuration: the session-server URL and
+    /// timeout used for the online-mode `hasJoined` verify. Ignored in
+    /// offline mode. Only meaningful when `[online-mode]` is true.
+    pub auth: AuthConfig,
+    /// Backend routing registry (try chain + forced hosts); `None` until
+    /// the composition root (or tests) wires one in. Without it, login
+    /// connections get a clean "no backend available" disconnect.
+    pub router: Option<Arc<BackendRegistry>>,
 }
 
 impl core::fmt::Debug for ProxyState {
@@ -87,7 +97,23 @@ impl ProxyState {
             conn_counter: AtomicU64::new(0),
             limiter,
             favicon_cache: None,
+            auth: AuthConfig::default(),
+            router: None,
         }
+    }
+
+    /// State with a backend router pre-wired (the composition root's job;
+    /// tests wire their own fixtures).
+    pub fn with_router(mut self, router: Arc<BackendRegistry>) -> Self {
+        self.router = Some(router);
+        self
+    }
+
+    /// State with a custom auth endpoint configuration (tests pointing the
+    /// session server at a fixture).
+    pub fn with_auth(mut self, auth: AuthConfig) -> Self {
+        self.auth = auth;
+        self
     }
 
     /// Allocate the next connection id.
@@ -254,8 +280,14 @@ pub async fn handle_connection(
                         debug!(conn = conn_id, %peer, %error, "status exchange ended with an error");
                     }
                 }
-                // the login pipeline lands in the next slice; until then
-                // there is nothing honest to do with a login intent but close
+                Intent::Login => {
+                    if let Err(error) =
+                        crate::login::handle_login(&state, &mut stream, peer, conn_id, &handshake)
+                            .await
+                    {
+                        debug!(conn = conn_id, %peer, %error, "login exchange ended with an error");
+                    }
+                }
                 other => {
                     debug!(conn = conn_id, %peer, intent = ?other, "no handler for this intent yet; closing");
                 }

@@ -678,10 +678,22 @@ async fn players_max_reflects_show_max_players() {
 }
 
 #[tokio::test]
-async fn a_login_intent_is_closed_not_hanging() {
-    // the login pipeline lands in a later slice; a login-intent handshake
-    // must close the connection rather than hold the slot hostage
-    let (addr, shutdown_tx, service, _state) = default_proxy();
+async fn a_silent_login_client_times_out_and_closes() {
+    // a login-intent handshake with no login start followed: the login
+    // pipeline waits for the packet the client owes it, until the login
+    // deadline ([advanced] connection-timeout + 5 s of headroom) expires,
+    // then closes both sides. Config pins connection-timeout to 100 ms
+    // so the test does not pay the headroom's default.
+    let mut config = Config::default();
+    config.advanced.connection_timeout = 100;
+    let state = Arc::new(ProxyState::new(Arc::new(config)));
+    let service = test_service();
+
+    let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
+    let addr = socket.local_addr();
+    let listener = socket.into_listener();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    serve(Arc::clone(&state), listener, shutdown_rx, &service);
 
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     stream
@@ -689,7 +701,7 @@ async fn a_login_intent_is_closed_not_hanging() {
         .await
         .expect("login handshake write");
 
-    expect_clean_close(&mut stream, Duration::from_secs(2)).await;
+    expect_clean_close(&mut stream, Duration::from_secs(8)).await;
 
     shutdown_tx.send(true).expect("shutdown flip");
     let _ = service.drain(Duration::from_secs(2)).await;

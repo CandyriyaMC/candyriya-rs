@@ -20,6 +20,11 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
 candyriya-protocol-registry = { version = "0.1.0", path = "../../protocol/candyriya-protocol-registry" }
+# the modern-forwarding login exchange is verified for real (HMAC over the
+# sealed payload) - the fixture implements the server side of the contract
+candyriya-forwarding = { version = "0.1.0", path = "../../network/candyriya-forwarding" }
+candyriya-player = { version = "0.1.0", path = "../../player/candyriya-player" }
+uuid = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

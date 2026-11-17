@@ -49,7 +49,9 @@ mod json;
 mod uuid;
 mod wire;
 
-pub use crate::backend::{BackendFixture, BackendStatsSnapshot, FakeBackendConfig};
+pub use crate::backend::{
+    BackendFixture, BackendForwarding, BackendStatsSnapshot, FakeBackendConfig,
+};
 pub use crate::client::{LoginSuccess, TestClient};
 pub use crate::error::HarnessError;
 pub use crate::uuid::{UuidParseError, format_uuid, parse_uuid, uuid_from_name};

@@ -15,9 +15,7 @@ exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 
 # Deps stay minimal on purpose: this crate is built in slices (accept loop
 # first, handshake/login behind it). Each slice adds what it uses; the
-# composition root wires the rest. Heavy feature chains (plugin host,
-# encryption) are deliberately NOT declared until the code that needs them
-# lands.
+# composition root wires the rest.
 [dependencies]
 tokio = { workspace = true }
 socket2 = { workspace = true }
@@ -27,9 +25,16 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
+rand = { workspace = true }
 candyriya-config = { version = "0.1.0", path = "../../config/candyriya-config" }
 candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
 candyriya-protocol-registry = { version = "0.1.0", path = "../../protocol/candyriya-protocol-registry" }
+candyriya-compression = { version = "0.1.0", path = "../../protocol/candyriya-compression" }
+candyriya-encryption = { version = "0.1.0", path = "../../protocol/candyriya-encryption" }
+candyriya-auth = { version = "0.1.0", path = "../../auth/candyriya-auth" }
+candyriya-player = { version = "0.1.0", path = "../../player/candyriya-player" }
+candyriya-forwarding = { version = "0.1.0", path = "../../network/candyriya-forwarding" }
+candyriya-route = { version = "0.1.0", path = "../../network/candyriya-route" }
 candyriya-ratelimit = { version = "0.1.0", path = "../../network/candyriya-ratelimit" }
 candyriya-scheduler = { version = "0.1.0", path = "../../common/candyriya-scheduler" }
 candyriya-cache = { version = "0.1.0", path = "../../common/candyriya-cache" }
@@ -38,6 +43,9 @@ candyriya-plugin-api = { version = "0.1.0", path = "../../plugin/candyriya-plugi
 
 [dev-dependencies]
 candyriya-it = { version = "0.1.0", path = "../../it/candyriya-it" }
+# the online-mode test plays the client side of the Mojang encryption handshake
+rsa = { workspace = true }
+uuid = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

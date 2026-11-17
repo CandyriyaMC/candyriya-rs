@@ -368,12 +368,15 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "candyriya-forwarding",
+ "candyriya-player",
  "candyriya-protocol",
  "candyriya-protocol-registry",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]
@@ -529,14 +532,22 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "candyriya-auth",
  "candyriya-cache",
+ "candyriya-compression",
  "candyriya-config",
+ "candyriya-encryption",
+ "candyriya-forwarding",
  "candyriya-it",
+ "candyriya-player",
  "candyriya-plugin-api",
  "candyriya-protocol",
  "candyriya-protocol-registry",
  "candyriya-ratelimit",
+ "candyriya-route",
  "candyriya-scheduler",
+ "rand 0.9.5",
+ "rsa",
  "serde_json",
  "socket2",
  "tempfile",
@@ -544,6 +555,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

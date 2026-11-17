@@ -10,7 +10,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use candyriya_it::{
-    BackendFixture, FakeBackendConfig, Intent, LoginSuccess, TestClient, parse_uuid, uuid_from_name,
+    BackendFixture, BackendForwarding, FakeBackendConfig, Intent, LoginSuccess, TestClient,
+    parse_uuid, uuid_from_name,
 };
 use candyriya_protocol_registry::Registry;
 
@@ -27,6 +28,7 @@ fn config(protocol: i32) -> FakeBackendConfig {
         protocol,
         motd: TEST_MOTD.to_owned(),
         max_players: 42,
+        forwarding: BackendForwarding::Off,
     }
 }
 
@@ -370,4 +372,118 @@ async fn unknown_packet_in_status_state_closes_connection() {
 
     let stats = fixture.close().await;
     assert_eq!(stats.protocol_errors, 1);
+}
+
+#[tokio::test]
+async fn disconnect_mode_kicks_any_login_start() {
+    let fixture = BackendFixture::start(FakeBackendConfig {
+        protocol: 767,
+        motd: TEST_MOTD.to_owned(),
+        max_players: 42,
+        forwarding: BackendForwarding::Disconnect {
+            reason: "maintenance".to_owned(),
+        },
+    })
+    .await
+    .expect("fixture starts");
+    let port = fixture.addr().port();
+    let mut client = TestClient::connect(fixture.addr()).await.expect("connect");
+
+    client
+        .send_handshake(767, "127.0.0.1", port, Intent::Login)
+        .await
+        .expect("handshake");
+    client.login_start(767, "Steve").await.expect("login start");
+
+    // the kick is a login disconnect whose JSON reason carries the configured text
+    let registry = Registry::embedded().expect("embedded snapshot is valid");
+    let disconnect_id = registry.packet_id(
+        767,
+        candyriya_protocol_registry::PacketSlot::LoginClientboundDisconnect,
+    );
+    let packet = client.next_packet().await.expect("read").expect("a packet");
+    assert_eq!(
+        Some(packet.id),
+        disconnect_id,
+        "a login disconnect must be the kick packet"
+    );
+    let mut body: &[u8] = &packet.payload;
+    let reason = candyriya_protocol::read_string(&mut body, 32767).expect("reason is utf-8");
+    assert!(
+        reason.contains("maintenance"),
+        "reason must carry the configured text: {reason}"
+    );
+
+    let stats = fixture.close().await;
+    assert_eq!(stats.forced_disconnects, 1);
+    assert_eq!(stats.logins, 0);
+}
+
+#[tokio::test]
+async fn modern_forwarding_rejects_a_forged_plugin_response() {
+    let fixture = BackendFixture::start(FakeBackendConfig {
+        protocol: 767,
+        motd: TEST_MOTD.to_owned(),
+        max_players: 42,
+        forwarding: BackendForwarding::Modern {
+            secret: "s3cret-s3cret-s3cret-s3cret-s3cret-!!".to_owned(),
+        },
+    })
+    .await
+    .expect("fixture starts");
+    let port = fixture.addr().port();
+    let mut client = TestClient::connect(fixture.addr()).await.expect("connect");
+
+    client
+        .send_handshake(767, "127.0.0.1", port, Intent::Login)
+        .await
+        .expect("handshake");
+    client.login_start(767, "Steve").await.expect("login start");
+
+    // the backend asks for the player info; answer with a forged payload
+    let registry = Registry::embedded().expect("embedded snapshot is valid");
+    let request = client.next_packet().await.expect("read").expect("a packet");
+    let request_kind = registry.classify(
+        candyriya_protocol_registry::ConnectionState::Login,
+        candyriya_protocol_registry::Direction::Clientbound,
+        registry.from_protocol(767).expect("767 is in the table"),
+        request.id,
+    );
+    assert_eq!(
+        request_kind,
+        candyriya_protocol_registry::PacketKind::LoginPluginRequest,
+        "the backend must ask for velocity:player_info"
+    );
+
+    let response_id = registry
+        .packet_id(
+            767,
+            candyriya_protocol_registry::PacketSlot::LoginServerboundPluginResponse,
+        )
+        .expect("plugin response id exists on 767");
+    let mut payload = Vec::new();
+    payload.push(0x01); // message id 1
+    payload.push(0x01); // success flag
+    payload.extend_from_slice(b"forged-not-hmac");
+    client
+        .send_frame(response_id, &payload)
+        .await
+        .expect("response sends");
+
+    let packet = client.next_packet().await.expect("read").expect("a packet");
+    let disconnect_id = registry
+        .packet_id(
+            767,
+            candyriya_protocol_registry::PacketSlot::LoginClientboundDisconnect,
+        )
+        .expect("login disconnect id exists on 767");
+    assert_eq!(
+        packet.id, disconnect_id,
+        "a forged forwarding payload must be rejected with a login disconnect"
+    );
+
+    let stats = fixture.close().await;
+    assert_eq!(stats.player_info_requests, 1);
+    assert_eq!(stats.forwarding_failures, 1);
+    assert_eq!(stats.logins, 0);
 }

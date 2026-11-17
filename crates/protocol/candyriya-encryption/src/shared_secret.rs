@@ -29,6 +29,16 @@ impl SharedSecret {
     pub fn as_bytes(&self) -> &[u8; Self::LEN] {
         &self.0
     }
+
+    /// Wrap an existing 16-byte array.
+    ///
+    /// The encryption handshake exists to *receive* a session secret from
+    /// the client: the proxy RSA-decrypts the Encryption Response and
+    /// reconstructs the shared secret from the decrypted bytes. This is the
+    /// only legitimate way to build one; the secret is never persisted.
+    pub fn from_bytes(bytes: [u8; Self::LEN]) -> Self {
+        Self(bytes)
+    }
 }
 
 impl AsRef<[u8]> for SharedSecret {
@@ -52,6 +62,13 @@ impl core::fmt::Debug for SharedSecret {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_bytes_roundtrips_verbatim() {
+        let bytes = [0x42; SharedSecret::LEN];
+        let secret = SharedSecret::from_bytes(bytes);
+        assert_eq!(secret.as_bytes(), &bytes);
+    }
 
     #[test]
     fn random_secrets_are_16_bytes_and_distinct() {

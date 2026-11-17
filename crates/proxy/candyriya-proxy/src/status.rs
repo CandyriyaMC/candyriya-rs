@@ -73,7 +73,8 @@
 //! receives a half-finished exchange.
 
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -125,16 +126,10 @@ const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 /// is what every server-list implementation expects.
 const EMBEDDED_FAVICON_PNG: &[u8] = include_bytes!("../assets/status-fallback.png");
 
-/// The embedded protocol registry, loaded at most once per process.
-///
-/// `Registry::embedded()` parses the compiled-in tables on every call,
-/// which is far too much work for the ping hot path; the snapshot is
-/// immutable, so it is loaded once and shared. `None` is cached too —
-/// a broken embedded snapshot is a build bug and failing consistently
-/// beats re-parsing on every ping.
+/// The embedded protocol registry, loaded at most once per process
+/// (shared with the login pipeline).
 fn embedded_registry() -> Option<&'static Registry> {
-    static REGISTRY: OnceLock<Option<Registry>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Registry::embedded().ok()).as_ref()
+    crate::registry::embedded_registry()
 }
 
 /// Resolves the packet ids for the status exchange for `protocol`.

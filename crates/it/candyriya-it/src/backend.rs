@@ -13,8 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::{Bytes, BytesMut};
+use candyriya_forwarding::verify_forwarding_data;
 use candyriya_protocol::{
-    Handshake, Intent, Packet, parse_login_start_name, write_string, write_uuid, write_varint,
+    DEFAULT_MAX_STRING_LENGTH, Handshake, Intent, Packet, decode_varint, parse_login_start_name,
+    write_string, write_uuid, write_varint,
 };
 use candyriya_protocol_registry::{ConnectionState, Direction, PacketKind, PacketSlot, Registry};
 use tokio::net::{TcpListener, TcpStream};
@@ -24,6 +26,34 @@ use tokio::task::JoinHandle;
 use crate::json::push_json_string;
 use crate::uuid::uuid_from_name;
 use crate::{HarnessError, protocol_id, resolve_version, wire};
+
+/// How the backend handles the login phase.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BackendForwarding {
+    /// Login start is answered with login success right away (the classic
+    /// offline-mode backend behind a forwarding proxy).
+    #[default]
+    Off,
+    /// Pull-model modern forwarding: on login start the backend sends a
+    /// login plugin request on the `velocity:player_info` channel and waits
+    /// for the proxy's plugin response. The sealed payload is verified with
+    /// HMAC-SHA256 against `secret` (see `candyriya-forwarding`); only a
+    /// payload that authenticates *and* carries the same username the client
+    /// sent at login start earns a login success. Anything else is answered
+    /// with a login disconnect. The `secret` is the raw key bytes, exactly
+    /// as configured on both sides (here: as UTF-8 bytes of the string).
+    Modern { secret: String },
+    /// Answer any login start with a login disconnect carrying `reason`
+    /// (e.g. a maintenance kick). Used to exercise the proxy's fallback.
+    Disconnect { reason: String },
+}
+
+/// The plugin channel modern forwarding uses, i.e. `velocity:player_info`.
+const PLAYER_INFO_CHANNEL: &str = "velocity:player_info";
+
+/// Message id used for the `velocity:player_info` plugin request. The
+/// fixture is single-purpose: one outstanding request per connection.
+const PLAYER_INFO_MESSAGE_ID: i32 = 1;
 
 /// Seed for a fake backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +67,9 @@ pub struct FakeBackendConfig {
     pub motd: String,
     /// The `max` player count advertised in the status response.
     pub max_players: u16,
+    /// How the backend behaves in the login phase. Use
+    /// [`BackendForwarding::Off`] for the classic behavior.
+    pub forwarding: BackendForwarding,
 }
 
 /// 1x1 transparent PNG, base64. The status response embeds this as favicon;
@@ -61,6 +94,16 @@ pub struct BackendStatsSnapshot {
     pub pings: u64,
     /// Login-start packets answered with login success so far.
     pub logins: u64,
+    /// `velocity:player_info` plugin requests sent by the backend so far
+    /// (only in [`BackendForwarding::Modern`] mode).
+    pub player_info_requests: u64,
+    /// Plugin responses that failed verification so far (bad HMAC, bad id,
+    /// wrong username, garbage): each one is answered with a login
+    /// disconnect by the backend.
+    pub forwarding_failures: u64,
+    /// Login starts answered with a login disconnect in
+    /// [`BackendForwarding::Disconnect`] mode.
+    pub forced_disconnects: u64,
     /// Frames received in the play state and ignored (never replied to).
     pub discarded_frames: u64,
     /// Protocol-level problems: undecodable frames, unexpected packet ids,
@@ -81,6 +124,9 @@ struct BackendStats {
     status_requests: AtomicU64,
     pings: AtomicU64,
     logins: AtomicU64,
+    player_info_requests: AtomicU64,
+    forwarding_failures: AtomicU64,
+    forced_disconnects: AtomicU64,
     discarded_frames: AtomicU64,
     protocol_errors: AtomicU64,
     write_errors: AtomicU64,
@@ -99,6 +145,9 @@ impl BackendStats {
             status_requests: self.status_requests.load(Ordering::Relaxed),
             pings: self.pings.load(Ordering::Relaxed),
             logins: self.logins.load(Ordering::Relaxed),
+            player_info_requests: self.player_info_requests.load(Ordering::Relaxed),
+            forwarding_failures: self.forwarding_failures.load(Ordering::Relaxed),
+            forced_disconnects: self.forced_disconnects.load(Ordering::Relaxed),
             discarded_frames: self.discarded_frames.load(Ordering::Relaxed),
             protocol_errors: self.protocol_errors.load(Ordering::Relaxed),
             write_errors: self.write_errors.load(Ordering::Relaxed),
@@ -138,14 +187,23 @@ struct BackendInner {
 ///   is escaped; the favicon is the embedded 1x1 transparent PNG).
 ///   `status ping` is echoed as `status pong` with the identical 8-byte
 ///   payload. Any other packet id in the status state closes the connection.
-/// * **Login state.** The first packet must be a login start, answered with
-///   a login success packet. The body is the current layout — a Game Profile
-///   (UUID, username, zero properties) followed by a session id UUID; pre-26.2
-///   clients read exactly the UUID and username and tolerate the remainder,
-///   which is why one body is emitted for all protocol versions. The packet id
-///   is resolved per protocol version from the registry. Compression and
-///   encryption are never negotiated and no set-compression packet is sent;
-///   framing stays in the uncompressed format for the whole connection.
+/// * **Login state.** The first packet must be a login start. In
+///   [`BackendForwarding::Off`] mode it is answered with a login success
+///   packet built from the current layout - a Game Profile (UUID, username,
+///   zero properties) followed by a session id UUID; pre-26.2 clients read
+///   exactly the UUID and username and tolerate the remainder, which is why
+///   one body is emitted for all protocol versions. In
+///   [`BackendForwarding::Modern`] mode the backend first sends a login
+///   plugin request on `velocity:player_info` (empty data) and waits for the
+///   plugin response; the response is verified with HMAC-SHA256 against the
+///   configured secret and against the username the client used at login
+///   start, and only a valid response earns a login success (an invalid one
+///   is answered with a login disconnect). In
+///   [`BackendForwarding::Disconnect`] mode any login start is answered with
+///   a login disconnect. The packet ids are resolved per protocol version
+///   from the registry. Compression and encryption are never negotiated and
+///   no set-compression packet is sent; framing stays in the uncompressed
+///   format for the whole connection.
 /// * **Play state.** After login success the connection is held open until
 ///   the client drops it. Play-state frames are read and discarded; the
 ///   backend never replies in this state.
@@ -287,6 +345,80 @@ async fn accept_loop(listener: TcpListener, inner: Arc<BackendInner>) {
     }
 }
 
+/// The state the backend's login phase is in for this connection.
+///
+/// In [`BackendForwarding::Modern`] mode the backend asks the client for its
+/// profile (`velocity:player_info`) and blocks on the answer; the pending
+/// request is remembered here so exactly one outstanding request is ever in
+/// flight per connection.
+enum LoginStep {
+    Idle,
+    AwaitPlayerInfo { message_id: i32, name: String },
+}
+
+/// Build the login success packet for `profile`. The body is the current
+/// layout — a Game Profile (UUID, username, zero properties) followed by a
+/// session id UUID; pre-26.2 clients read exactly the UUID and username and
+/// tolerate the remainder. In `Off` mode the fixture picks the profile
+/// itself (FNV-based pseudo-UUID, documented); in `Modern` mode the
+/// profile comes from the verified forwarding payload — like a real
+/// forwarding-enabled backend, which trusts the proxy's sealed profile.
+fn encode_login_success(
+    registry: &Registry,
+    protocol: i32,
+    profile: &candyriya_player::GameProfile,
+) -> Option<Packet> {
+    let success_id =
+        protocol_id(registry, protocol, PacketSlot::LoginClientboundLoginSuccess).ok()?;
+    let (uuid_msb, uuid_lsb) = profile.id.as_u64_pair();
+    let (session_msb, session_lsb) = uuid_from_name(&format!("session:{}", profile.name));
+    let mut payload = BytesMut::with_capacity(34 + profile.name.len());
+    write_uuid(uuid_msb as i64, uuid_lsb as i64, &mut payload);
+    if write_string(&mut payload, &profile.name, 16).is_err() {
+        // unreachable: the name came through the String(16)-capped parser
+        return None;
+    }
+    write_varint(0, &mut payload); // properties: none
+    write_uuid(session_msb, session_lsb, &mut payload);
+    Some(Packet {
+        id: success_id,
+        payload: payload.freeze(),
+    })
+}
+
+/// Build a login disconnect packet carrying `reason` as a JSON text
+/// component. The reason travels inside a JSON string, so it is escaped
+/// there by [`push_json_string`] rather than embedded raw.
+fn encode_login_disconnect(registry: &Registry, protocol: i32, reason: &str) -> Option<Packet> {
+    let disconnect_id =
+        protocol_id(registry, protocol, PacketSlot::LoginClientboundDisconnect).ok()?;
+    let mut json = String::with_capacity(reason.len() + 10);
+    json.push_str("{\"text\":");
+    push_json_string(&mut json, reason);
+    json.push('}');
+    let mut payload = BytesMut::with_capacity(json.len() + 5);
+    write_string(&mut payload, &json, DEFAULT_MAX_STRING_LENGTH).ok()?;
+    Some(Packet {
+        id: disconnect_id,
+        payload: payload.freeze(),
+    })
+}
+
+/// Send a login disconnect, incrementing the given counter when the write
+/// itself fails. The caller is expected to tear the connection down after
+/// this returns.
+async fn send_login_disconnect(
+    stream: &mut TcpStream,
+    registry: &Registry,
+    protocol: i32,
+    reason: &str,
+) -> bool {
+    let Some(packet) = encode_login_disconnect(registry, protocol, reason) else {
+        return false;
+    };
+    wire::write_packet(stream, packet).await.is_ok()
+}
+
 /// Build the status-response JSON document for the configured seed.
 fn build_status_response(config: &FakeBackendConfig, registry: &Registry) -> String {
     let version_name = match registry.from_protocol(config.protocol) {
@@ -336,6 +468,7 @@ async fn handle_connection(stream: TcpStream, inner: Arc<BackendInner>) {
     let mut phase = Phase::Handshaking;
     let mut protocol = 0;
     let mut version = None;
+    let mut login_step = LoginStep::Idle;
 
     loop {
         let packet = match wire::read_packet(&mut stream, &mut buf).await {
@@ -432,6 +565,79 @@ async fn handle_connection(stream: TcpStream, inner: Arc<BackendInner>) {
             }
             Phase::Login => {
                 let Some(version) = version else { break };
+
+                // a pending velocity:player_info request expects exactly one
+                // packet: the plugin response. Anything else is a protocol
+                // error and kills the connection.
+                if let LoginStep::AwaitPlayerInfo { message_id, name } =
+                    std::mem::replace(&mut login_step, LoginStep::Idle)
+                {
+                    let kind = registry.classify(
+                        ConnectionState::Login,
+                        Direction::Serverbound,
+                        version,
+                        packet.id,
+                    );
+                    let mut cursor: &[u8] = &packet.payload;
+                    let message_ok =
+                        matches!(decode_varint(&mut cursor), Ok(id) if id == message_id);
+                    let success = match cursor.first() {
+                        Some(&0x01) => {
+                            cursor = &cursor[1..];
+                            true
+                        }
+                        Some(&0x00) => {
+                            cursor = &cursor[1..];
+                            false
+                        }
+                        _ => {
+                            BackendStats::incr(&inner.stats.protocol_errors);
+                            break;
+                        }
+                    };
+                    let secret = match &inner.config.forwarding {
+                        BackendForwarding::Modern { secret } => secret.clone(),
+                        _ => String::new(), // unreachable: AwaitPlayerInfo implies Modern
+                    };
+                    let verified =
+                        if kind == PacketKind::LoginPluginResponse && message_ok && success {
+                            verify_forwarding_data(secret.as_bytes(), cursor)
+                                .ok()
+                                .filter(|(_, profile)| profile.name == name)
+                        } else {
+                            None
+                        };
+                    match verified {
+                        Some((_, profile)) => {
+                            // a forwarding-enabled backend trusts the sealed
+                            // profile: UUID and name come from it verbatim
+                            let Some(packet) = encode_login_success(&registry, protocol, &profile)
+                            else {
+                                BackendStats::incr(&inner.stats.protocol_errors);
+                                break;
+                            };
+                            if wire::write_packet(&mut stream, packet).await.is_err() {
+                                BackendStats::incr(&inner.stats.write_errors);
+                                break;
+                            }
+                            BackendStats::incr(&inner.stats.logins);
+                            phase = Phase::Play;
+                        }
+                        None => {
+                            BackendStats::incr(&inner.stats.forwarding_failures);
+                            let _ = send_login_disconnect(
+                                &mut stream,
+                                &registry,
+                                protocol,
+                                "velocity:player_info verification failed",
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
                 let kind = registry.classify(
                     ConnectionState::Login,
                     Direction::Serverbound,
@@ -455,42 +661,73 @@ async fn handle_connection(stream: TcpStream, inner: Arc<BackendInner>) {
                         break;
                     }
                 };
-                let Some(success_id) = protocol_id(
-                    &registry,
-                    protocol,
-                    PacketSlot::LoginClientboundLoginSuccess,
-                )
-                .ok() else {
-                    BackendStats::incr(&inner.stats.protocol_errors);
-                    break;
-                };
-
-                // current login success body: Game Profile (uuid, username,
-                // zero properties) + session id uuid. Older clients read
-                // exactly uuid+username and ignore the remainder; the frame
-                // length delimits the rest of the stream.
-                let (uuid_msb, uuid_lsb) = uuid_from_name(&name);
-                let (session_msb, session_lsb) = uuid_from_name(&format!("session:{name}"));
-                let mut payload = BytesMut::with_capacity(34 + name.len());
-                write_uuid(uuid_msb, uuid_lsb, &mut payload);
-                if write_string(&mut payload, &name, 16).is_err() {
-                    // unreachable: the name came through the String(16)-capped parser
-                    BackendStats::incr(&inner.stats.protocol_errors);
-                    break;
+                match &inner.config.forwarding {
+                    BackendForwarding::Off => {
+                        let (msb, lsb) = uuid_from_name(&name);
+                        let profile = candyriya_player::GameProfile {
+                            id: uuid::Uuid::from_u64_pair(msb as u64, lsb as u64),
+                            name: name.clone(),
+                            properties: Vec::new(),
+                        };
+                        let Some(packet) = encode_login_success(&registry, protocol, &profile)
+                        else {
+                            BackendStats::incr(&inner.stats.protocol_errors);
+                            break;
+                        };
+                        if wire::write_packet(&mut stream, packet).await.is_err() {
+                            BackendStats::incr(&inner.stats.write_errors);
+                            break;
+                        }
+                        BackendStats::incr(&inner.stats.logins);
+                        phase = Phase::Play;
+                    }
+                    BackendForwarding::Disconnect { reason } => {
+                        BackendStats::incr(&inner.stats.forced_disconnects);
+                        let _ =
+                            send_login_disconnect(&mut stream, &registry, protocol, reason).await;
+                        break;
+                    }
+                    BackendForwarding::Modern { .. } => {
+                        let Some(request_id) = protocol_id(
+                            &registry,
+                            protocol,
+                            PacketSlot::LoginClientboundPluginRequest,
+                        )
+                        .ok() else {
+                            // modern forwarding does not exist before 1.13
+                            BackendStats::incr(&inner.stats.protocol_errors);
+                            break;
+                        };
+                        // the velocity:player_info request carries an empty
+                        // data payload: the backend authenticates the answer
+                        // with its own HMAC check, not with request data
+                        let mut payload = BytesMut::with_capacity(32);
+                        write_varint(PLAYER_INFO_MESSAGE_ID, &mut payload);
+                        if write_string(
+                            &mut payload,
+                            PLAYER_INFO_CHANNEL,
+                            DEFAULT_MAX_STRING_LENGTH,
+                        )
+                        .is_err()
+                        {
+                            BackendStats::incr(&inner.stats.protocol_errors);
+                            break;
+                        }
+                        let packet = Packet {
+                            id: request_id,
+                            payload: payload.freeze(),
+                        };
+                        if wire::write_packet(&mut stream, packet).await.is_err() {
+                            BackendStats::incr(&inner.stats.write_errors);
+                            break;
+                        }
+                        BackendStats::incr(&inner.stats.player_info_requests);
+                        login_step = LoginStep::AwaitPlayerInfo {
+                            message_id: PLAYER_INFO_MESSAGE_ID,
+                            name,
+                        };
+                    }
                 }
-                write_varint(0, &mut payload); // properties: none
-                write_uuid(session_msb, session_lsb, &mut payload);
-
-                let packet = Packet {
-                    id: success_id,
-                    payload: payload.freeze(),
-                };
-                if wire::write_packet(&mut stream, packet).await.is_err() {
-                    BackendStats::incr(&inner.stats.write_errors);
-                    break;
-                }
-                BackendStats::incr(&inner.stats.logins);
-                phase = Phase::Play;
             }
             Phase::Play => {
                 // hold the connection open, drain and ignore play traffic;

@@ -15,8 +15,17 @@
 //!   connection is handed to the service.
 //! - [`handle_connection`] — the per-connection task: reads the handshake,
 //!   routes on its intent. A status-intent handshake is answered by
-//!   [`handle_status`]; other intents have no handler yet and the
+//!   [`handle_status`]; a login-intent handshake is handed to
+//!   [`handle_login`]; other intents have no handler yet and the
 //!   connection is closed.
+//! - [`handle_login`] — the login slice: reads the Login Start, validates
+//!   the username, resolves the profile (offline-mode UUID derivation, or
+//!   the online-mode RSA/AES-CFB8 encryption handshake with Mojang
+//!   verification), routes to a backend (forced hosts first, then the
+//!   `try` chain with kick fallback), and completes the login exchange —
+//!   Set Compression, modern `velocity:player_info` forwarding (BungeeGuard
+//!   and legacy included) or Login Disconnect, forwarding the Login Success
+//!   verbatim to the client.
 //! - [`read_handshake`] — reading and validating the client's first frame:
 //!   framing through [`candyriya_protocol::PacketCodec`], the frame-size
 //!   cap, the packet id and intent checks, and the `server_address`
@@ -55,14 +64,18 @@ use std::io;
 mod accept;
 mod handshake;
 mod limit;
+mod login;
+mod registry;
 mod socket;
 mod status;
+mod wire;
 
 pub use crate::accept::{ProxyState, accept_loop, handle_connection, serve};
 pub use crate::handshake::{
     DEFAULT_MAX_ADDRESS_LEN, HandshakeLimits, HandshakeRead, HandshakeResult, read_handshake,
 };
 pub use crate::limit::{ConnectionSlot, DEFAULT_PER_IP_MAX, SlotAcquireError, try_acquire_slot};
+pub use crate::login::{handle_login, registry_from_config};
 pub use crate::socket::{ProxySocket, REUSE_PORT_SUPPORTED, SocketConfig};
 pub use crate::status::{FaviconCache, handle_status};
 
