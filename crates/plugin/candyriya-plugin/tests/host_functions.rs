@@ -15,11 +15,10 @@ use std::sync::Arc;
 
 use candyriya_i18n::I18n;
 use candyriya_plugin::{
-    DISPATCHER_SERVICE_KEY, HostState, Limits, Outcome, PLAYERS_PING_SINK_KEY, PLAYERS_ROSTER_KEY,
-    PlayerPingSink, PluginInstance, PluginLoader, PluginSet, ProxyEventDispatcher,
-    SERVERS_NAMES_KEY, ServiceRegistry, SharedLocales,
+    HostState, Limits, Outcome, PluginInstance, PluginLoader, PluginSet, ProxyEventDispatcher,
+    ServiceRegistry, SharedLocales,
 };
-use candyriya_plugin_api::{EventEnvelope, EventKind, PlayerRef, ProxyEvent};
+use candyriya_plugin_api::{EventEnvelope, EventKind, ProxyEvent};
 
 use common::Fixture;
 
@@ -146,14 +145,11 @@ fn switch_player_returns_the_not_implemented_yet_sentinel() {
 }
 
 #[test]
-fn call_api_of_a_non_loaded_plugin_reports_plugin_not_loaded() {
+fn call_api_without_a_host_link_reports_the_unavailable_error() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let services = ServiceRegistry::new();
-    // a dispatcher over an empty set answers "plugin not loaded" for anything
-    let dispatcher = Arc::new(ProxyEventDispatcher::new(PluginSet::from_vec(vec![])));
-    services.register_service(DISPATCHER_SERVICE_KEY.to_owned(), dispatcher);
-    let services = Arc::new(services);
-
+    let services = Arc::new(ServiceRegistry::new());
+    // standalone host state: no link installed, so the host function cannot
+    // reach the `host` unit — the honest unavailable error, not a panic
     let wasm = common::echo_host_fn_wasm("candyriya", "callApi");
     let instance = direct_instance(&temp, "api-caller", &wasm, services);
 
@@ -166,85 +162,9 @@ fn call_api_of_a_non_loaded_plugin_reports_plugin_not_loaded() {
     let json = output_json(&out);
 
     assert_eq!(json["ok"], false);
-    assert_eq!(json["error"], "plugin not loaded");
-}
-
-#[test]
-fn call_api_routes_into_a_target_that_exports_the_function() {
-    let fx = Fixture::new();
-    let services = ServiceRegistry::new();
-    // the target exports hello_world only
-    let target_manifest = "id = \"targeter\"\nversion = \"0.1.0\"\nname = \"Fixture targeter\"\nplugin_main = \"hello_world\"\nplugin_api = \"0.1\"\n[api]\nexports = [ { name = \"hello_world\" } ]\n";
-    common::write_plugin_with_manifest(
-        &fx.plugins_dir,
-        "targeter",
-        target_manifest,
-        &common::static_export_plugin_wasm("hello_world", "howdy"),
-    );
-    let report = PluginLoader::new(fx.plugins_dir.clone(), fx.libraries_dir.clone(), &fx.cache)
-        .with_services(services.clone())
-        .load();
-    assert!(report.issues.is_empty(), "issues: {:?}", report.issues);
-    let dispatcher = Arc::new(ProxyEventDispatcher::new(PluginSet::from_vec(
-        report.plugins,
-    )));
-    services.register_service(DISPATCHER_SERVICE_KEY.to_owned(), dispatcher);
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let wasm = common::echo_host_fn_wasm("candyriya", "callApi");
-    let instance = direct_instance(&temp, "api-caller-2", &wasm, Arc::new(services));
-
-    let out = instance
-        .call(
-            "on_event",
-            br#"{"target_plugin": "targeter", "fn": "hello_world", "args": ["Steve"]}"#,
-        )
-        .expect("call works");
-    let json = output_json(&out);
-
-    assert_eq!(json["ok"], true, "unexpected answer: {json}");
-    assert_eq!(json["data"], "howdy");
-}
-
-#[test]
-fn call_api_rejects_an_export_the_target_does_not_list() {
-    let fx = Fixture::new();
-    let services = ServiceRegistry::new();
-    // hello_world exists but the manifest lists no [api].exports: nothing
-    // may be called on the target
-    let target_manifest = "id = \"targeter\"\nversion = \"0.1.0\"\nname = \"Fixture targeter\"\nplugin_main = \"hello_world\"\nplugin_api = \"0.1\"\n";
-    common::write_plugin_with_manifest(
-        &fx.plugins_dir,
-        "targeter",
-        target_manifest,
-        &common::static_export_plugin_wasm("hello_world", "howdy"),
-    );
-    let report = PluginLoader::new(fx.plugins_dir.clone(), fx.libraries_dir.clone(), &fx.cache)
-        .with_services(services.clone())
-        .load();
-    assert!(report.issues.is_empty(), "issues: {:?}", report.issues);
-    let dispatcher = Arc::new(ProxyEventDispatcher::new(PluginSet::from_vec(
-        report.plugins,
-    )));
-    services.register_service(DISPATCHER_SERVICE_KEY.to_owned(), dispatcher);
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let wasm = common::echo_host_fn_wasm("candyriya", "callApi");
-    let instance = direct_instance(&temp, "api-caller-3", &wasm, Arc::new(services));
-
-    let out = instance
-        .call(
-            "on_event",
-            br#"{"target_plugin": "targeter", "fn": "hello_world", "args": []}"#,
-        )
-        .expect("call works");
-    let json = output_json(&out);
-
-    assert_eq!(json["ok"], false);
-    let error = json["error"].as_str().expect("error string");
-    assert!(
-        error.contains("does not export"),
-        "unexpected error: {error}"
+    assert_eq!(
+        json["error"],
+        "callApi: host dispatcher unavailable (host unit link is not installed)"
     );
 }
 
@@ -399,7 +319,7 @@ fn a_cancellation_recorded_before_a_timeout_still_cancels() {
 }
 
 #[test]
-fn ping_player_reports_the_stub_when_no_delivery_channel_exists() {
+fn ping_player_reports_an_unavailable_roster_without_a_host_link() {
     let temp = tempfile::tempdir().expect("tempdir");
     let services = Arc::new(ServiceRegistry::new());
     let wasm = common::echo_host_fn_wasm("candyriya", "pingPlayer");
@@ -411,52 +331,10 @@ fn ping_player_reports_the_stub_when_no_delivery_channel_exists() {
     let json = output_json(&out);
 
     assert_eq!(json["ok"], false);
-    assert_eq!(json["error"], "player messaging is not implemented yet");
-}
-
-#[test]
-fn ping_player_delivers_through_a_registered_sink() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let delivered_for_sink = Arc::clone(&delivered);
-    let services = ServiceRegistry::new();
-    services.register_service(
-        PLAYERS_ROSTER_KEY.to_owned(),
-        Arc::new(vec![PlayerRef {
-            uuid: "5627dd98-e6be-3c21-b8a8-e92344183641".to_owned(),
-            name: "Steve".to_owned(),
-        }]),
-    );
-    services.register_service(
-        PLAYERS_PING_SINK_KEY.to_owned(),
-        Arc::new(PlayerPingSink::new(move |name| {
-            delivered_for_sink
-                .lock()
-                .expect("sink mutex")
-                .push(name.to_owned());
-        })),
-    );
-
-    let services = Arc::new(services);
-    let wasm = common::echo_host_fn_wasm("candyriya", "pingPlayer");
-    let instance = direct_instance(&temp, "pinger-2", &wasm, services);
-
-    let out = instance
-        .call("on_event", br#"{"name": "Steve"}"#)
-        .expect("call works");
-    assert_eq!(output_json(&out)["ok"], true);
     assert_eq!(
-        delivered.lock().expect("delivered").as_slice(),
-        ["Steve"],
-        "the sink receives the player's name"
+        json["error"].as_str().expect("error string"),
+        "player roster unavailable (host unit link is not installed)"
     );
-
-    let out = instance
-        .call("on_event", br#"{"name": "NotOnline"}"#)
-        .expect("call works");
-    let json = output_json(&out);
-    assert_eq!(json["ok"], false);
-    assert_eq!(json["error"], "player `NotOnline` is not online");
 }
 
 #[test]
@@ -473,24 +351,6 @@ fn list_servers_defaults_to_local() {
 }
 
 #[test]
-fn list_servers_prefers_the_registered_backend_list() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let services = ServiceRegistry::new();
-    services.register_service(
-        SERVERS_NAMES_KEY.to_owned(),
-        Arc::new(vec!["alpha".to_owned(), "beta".to_owned()]),
-    );
-    let services = Arc::new(services);
-    let wasm = common::echo_host_fn_wasm("candyriya", "listServers");
-    let instance = direct_instance(&temp, "lister-2", &wasm, services);
-
-    let out = instance.call("on_event", b"").expect("call works");
-    let json: Vec<String> = serde_json::from_slice(&out).expect("array of server names");
-
-    assert_eq!(json, ["alpha", "beta"]);
-}
-
-#[test]
 fn get_player_roster_defaults_to_an_empty_list() {
     let temp = tempfile::tempdir().expect("tempdir");
     let services = Arc::new(ServiceRegistry::new());
@@ -501,28 +361,6 @@ fn get_player_roster_defaults_to_an_empty_list() {
     let json: Vec<serde_json::Value> = serde_json::from_slice(&out).expect("array of players");
 
     assert!(json.is_empty());
-}
-
-#[test]
-fn get_player_roster_returns_the_registered_roster() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let services = ServiceRegistry::new();
-    services.register_service(
-        PLAYERS_ROSTER_KEY.to_owned(),
-        Arc::new(vec![PlayerRef {
-            uuid: "5627dd98-e6be-3c21-b8a8-e92344183641".to_owned(),
-            name: "Steve".to_owned(),
-        }]),
-    );
-    let services = Arc::new(services);
-    let wasm = common::echo_host_fn_wasm("candyriya", "getPlayerRoster");
-    let instance = direct_instance(&temp, "roster-reader-2", &wasm, services);
-
-    let out = instance.call("on_event", b"").expect("call works");
-    let json: Vec<PlayerRef> = serde_json::from_slice(&out).expect("array of players");
-
-    assert_eq!(json.len(), 1);
-    assert_eq!(json[0].name, "Steve");
 }
 
 // ---- i18n host functions ----

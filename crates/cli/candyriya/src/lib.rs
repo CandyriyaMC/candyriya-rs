@@ -26,10 +26,11 @@
 //!    Routing reads go to the `route` unit through the same IPC plane —
 //!    login, the stats line and the directory all call it; `/candyriya
 //!    reload` swaps the very store the unit serves, so a reload is visible
-//!    to the next call. The plugin-facing host services the `candyriya:*`
-//!    functions resolve through — the plugin dispatcher, the play-state
-//!    roster snapshot and the backend name list — are registered right
-//!    after the plugin load.
+//!    to the next call. The plugin-facing core services the `candyriya:*`
+//!    functions resolve through — the plugin dispatcher fan-out, the live
+//!    play-state roster and the backend name list — are served by the
+//!    `host` unit spawned alongside the rest of the serving units (see
+//!    below), never by a registry or a stale snapshot.
 //!    All of the above is the loader phase: everything that ran before
 //!    the task service existed is adopted into the tree as an
 //!    already-exited unit once the tree is up.
@@ -38,7 +39,7 @@
 //!    of truth), `cache` (the supervised owner of the live cache manager,
 //!    a separate record from the `cache.manager` bootstrap adoption),
 //!    `proxy.accept` (long-lived, the unit body drives the
-//!    listener), `stats.every-60s` and `players.roster-refresh`
+//!    listener), `host` (the plugin-facing core services), `stats.every-60s`
 //!    (periodic), `console` (the interactive REPL) and, at shutdown,
 //!    `cache.shutdown` and `metrics.shutdown` (one-shot finalizers, the
 //!    last units to run, in order). Ctrl-C or
@@ -67,7 +68,7 @@ use clap::Parser;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
-use candyriya_auth::{AuthConfig, AuthMode, MojangSessionValidator, OfflineSessionValidator};
+use candyriya_auth::{AuthConfig, AuthMode};
 use candyriya_cache::{CacheManager, cache_spec};
 use candyriya_command::{CommandRegistry, CommandState, ShutdownHandle};
 use candyriya_config::{Config, ConfigStore, DEFAULT_CONFIG_TOML};
@@ -76,13 +77,12 @@ use candyriya_init::{
     ExitStatus, Init, Pid, ReapOutcome, RestartPolicy, ServiceKind, UnitKind, UnitSpec,
 };
 use candyriya_plugin::{
-    DISPATCHER_SERVICE_KEY, LimitBuilder, PLAYERS_ROSTER_KEY, PluginLoader, PluginReloader,
-    PluginSet, ProxyEventDispatcher, SERVERS_NAMES_KEY, ServiceRegistry, SharedLocales,
-    resolve_plugins,
+    HostIpc, LimitBuilder, PluginLoader, PluginReloader, PluginSet, ProxyEventDispatcher,
+    ServiceRegistry, SharedLocales, resolve_plugins,
 };
-use candyriya_plugin_api::{EventDispatcher, PlayerRef};
+use candyriya_plugin_api::EventDispatcher;
 use candyriya_proxy::{
-    FaviconCache, ProxySocket, ProxyState, SocketConfig, accept_loop, config_spec,
+    FaviconCache, ProxySocket, ProxyState, SocketConfig, accept_loop, config_spec, host_spec,
 };
 use candyriya_route::{
     BackendRegistry, DEFAULT_HEALTH_CHECK_INTERVAL, RouteMsg, RouteResp, health_spec, route_spec,
@@ -388,7 +388,7 @@ async fn cascade_shutdown(
     let _ = shutdown_tx.send(true);
 
     // stop the serving units through the tree, newest first: console,
-    // players.roster-refresh, stats.every-60s, proxy.accept, route.health,
+    // host, stats.every-60s, proxy.accept, route.health,
     // cache, route. route.health is a child of route, so cancelling it before
     // route keeps the order; the cache unit is cancelled in the sweep, so it
     // is gone by the time the `cache.shutdown` finalizer closes the manager.
@@ -563,14 +563,8 @@ async fn run_async(
     adopt_bootstrap(&tree, "route.resolve", ExitStatus::Success);
 
     // one shared route store: the route unit serves from it, the reload
-    // path swaps through it — the names list is collected once here from
-    // the same registry that lands in the store
-    let router_names: Option<Vec<String>> = router.as_ref().map(|registry| {
-        registry
-            .iter()
-            .map(|backend| backend.name().to_owned())
-            .collect()
-    });
+    // path swaps through it — the backend name list is served by the same
+    // unit to the plugin host functions
     let router_store = router_store(router);
 
     // ---- the config unit: it owns the live store and is the single source
@@ -655,12 +649,12 @@ async fn run_async(
         }
     };
 
+    // the registry now carries plugin-owned services only (entries tagged
+    // with an owning plugin id, revoked in bulk on reload); it is shared
+    // with the hot-reload path, where a plugin may re-register after a
+    // swap. Every core service the registry used to hold has dissolved
+    // into a supervised unit.
     let registry = ServiceRegistry::new();
-    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
-    registry.register_service(
-        "scheduler.service".to_string(),
-        Arc::new(service.clone()) as Arc<dyn std::any::Any + Send + Sync>,
-    );
 
     // ---- the cache manager (the `cache` unit spawned below serves the
     // runtime reads; plugins borrow the manager for their quotas)
@@ -685,11 +679,6 @@ async fn run_async(
             .await);
         }
     };
-    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
-    registry.register_service(
-        "cache.manager".to_string(),
-        Arc::clone(&cache) as Arc<dyn std::any::Any + Send + Sync>,
-    );
 
     // ---- the cache unit: the supervised owner of the live manager. The
     // loader adopted `cache.manager` above as an already-exited bootstrap
@@ -778,31 +767,8 @@ async fn run_async(
         },
         ..AuthConfig::default()
     };
-    let offline_validator = Arc::new(OfflineSessionValidator);
-    let mojang_validator = Arc::new(MojangSessionValidator::new(
-        auth.session_server_url.clone(),
-        auth.timeout,
-    ));
     info!(mode = ?auth.mode, "session validation configured");
     adopt_bootstrap(&tree, "auth.validators", ExitStatus::Success);
-    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
-    registry.register_service(
-        "auth.offline".to_string(),
-        offline_validator as Arc<dyn std::any::Any + Send + Sync>,
-    );
-    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
-    registry.register_service(
-        "auth.mojang".to_string(),
-        mojang_validator as Arc<dyn std::any::Any + Send + Sync>,
-    );
-    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
-    registry.register_service(
-        "config.store".to_string(),
-        Arc::clone(&store) as Arc<dyn std::any::Any + Send + Sync>,
-    );
-    // the route.backends key is gone: routing reads the shared store the
-    // route unit serves (and swaps on reload), and the key had zero prod
-    // readers to begin with; no detached Arc escapes the store this way
 
     // ---- command locales + the kick-locale handle, plus the shared pair
     // the plugin host functions resolve through (built before the plugin
@@ -824,20 +790,29 @@ async fn run_async(
     };
     adopt_bootstrap(&tree, "i18n.build", ExitStatus::Success);
 
+    // ---- the host IPC link: every plugin instance carries this slot; the
+    // `host` unit is spawned below (it needs the shared proxy state), and
+    // once it exists the link gets filled with the tree and the unit pid.
+    // Startup plugins built before that see the honest "link is not
+    // installed" error from the cross-subsystem host functions until the
+    // fill lands — one process, one install, before serving starts
+    let host_ipc = HostIpc::new();
+
     // ---- plugins: startup load (before the proxy state is built: the
     // shared dispatcher gets wired into it at construction time)
-    let plugin_set = load_plugins(data_dir, &config, &cache, plugin_locales.clone());
-    adopt_bootstrap(&tree, "plugins.load", ExitStatus::Success);
-    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
-    registry.register_service(
-        "plugins.set".to_string(),
-        Arc::clone(&plugin_set) as Arc<dyn std::any::Any + Send + Sync>,
+    let plugin_set = load_plugins(
+        data_dir,
+        &config,
+        &cache,
+        plugin_locales.clone(),
+        host_ipc.clone(),
     );
-    // one dispatcher per process: the registry carries it for the host
-    // functions, the proxy state carries it for the lifecycle events —
-    // both hold handles to the same instance (registered inside
-    // register_plugin_host_services below), so `/candyriya reload`
-    // swaps what they both see without any re-registration
+    adopt_bootstrap(&tree, "plugins.load", ExitStatus::Success);
+    // one dispatcher per process: the `host` unit carries it for the
+    // plugin→plugin callApi fan-out, the proxy state carries it for the
+    // lifecycle events — both hold handles to the same instance, so
+    // `/candyriya reload` swaps what they both see without any
+    // re-wiring
     let event_dispatcher = Arc::new(ProxyEventDispatcher::new((*plugin_set).clone()));
 
     // ---- shared proxy state
@@ -850,12 +825,62 @@ async fn run_async(
         route_pid,
         Arc::clone(&router_store),
     );
-    // ipc-migration: Roster/Route/Proxy snapshot — ProxyState carries handles across the subsystem boundary until each is a unit
+    // ipc-migration: ProxyState carries handles across the subsystem boundary
+    // until each is a unit; the roster moved into the `host` unit
     proxy_state.auth = auth;
     proxy_state.favicon_cache = favicon_cache.clone();
     proxy_state.event_dispatcher = Some(Arc::clone(&event_dispatcher) as Arc<dyn EventDispatcher>);
     proxy_state.event_i18n = Some(Arc::new(kick_i18n));
     let proxy_state = Arc::new(proxy_state);
+
+    // ---- the `host` unit: the supervised owner of the plugin-facing core
+    // services (the plugin→plugin callApi fan-out, the live play-state
+    // roster, the backend name list). Spawned after the shared proxy
+    // state exists because the handler reads the roster and serves the
+    // dispatcher from it; the route pid rides the spawn as a grant so the
+    // unit can ask the route unit for the names itself — the subtree rule
+    // does not cover sibling calls. The grant to route is all the unit
+    // gets; nothing outside the tree answers to it.
+    let host_pid = match tree.spawn_unit(
+        Pid::INIT,
+        host_spec(
+            Arc::clone(&proxy_state),
+            Arc::clone(&event_dispatcher),
+            route_pid,
+            tree.clone(),
+            service.clone(),
+        ),
+    ) {
+        Ok(pid) => {
+            info!(pid = %pid, "host unit spawned");
+            pid
+        }
+        Err(error) => {
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &config_unwind,
+                CliError::Runtime(format!("failed to spawn host: {error}")),
+            )
+            .await);
+        }
+    };
+    if !host_ipc.install(tree.clone(), host_pid, tokio::runtime::Handle::current()) {
+        // one install per process; a second one would silently re-point
+        // every host function — refuse to serve instead
+        return Err(boot_abort(
+            &tree,
+            &service,
+            &[
+                (config_pid, "config"),
+                (route_pid, "route"),
+                (cache_pid, "cache"),
+                (host_pid, "host"),
+            ],
+            CliError::Runtime("host IPC link was installed twice".to_owned()),
+        )
+        .await);
+    }
 
     // ---- command tree: the registry itself is built after the plugin set
     // exists, so `/candyriya reload` can run both phases
@@ -879,16 +904,6 @@ async fn run_async(
         effects: effects.clone() as Arc<dyn candyriya_command::ProxyEffects>,
     };
 
-    // ---- plugin host services: without these, the candyriya:* host
-    // functions fall back to their built-in answers (callApi errors out,
-    // the roster reads empty, listServers answers ["local"])
-    // ipc-migration: Roster.Snapshot / Router.Names — these keys exist only for the host-function path; both become capability calls in the IPC phase
-    register_plugin_host_services(
-        &registry,
-        &proxy_state,
-        router_names.as_deref(),
-        &event_dispatcher,
-    );
     // ---- hot reload: the same machinery, on demand
     // ipc-migration: Config.Reload / Plugins.Reload — the ReloadFn closure runs synchronously on the REPL's blocking thread
     let reload_fn = build_reload_fn(
@@ -900,6 +915,7 @@ async fn run_async(
         Arc::clone(&plugin_set),
         Arc::clone(&cache),
         registry.clone(),
+        host_ipc.clone(),
         data_dir,
         plugin_locales,
         tokio::runtime::Handle::current(),
@@ -909,11 +925,6 @@ async fn run_async(
     let dispatcher = Arc::new(command_registry.dispatcher().map_err(|error| {
         CliError::Runtime(format!("failed to assemble the built-in commands: {error}"))
     })?);
-    // ipc-migration: dissolve with the host-function IPC conversion; key has zero prod readers (write-only)
-    registry.register_service(
-        "commands.dispatcher".to_string(),
-        dispatcher.clone() as Arc<dyn std::any::Any + Send + Sync>,
-    );
 
     // ---- one shutdown signal for Ctrl-C and /candyriya end; the accept
     // loop watches one receiver, the REPL flips it, the main loop watches
@@ -964,11 +975,14 @@ async fn run_async(
     // (reverse spawn order). The cache unit rides in the list as well: a
     // unit that dies permanently mid-run is an operator-relevant event,
     // the same trade config and route make, and the sweep must cancel it
-    // before the cache.shutdown finalizer closes the manager.
+    // before the cache.shutdown finalizer closes the manager. The host
+    // unit rides in the list too: a plugins-kind unit that dies silently
+    // would strand every plugin's cross-subsystem calls mid-run.
     let mut boot_units: Vec<(Pid, &'static str)> = vec![
         (config_pid, "config"),
         (route_pid, "route"),
         (cache_pid, "cache"),
+        (host_pid, "host"),
     ];
     if let Some((pid, name)) = health_boot {
         boot_units.push((pid, name));
@@ -1063,55 +1077,6 @@ async fn run_async(
         }
     }
 
-    // ---- play-state roster snapshot: rebuild every second from the live
-    // roster; plugin-facing getPlayerRoster answers from the key
-    let roster_state = Arc::clone(&proxy_state);
-    let roster_registry = registry.clone();
-    let roster_spec = UnitSpec::new(
-        "players.roster-refresh",
-        UnitKind::Every,
-        RestartPolicy::Never,
-        move || {
-            let state = Arc::clone(&roster_state);
-            let registry = roster_registry.clone();
-            let initial = roster_snapshot(&state);
-            // the comparison is cheap (a few small strings), so it happens
-            // synchronously per tick and a no-change tick is just one pass
-            async move {
-                let mut last_registered = initial;
-                loop {
-                    tokio::time::sleep(ROSTER_REFRESH_INTERVAL).await;
-                    // ipc-migration: Roster.Snapshot (reads the shared proxy state directly)
-                    let current = roster_snapshot(&state);
-                    if current != last_registered {
-                        // swap without the registry's replace warning: a join/part
-                        // is normal traffic, not an operator-actionable event
-                        // ipc-migration: Roster.Snapshot — remove+register swap kept until the IPC conversion
-                        registry.remove_service::<Vec<PlayerRef>>(PLAYERS_ROSTER_KEY);
-                        registry.register_service(
-                            PLAYERS_ROSTER_KEY.to_owned(),
-                            Arc::new(current.clone()) as Arc<dyn std::any::Any + Send + Sync>,
-                        );
-                        last_registered = current;
-                    }
-                }
-            }
-        },
-    )
-    .with_service_kind(ServiceKind::Roster);
-    match tree.spawn_unit(Pid::INIT, roster_spec) {
-        Ok(pid) => boot_units.push((pid, "players.roster-refresh")),
-        Err(error) => {
-            return Err(boot_abort(
-                &tree,
-                &service,
-                &boot_units,
-                CliError::Runtime(format!("failed to spawn players.roster-refresh: {error}")),
-            )
-            .await);
-        }
-    }
-
     // ---- interactive console REPL (only when stdin is a TTY)
     let console_spec = repl::console_spec(
         service.clone(),
@@ -1199,86 +1164,6 @@ async fn run_async(
     .await;
 
     Ok(())
-}
-
-/// How often the `players.roster` snapshot is rebuilt from the live
-/// play-state roster. Plugin-facing `getPlayerRoster` answers from that
-/// snapshot, so a join or a disconnect may lag by at most this interval
-/// (plus task-scheduling jitter).
-const ROSTER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-
-/// Snapshot the live play-state roster into the `Vec<PlayerRef>` shape the
-/// `players.roster` service key carries.
-// ipc-migration: Roster.Snapshot (reads the shared proxy state directly)
-fn roster_snapshot(state: &ProxyState) -> Vec<PlayerRef> {
-    state
-        .roster
-        .snapshot()
-        .into_iter()
-        .map(|entry| PlayerRef {
-            uuid: entry.uuid.to_string(),
-            name: entry.name,
-        })
-        .collect()
-}
-
-/// Register the host services the `candyriya:*` plugin host functions
-/// resolve through the registry.
-///
-/// - `plugin.dispatcher` — the process-wide dispatcher built at startup
-///   from the very [`PluginSet`] hot reload mutates in place; the proxy
-///   state holds the same instance for the lifecycle events, so both
-///   sides see the same fan-out with no re-registration. The registry
-///   just replaces on re-register.
-/// - `players.roster` — an initial snapshot is registered here; the
-///   `players.roster-refresh` unit (spawned with the rest of the boot
-///   units) then rebuilds it every [`ROSTER_REFRESH_INTERVAL`] from
-///   `proxy_state.roster` (the accept/login pipeline owns that roster;
-///   it is authoritative for the live play-state population). The host
-///   function reads the registered snapshot, so this interval is the
-///   staleness bound a plugin can observe. The swap happens only when
-///   the snapshot changed, via remove+register: a registration over an
-///   existing key logs a warning in the registry, and a player join/part
-///   is not one.
-/// - `players.ping_sink` — deliberately **not** registered. The play
-///   state is a byte pump with no packet-injection path to a client, so
-///   there is no honest way to deliver a chat ping today; leaving the key
-///   absent keeps `pingPlayer` answering with its documented
-///   "player messaging is not implemented yet" error instead of a sink
-///   that pretends to deliver. Wire one in here once the proxy grows a
-///   client-bound chat path.
-/// - `servers.names` — the backend names the registry seeded into the
-///   route store, in registration order. With no `[servers]` configured the
-///   key stays absent and the host function falls back to `["local"]`; the
-///   reload path re-registers (or removes) the names next to the router
-///   swap.
-// ipc-migration: Proxy.Stats / Router.Names / Roster.Snapshot — all three keys exist only for the host-function path and become capability calls in the IPC phase
-fn register_plugin_host_services(
-    registry: &ServiceRegistry,
-    proxy_state: &Arc<ProxyState>,
-    router_names: Option<&[String]>,
-    dispatcher: &Arc<ProxyEventDispatcher>,
-) {
-    // ipc-migration: Plugins.CallApi — the registry fans plugin callApi out to this dispatcher instance
-    registry.register_service(
-        DISPATCHER_SERVICE_KEY.to_owned(),
-        Arc::clone(dispatcher) as Arc<dyn std::any::Any + Send + Sync>,
-    );
-
-    // ipc-migration: Roster.Snapshot — read straight off the shared proxy state
-    let roster = roster_snapshot(proxy_state);
-    registry.register_service(
-        PLAYERS_ROSTER_KEY.to_owned(),
-        Arc::new(roster) as Arc<dyn std::any::Any + Send + Sync>,
-    );
-
-    if let Some(names) = router_names {
-        // ipc-migration: Router.Names — the names the route unit serves, collected once from the registry at boot
-        registry.register_service(
-            SERVERS_NAMES_KEY.to_owned(),
-            Arc::new(names.to_vec()) as Arc<dyn std::any::Any + Send + Sync>,
-        );
-    }
 }
 
 /// Log one compact stats line for the periodic unit.
@@ -1373,9 +1258,12 @@ async fn refresh_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) 
 /// listener socket and live sessions are likewise untouched.
 ///
 /// On any failure the running configuration is left untouched (the
-/// [`ConfigStore::reload`] contract); the routing registry, the
-/// `servers.names` host service and the favicon are only swapped when
-/// their own rebuild succeeds, so a half-applied reload cannot leak out.
+/// [`ConfigStore::reload`] contract); the routing registry and the
+/// favicon are only swapped when their own rebuild succeeds, so a
+/// half-applied reload cannot leak out. The plugin-facing backend name
+/// list rides the same store the route unit serves, so a successful
+/// reload is visible to the next host-function call without any
+/// re-registration.
 /// Returns an operator-facing note on success.
 ///
 /// The favicon swap reaches the `cache` unit through the tree: this phase
@@ -1389,7 +1277,6 @@ fn reload_config_phase(
     proxy_state: &ProxyState,
     favicon_cache: Option<&FaviconCache>,
     locales: &candyriya_command::Locales,
-    services: &ServiceRegistry,
     runtime: &tokio::runtime::Handle,
 ) -> Result<String, String> {
     let config = store
@@ -1402,30 +1289,13 @@ fn reload_config_phase(
     if config.servers.servers.is_empty() {
         // ipc-migration: Route.Replace (swap-through-the-shared-state path)
         proxy_state.set_router(None);
-        // mirror a fresh start with no [servers]: the key goes away and
-        // listServers keeps its documented ["local"] fallback
-        // ipc-migration: Router.Names — the key is host-function-facing; swap and delete both ride the registry
-        services.remove_service::<Vec<String>>(SERVERS_NAMES_KEY);
         notes.push("routing disabled (no [servers] configured)".to_owned());
     } else {
         match candyriya_proxy::registry_from_config(&config) {
             Ok(registry) => {
-                let names: Vec<String> = registry
-                    .iter()
-                    .map(|backend| backend.name().to_owned())
-                    .collect();
-                let count = names.len();
+                let count = registry.iter().count();
                 // ipc-migration: Route.Replace (swap-through-the-shared-state path)
                 proxy_state.set_router(Some(Arc::new(registry)));
-                // keep the plugin-facing name list on the same swap, so a
-                // plugin never sees names that no longer route; remove+register
-                // to skip the registry's replace warning
-                // ipc-migration: Router.Names — same swap, host-function-facing
-                services.remove_service::<Vec<String>>(SERVERS_NAMES_KEY);
-                services.register_service(
-                    SERVERS_NAMES_KEY.to_owned(),
-                    Arc::new(names) as Arc<dyn std::any::Any + Send + Sync>,
-                );
                 notes.push(format!("{count} backends re-registered"));
             }
             Err(message) => {
@@ -1461,6 +1331,8 @@ fn reload_config_phase(
 /// Reload the plugin phase: re-stage every running plugin from disk and
 /// register newcomers found under the roots. The running set survives
 /// any failure — broken replacements never evict a working instance.
+/// Reloaded plugins resolve their host functions through the same
+/// `host` unit the startup-loaded ones do.
 // ipc-migration: Plugins.Reload — the phase reaches the plugin set, the shared registry and the cache across subsystem boundaries
 fn reload_plugins_phase(
     store: &ConfigStore,
@@ -1468,6 +1340,7 @@ fn reload_plugins_phase(
     plugin_set: &PluginSet,
     cache: &CacheManager,
     services: &ServiceRegistry,
+    host_ipc: &HostIpc,
     plugin_locales: &SharedLocales,
 ) -> candyriya_command::PluginPhaseReport {
     // limits come from the current configuration, i.e. the post-config-reload
@@ -1480,14 +1353,16 @@ fn reload_plugins_phase(
         services.clone(),
         limits.clone(),
     )
-    .with_locales(plugin_locales.clone());
+    .with_locales(plugin_locales.clone())
+    .with_host_ipc(host_ipc.clone());
     let loader = PluginLoader::with_limits(
         data_dir.join("plugins"),
         data_dir.join("libraries"),
         cache,
         limits.clone(),
     )
-    .with_locales(plugin_locales.clone());
+    .with_locales(plugin_locales.clone())
+    .with_host_ipc(host_ipc.clone());
     let report = reloader.reload_all(&loader);
 
     let mut details = Vec::new();
@@ -1547,6 +1422,7 @@ fn build_reload_fn(
     plugin_set: Arc<PluginSet>,
     cache: Arc<CacheManager>,
     services: ServiceRegistry,
+    host_ipc: HostIpc,
     data_dir: &Path,
     plugin_locales: SharedLocales,
     runtime: tokio::runtime::Handle,
@@ -1565,7 +1441,6 @@ fn build_reload_fn(
                 &proxy_state,
                 favicon_cache.as_deref(),
                 &locales,
-                &services,
                 &runtime,
             )
         });
@@ -1576,6 +1451,7 @@ fn build_reload_fn(
                 &plugin_set,
                 &cache,
                 &services,
+                &host_ipc,
                 &plugin_locales,
             )
         });
@@ -1671,6 +1547,7 @@ fn load_plugins(
     config: &Config,
     cache: &CacheManager,
     plugin_locales: SharedLocales,
+    host_ipc: HostIpc,
 ) -> Arc<PluginSet> {
     let plugins_dir = data_dir.join("plugins");
     let libraries_dir = data_dir.join("libraries");
@@ -1683,7 +1560,8 @@ fn load_plugins(
     }
     let limits = LimitBuilder::from_config(config).build();
     let loader = PluginLoader::with_limits(plugins_dir, libraries_dir, cache, limits)
-        .with_locales(plugin_locales);
+        .with_locales(plugin_locales)
+        .with_host_ipc(host_ipc);
     let report = loader.load();
     for (where_, why) in &report.issues {
         warn!(path = %where_.display(), "plugin: {why}");

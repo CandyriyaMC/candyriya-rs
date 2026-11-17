@@ -1,13 +1,16 @@
 //! A process-wide, type-safe service registry.
 //!
-//! The proxy wires its long-lived subsystems into one registry at
-//! composition time; everything else — plugin host functions, the proxy
-//! core, tests — looks services up by key and downcasts to the type it
-//! expects. Keys are dotted, lowercase, namespaced strings (`"minecraft.route"`,
-//! `"config.manager"`, `"permissions.resolver"`, `"eventbus.proxy"`,
-//! `"scheduler.service"`, `"forwarding.config"`, `"player.store"`, ...);
-//! the registry itself does not enforce the shape, misuse shows up as a
-//! lookup miss.
+//! The registry exists for one thing today: services owned by plugins. A
+//! plugin that publishes a service registers it under a key and tags it with
+//! its own id; when that plugin unloads or hot-reloads, its entries are
+//! revoked in bulk ([`ServiceRegistry::remove_services_owned_by`]). Keys are
+//! dotted, lowercase, namespaced strings; the registry itself does not
+//! enforce the shape, misuse shows up as a lookup miss.
+//!
+//! Cross-subsystem services used to live here too; they are dissolved into
+//! supervised units in the supervision tree, and host code reaches them
+//! over the capability IPC plane instead. What remains here is the
+//! plugin-owned revocation machinery — unchanged in shape and semantics.
 //!
 //! # Semantics
 //!

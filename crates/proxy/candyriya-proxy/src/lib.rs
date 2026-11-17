@@ -78,6 +78,7 @@ mod accept;
 pub mod config_unit;
 mod events;
 mod handshake;
+mod host_unit;
 mod limit;
 mod login;
 mod play;
@@ -92,6 +93,7 @@ pub use crate::config_unit::{ConfigMsg, ConfigResp, config_spec};
 pub use crate::handshake::{
     DEFAULT_MAX_ADDRESS_LEN, HandshakeLimits, HandshakeRead, HandshakeResult, read_handshake,
 };
+pub use crate::host_unit::host_spec;
 pub use crate::limit::{
     ConnectionSlot, DEFAULT_PER_IP_MAX, SlotAcquireError, SlotPhase, try_acquire_slot,
 };

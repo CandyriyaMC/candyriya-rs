@@ -40,6 +40,7 @@ use std::sync::Arc;
 
 use candyriya_cache::CacheManager;
 
+use crate::host_ipc::HostIpc;
 use crate::host_state::HostState;
 use crate::instance::PluginInstance;
 use crate::library_plugin::{LibraryPlugin, PluginOrigin};
@@ -77,9 +78,13 @@ pub struct LoadReport {
 /// and re-uses it for reload passes. Sandbox limits default to
 /// [`Limits::default`]; use [`PluginLoader::with_limits`] to apply the
 /// `[plugins]` section of `candyriya-config` (see `LimitBuilder::from_config`).
-/// Host functions see the same [`crate::ServiceRegistry`] the loader is built with;
+/// Host functions resolve plugin-owned services through the same
+/// [`crate::ServiceRegistry`] the loader is built with;
 /// use [`PluginLoader::with_services`] to share one with the rest of the
-/// proxy (the dispatcher is required for `candyriya:callApi` to work).
+/// proxy (the registry keeps the plugin-owned revocation semantics on
+/// reload). The cross-subsystem host functions (`callApi`, the roster,
+/// the backend names) instead reach the supervised `host` unit through
+/// the link installed by [`PluginLoader::with_host_ipc`].
 /// The shared i18n machines are likewise injectable via
 /// [`PluginLoader::with_locales`]; without them, plugin host functions
 /// resolve against a private embedded-defaults pair and plugin locale
@@ -91,6 +96,7 @@ pub struct PluginLoader<'a> {
     limits: Limits,
     services: crate::service_registry::ServiceRegistry,
     locales: Option<SharedLocales>,
+    host_ipc: HostIpc,
 }
 
 impl<'a> PluginLoader<'a> {
@@ -113,16 +119,17 @@ impl<'a> PluginLoader<'a> {
             limits,
             services: crate::service_registry::ServiceRegistry::new(),
             locales: None,
+            host_ipc: HostIpc::new(),
         }
     }
 
     /// The service registry this loader hands to every plugin's host state.
     ///
-    /// Host functions resolve cross-subsystem handles (the event dispatcher
-    /// for `candyriya:callApi`, the player roster, ...) through this
-    /// registry. The default is a fresh, empty registry — the composition
-    /// root should share its own so the plugins see the same services as
-    /// the rest of the proxy.
+    /// Exists for plugin-owned services: entries tagged with an owning
+    /// plugin id are revoked in bulk when that plugin unloads or reloads.
+    /// Host functions resolve them through this registry; the default is
+    /// a fresh, empty one — the composition root should share its own so
+    /// reloads see the same registrations.
     #[must_use]
     pub fn with_services(mut self, services: crate::service_registry::ServiceRegistry) -> Self {
         self.services = services;
@@ -139,6 +146,19 @@ impl<'a> PluginLoader<'a> {
     #[must_use]
     pub fn with_locales(mut self, locales: SharedLocales) -> Self {
         self.locales = Some(locales);
+        self
+    }
+
+    /// The shared link to the supervised `host` unit this loader hands to
+    /// every plugin's host state.
+    ///
+    /// The composition root fills the same slot once the unit exists; an
+    /// empty slot means the cross-subsystem host functions answer with
+    /// the honest "host unit link is not installed" error. Without this,
+    /// plugins loaded by this loader never reach the unit.
+    #[must_use]
+    pub fn with_host_ipc(mut self, host_ipc: HostIpc) -> Self {
+        self.host_ipc = host_ipc;
         self
     }
 
@@ -380,7 +400,8 @@ impl<'a> PluginLoader<'a> {
 
         let mut host_state =
             HostState::with_instance_slots(data_root, Arc::clone(instance_slots), &id)
-                .with_services(Arc::new(self.services.clone()));
+                .with_services(Arc::new(self.services.clone()))
+                .with_host_ipc(self.host_ipc.clone());
         if let Some(locales) = &self.locales {
             host_state = host_state.with_locales(locales.clone());
         }

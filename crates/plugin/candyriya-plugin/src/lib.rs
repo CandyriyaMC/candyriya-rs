@@ -13,7 +13,8 @@
 //!   mailbox; calls never run on async workers.
 //! - [`LibraryPlugin`] / [`PluginState`] — per-plugin records and lifecycle
 //!   (`Loaded` / `Failed` / `Disabled`).
-//! - [`HostState`] — host-side state handed to each instance.
+//! - [`HostState`] — host-side state handed to each instance, carrying the
+//!   shared link to the supervised `host` unit (see [`HostIpc`]).
 //! - [`SharedLocales`] — the shared pair of i18n machines plugin host
 //!   functions (`candyriya:i18nT` / `candyriya:i18nLocale`) resolve
 //!   through; cloning shares tables and registrations.
@@ -24,7 +25,10 @@
 //! - [`PluginSet`] — the ordered, shared set of loaded plugins every other
 //!   piece of host code operates on.
 //! - [`ServiceRegistry`] — global, type-safe `Arc<dyn Any>` service
-//!   registry (route handle, config store, permissions resolver, ... keys).
+//!   registry. Today it carries plugin-owned services only (entries tagged
+//!   with the owning plugin id, revoked in bulk on reload); the
+//!   cross-subsystem handle keys it used to hold are dissolved into
+//!   supervised tree units.
 //! - [`ProxyEventDispatcher`] — fans a [`candyriya_plugin_api::ProxyEvent`]
 //!   into every loaded plugin, in load order, with a per-plugin timeout.
 //!   Host functions that route between plugins go through its
@@ -37,9 +41,10 @@
 //!   from WASM (`candyriya:helloWorld`, `candyriya:callApi`,
 //!   `candyriya:cancelEvent`, ...), registered on every instance by
 //!   [`PluginInstance::new`]. They read the plugin's identity from
-//!   [`HostState`] (never from the wire), resolve cross-subsystem handles
-//!   through the [`ServiceRegistry`], and are documented as the
-//!   [`candyriya_plugin_api::CandyriyaHostApi`] contract for plugin authors.
+//!   [`HostState`] (never from the wire), reach the supervised `host`
+//!   unit over the capability IPC plane through [`HostIpc`], and are
+//!   documented as the [`candyriya_plugin_api::CandyriyaHostApi`] contract
+//!   for plugin authors.
 //!
 //! Sandbox limits for modules (memory/fuel/time/byte/handle accounting and
 //! the per-window call rate limit) live in [`Limits`] and are applied by
@@ -51,7 +56,9 @@ mod dep_resolution;
 mod dispatch;
 mod error;
 mod host_functions;
+mod host_ipc;
 mod host_state;
+mod host_wire;
 mod hot_reload;
 mod instance;
 mod library_plugin;
@@ -72,11 +79,10 @@ pub use crate::dispatch::{
     ProxyEventDispatcher,
 };
 pub use crate::error::PluginError;
-pub use crate::host_functions::{
-    DISPATCHER_SERVICE_KEY, PLAYERS_PING_SINK_KEY, PLAYERS_ROSTER_KEY, PlayerPingSink,
-    SERVERS_NAMES_KEY,
-};
+pub use crate::host_functions::{PLAYERS_PING_SINK_KEY, PlayerPingSink};
+pub use crate::host_ipc::{HostIpc, HostIpcError};
 pub use crate::host_state::HostState;
+pub use crate::host_wire::{HostMsg, HostResp};
 pub use crate::hot_reload::{HotReloadError, PluginReloader, ReloadAllReport, ReloadReport, Watch};
 pub use crate::instance::PluginInstance;
 pub use crate::library_plugin::{LibraryPlugin, PluginOrigin, PluginState};

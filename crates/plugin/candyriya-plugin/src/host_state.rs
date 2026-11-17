@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 
 use candyriya_plugin_api::OutcomeReport;
 
+use crate::host_ipc::HostIpc;
 use crate::limits::InstanceSlots;
 use crate::locales::SharedLocales;
 use crate::service_registry::ServiceRegistry;
@@ -56,8 +57,16 @@ use crate::service_registry::ServiceRegistry;
 /// resolves through. [`HostState::new`] binds a private embedded-defaults
 /// pair so standalone host states and tests still resolve core keys; the
 /// loader and reloader replace it with the proxy's shared pair via
-/// [`HostState::with_locales`], which is what makes plugin registrations
-/// and `/candyriya reload` visible to the host functions.
+/// [`HostState::with_locales`], which is what makes plugin locale
+/// registrations and `/candyriya reload` visible to the host functions.
+///
+/// `host_ipc` is the shared link to the supervised `host` unit, which
+/// serves the cross-subsystem host functions (`callApi`,
+/// `getPlayerRoster`, `listServers`, `pingPlayer`). It starts empty in a
+/// fresh host state; the composition root installs the handles once the
+/// unit exists, and every host state cloned from the same slot sees them.
+/// A host function called before the installation answers with the honest
+/// `host unit link is not installed` error instead of a fabricated value.
 #[derive(Clone)]
 pub struct HostState {
     /// The directory this plugin owns (the same path as `config_dir`).
@@ -89,6 +98,8 @@ pub struct HostState {
     /// Cancellation recorded via `candyriya:cancelEvent` for the call in
     /// flight. Cleared by the caller before the call and read back after.
     pub(crate) pending_outcome: Arc<Mutex<Option<OutcomeReport>>>,
+    /// The shared link to the supervised `host` unit; see the module docs.
+    pub host_ipc: HostIpc,
     instance_slots: Arc<InstanceSlots>,
 }
 
@@ -133,6 +144,7 @@ impl HostState {
             subscribers: Arc::new(Mutex::new(HashSet::new())),
             caller_plugin_id: Arc::new(Mutex::new(None)),
             pending_outcome: Arc::new(Mutex::new(None)),
+            host_ipc: HostIpc::new(),
             locales: SharedLocales::embedded().ok(),
             instance_slots,
         }
@@ -151,6 +163,16 @@ impl HostState {
     #[must_use]
     pub fn with_locale(self, locale: &str) -> Self {
         *self.i18n_locale.lock() = locale.to_owned();
+        self
+    }
+
+    /// Point this host state at the shared link to the supervised `host`
+    /// unit. The loader and reloader do this with one process-wide slot
+    /// so every plugin instance, startup-loaded or reloaded, reaches the
+    /// same unit.
+    #[must_use]
+    pub fn with_host_ipc(mut self, host_ipc: HostIpc) -> Self {
+        self.host_ipc = host_ipc;
         self
     }
 

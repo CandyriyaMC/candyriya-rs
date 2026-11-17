@@ -43,6 +43,9 @@ candyriya-init = { version = "0.1.0", path = "../../common/candyriya-init" }
 candyriya-i18n = { version = "0.1.0", path = "../../common/candyriya-i18n" }
 # the strict MiniMessage acceptance gate already used for config strings
 candyriya-plugin-api = { version = "0.1.0", path = "../../plugin/candyriya-plugin-api" }
+# the `host` unit fans callApi into the real dispatcher; the wire types
+# live next to the host functions that build them
+candyriya-plugin = { version = "0.1.0", path = "../../plugin/candyriya-plugin" }
 
 [dev-dependencies]
 candyriya-it = { version = "0.1.0", path = "../../it/candyriya-it" }
