@@ -40,6 +40,7 @@ allow-wildcard-paths = true
 skip = [
     { crate = "base64:<0.23", reason = "transitive: 0.13/0.22 from older deps, unify blocked on upstream" },
     { crate = "block-buffer:<0.12", reason = "rsa 0.10 security bump uses digest 0.11; workspace HMAC stack pins digest 0.10" },
+    { crate = "core-foundation:<0.10", reason = "transitive: hyper-util/system-configuration chain pins 0.9 vs security-framework 0.10; unify blocked on upstream reqwest" },
     { crate = "cpufeatures:<0.3", reason = "transitive: sha2/aes chains disagree, unify blocked on upstream" },
     { crate = "crypto-common:<0.2", reason = "transitive: digest 0.9 vs 0.10 chains, unify blocked on upstream" },
     { crate = "digest:<0.11", reason = "rsa 0.10 security bump uses digest 0.11; workspace HMAC stack pins digest 0.10" },
