@@ -1,0 +1,97 @@
+//! How a unit body's fate is observed and reported into the tree.
+//!
+//! The central task service does not expose per-task outcomes to its
+//! callers, so the future that runs a unit body has to classify the exit
+//! itself and hand it to the registry. This module builds that future.
+//!
+//! The classification rules, one code path for all of them:
+//!
+//! - the body returns normally → whatever it returned (defaulting to
+//!   `Success` for well-behaved bodies);
+//! - the per-unit timeout fires → `TimedOut`, and the body future is
+//!   dropped at the point where it is pending (destructors run);
+//! - the body panics → the task-service wrapper's poll unwinds, and during
+//!   unwinding `thread::panicking()` reports `true`, so the guard records
+//!   `Panicked`;
+//! - the task service drops the wrapper at an await point (a requested
+//!   cancellation) → normal drop, `thread::panicking()` reports `false`,
+//!   so the guard records `Cancelled`.
+//!
+//! The guard does the recording exactly once, at drop time; there is no
+//! window where an exit goes unnoticed.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use parking_lot::Mutex;
+
+use candyriya_scheduler::{TaskId, TaskService};
+
+use crate::exit::ExitStatus;
+use crate::pid::Pid;
+use crate::spec::UnitBodyFactory;
+use crate::tree::TreeState;
+
+/// Spawn one run of a unit body through the task service and return the id
+/// it assigned.
+///
+/// The wrapper future carries an [`ExitGuard`]; when the future completes
+/// (or unwinds, or is dropped) the guard records the outcome into the tree.
+/// Machinery, not a unit: the wrapper itself never registers in the tree.
+pub(crate) fn spawn_wrapper(
+    service: &TaskService,
+    tree: Arc<Mutex<TreeState>>,
+    pid: Pid,
+    name: &str,
+    factory: UnitBodyFactory,
+    timeout: Option<Duration>,
+) -> TaskId {
+    let slot = Arc::new(Mutex::new(None::<ExitStatus>));
+    let guard = ExitGuard {
+        pid,
+        tree,
+        slot: slot.clone(),
+    };
+    let task_name = name.to_string();
+    let future = async move {
+        let guard = guard;
+        let body = factory();
+        let status = match timeout {
+            Some(limit) => match tokio::time::timeout(limit, body).await {
+                Ok(status) => status,
+                Err(_) => ExitStatus::TimedOut,
+            },
+            None => body.await,
+        };
+        // normal path: the guard takes over from here and records
+        *guard.slot.lock() = Some(status);
+    };
+    service.spawn_named(task_name, future)
+}
+
+/// Records the unit's exit into the tree when the wrapper future is gone.
+///
+/// The only disarm signal it understands is a filled slot; anything else
+/// (a panic unwind, a cancellation drop) is classified from
+/// `thread::panicking()`.
+struct ExitGuard {
+    pid: Pid,
+    tree: Arc<Mutex<TreeState>>,
+    slot: Arc<Mutex<Option<ExitStatus>>>,
+}
+
+impl Drop for ExitGuard {
+    fn drop(&mut self) {
+        let slot_status = self.slot.lock().take();
+        let status = slot_status.unwrap_or_else(|| {
+            if std::thread::panicking() {
+                ExitStatus::Panicked
+            } else {
+                ExitStatus::Cancelled
+            }
+        });
+        // the tree lock could be held by a reaper on another thread; the
+        // record is a handful of map/counter writes, never an await point
+        self.tree.lock().record_exit(self.pid, status);
+    }
+}
