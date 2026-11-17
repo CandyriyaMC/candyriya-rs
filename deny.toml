@@ -9,12 +9,18 @@
 # No advisory, yanked crate, or unmaintained/unsound crate is exempt.
 # If an exception is ever needed it goes in `ignore` with a reason and an
 # expiry, and it must be argued in the PR.
-# RUSTSEC-2026-0543 (chrono unmaintained, published 2026-11): the crate is
-# used only for RFC 3339 first_seen/last_seen timestamps, with no
-# vulnerable code path. jiff migration is scheduled after 0.1.0; this
-# exception expires with that plan rather than living forever.
+# RUSTSEC-2026-0543 (chrono unmaintained, published 2026-11) and
+# RUSTSEC-2026-0555 (chrono-tz unmaintained; transitive via
+# tokio-cron-scheduler used by candyriya-scheduler): both come from the
+# chrono project archiving, no vulnerable code path is involved, and no
+# fixed release exists. chrono is used only for RFC 3339
+# first_seen/last_seen timestamps; the cron wrapper only drives the
+# periodic stats/favicon jobs. Migration to jiff + an interval-based
+# scheduler is scheduled after 0.1.0; these exceptions expire with that
+# plan rather than living forever.
 ignore = [
   { id = "RUSTSEC-2026-0543", reason = "unmaintained-only advisory, no known vulnerability; used for RFC 3339 timestamps only; jiff migration planned for 0.2.0", expiry = "2027-01-01" },
+  { id = "RUSTSEC-2026-0555", reason = "unmaintained-only advisory, no known vulnerability; transitive via tokio-cron-scheduler for periodic jobs; scheduler replacement planned for 0.2.0", expiry = "2027-01-01" },
 ]
 unmaintained = "all"
 unsound = "all"

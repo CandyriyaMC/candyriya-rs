@@ -1,5 +1,8 @@
 [advisories]
-# RUSTSEC-2026-0543 (chrono unmaintained): no vulnerable code path in this
-# workspace; chrono is used for RFC 3339 timestamps only. Migration to jiff
-# is planned after 0.1.0 (see deny.toml). This entry expires with that plan.
-ignore = ["RUSTSEC-2026-0543"]
+# RUSTSEC-2026-0543 (chrono unmaintained) and RUSTSEC-2026-0555
+# (chrono-tz unmaintained, transitive via tokio-cron-scheduler): neither
+# crate touches a vulnerable code path in this workspace; chrono is used
+# for RFC 3339 timestamps only, and the cron wrapper drives periodic
+# jobs only. Migration to jiff + an interval-based scheduler is planned
+# after 0.1.0 (see deny.toml). These entries expire with that plan.
+ignore = ["RUSTSEC-2026-0543", "RUSTSEC-2026-0555"]
