@@ -167,14 +167,21 @@ impl SessionValidator for MojangSessionValidator {
         }
 
         let body = response.text().await.map_err(map_request_error)?;
-        let wire: SessionProfileResponse = serde_json::from_str(&body).map_err(|e| {
+        let wire: SessionProfileResponse = serde_json::from_str(&body).map_err(|_| {
+            // never echo the body itself: the session server front-ends can
+            // answer with an HTML error page, and upstream bytes have no
+            // business in our logs or error chains
             AuthError::SessionRejected(format!(
-                "the session server returned an undecodable body: {e}"
+                "the session server returned an undecodable body ({} bytes)",
+                body.len()
             ))
         })?;
 
-        let id = Uuid::parse_str(wire.id.trim()).map_err(|e| {
-            AuthError::Parse(format!("profile id {:?} is not a valid UUID: {e}", wire.id))
+        let id = Uuid::parse_str(wire.id.trim()).map_err(|_| {
+            AuthError::Parse(format!(
+                "the session server returned a malformed profile id ({} chars)",
+                wire.id.chars().count()
+            ))
         })?;
 
         Ok(GameProfile {

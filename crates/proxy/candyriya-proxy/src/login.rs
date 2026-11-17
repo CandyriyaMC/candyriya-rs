@@ -324,6 +324,13 @@ async fn login_flow(
                 // passes through untouched, and the backend never carries
                 // a cipher — drop it on the floor
                 info!(conn = conn_id, %peer, "conn={conn_id} transitioning to play state");
+                state
+                    .roster
+                    .insert(conn_id, profile.id, &profile.name, Some(backend_name));
+                // the guard drains the roster when this task ends, however
+                // it ends; the player counts as online exactly as long as
+                // the byte pump runs
+                let _roster_guard = crate::roster::RosterGuard::new(&state.roster, conn_id);
                 slot.mark_play();
                 let mut backend = backend;
                 let write_stall =
@@ -491,9 +498,14 @@ async fn resolve_profile(
             debug!(conn = conn_id, name = %profile.name, "session verified with the session server");
             Ok(profile)
         }
-        Err(AuthError::SessionRejected(_)) => Err(ProfileError::Disconnected(
-            "Failed to verify username!".to_owned(),
-        )),
+        Err(AuthError::SessionRejected(reason)) => {
+            // the reason is upstream-sanitized (status code / body length);
+            // the client always gets the same short string
+            debug!(conn = conn_id, %reason, "session server rejected the join");
+            Err(ProfileError::Disconnected(
+                "Failed to verify username!".to_owned(),
+            ))
+        }
         Err(other) => {
             debug!(conn = conn_id, %other, "session server verification failed");
             Err(ProfileError::Disconnected(

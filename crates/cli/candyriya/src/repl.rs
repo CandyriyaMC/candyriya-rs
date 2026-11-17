@@ -96,8 +96,40 @@ fn run_command(dispatcher: &Dispatcher, effects: &CliEffects, line: &str, use_an
             } else {
                 effects.line(&escape_angle_brackets(&plain));
             }
+            // brigadier's raw complaint is a byte offset, not guidance; a
+            // known built-in with a missing argument gets a one-line hint
+            if let Some(hint) = usage_hint(line) {
+                if use_ansi {
+                    effects.line(&format!(
+                        "<gray>Try: {}</gray>",
+                        escape_angle_brackets(hint)
+                    ));
+                } else {
+                    effects.line(&format!("Try: {hint}"));
+                }
+            }
         }
     }
+}
+
+/// One-line usage hint for a built-in command, or `None` when the first
+/// token is not one we know. Brigadier rejects a bare `/send` with
+/// "Unknown command at position 4" — correct, but useless for a human
+/// staring at the console; the hint is what they actually needed.
+fn usage_hint(line: &str) -> Option<&'static str> {
+    let first = line
+        .trim()
+        .trim_start_matches('/')
+        .split_whitespace()
+        .next()?;
+    Some(match first {
+        "send" => "/send <target|ALL> <server>",
+        "server" => "/server <server>",
+        "goto" => "/goto <server>",
+        "glist" => "/glist",
+        "candyriya" => "/candyriya <info|servers|switch|end|reload>",
+        _ => return None,
+    })
 }
 
 /// Red lines use the MiniMessage path too; `<` `>` from an error message
@@ -113,4 +145,24 @@ fn prompt(out: &mut LineWriter<std::io::Stdout>, use_ansi: bool) {
         let _ = write!(out, "candyriya > ");
     }
     let _ = out.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::usage_hint;
+
+    #[test]
+    fn usage_hint_matches_built_ins_by_first_token() {
+        assert_eq!(usage_hint("send"), Some("/send <target|ALL> <server>"));
+        assert_eq!(usage_hint("/send"), Some("/send <target|ALL> <server>"));
+        assert_eq!(usage_hint("goto nether"), Some("/goto <server>"));
+        assert_eq!(usage_hint("server"), Some("/server <server>"));
+        assert_eq!(usage_hint("glist"), Some("/glist"));
+        assert_eq!(
+            usage_hint("  /candyriya  "),
+            Some("/candyriya <info|servers|switch|end|reload>")
+        );
+        assert_eq!(usage_hint("notacommand"), None);
+        assert_eq!(usage_hint("   "), None);
+    }
 }

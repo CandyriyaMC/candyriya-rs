@@ -74,6 +74,7 @@ mod limit;
 mod login;
 mod play;
 mod registry;
+mod roster;
 mod socket;
 mod status;
 mod wire;
@@ -86,6 +87,7 @@ pub use crate::limit::{
     ConnectionSlot, DEFAULT_PER_IP_MAX, SlotAcquireError, SlotPhase, try_acquire_slot,
 };
 pub use crate::login::{handle_login, registry_from_config};
+pub use crate::roster::{PlayerRoster, RosterEntry};
 pub use crate::socket::{ProxySocket, REUSE_PORT_SUPPORTED, SocketConfig};
 pub use crate::status::{FaviconCache, handle_status};
 

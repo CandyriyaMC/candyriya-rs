@@ -662,9 +662,16 @@ async fn handle_connection(stream: TcpStream, inner: Arc<BackendInner>) {
                             break;
                         };
                         let body = build_status_response(&inner.config, &registry);
+                        // the vanilla wire format carries the document as a
+                        // length-prefixed String, like a real server does
+                        let mut payload = BytesMut::with_capacity(body.len() + 5);
+                        if write_string(&mut payload, &body, DEFAULT_MAX_STRING_LENGTH).is_err() {
+                            BackendStats::incr(&inner.stats.protocol_errors);
+                            break;
+                        }
                         let packet = Packet {
                             id: response_id,
-                            payload: Bytes::from(body.into_bytes()),
+                            payload: payload.freeze(),
                         };
                         if wire::write_packet(&mut stream, packet).await.is_err() {
                             BackendStats::incr(&inner.stats.write_errors);

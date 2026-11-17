@@ -116,7 +116,7 @@ pub(crate) fn handle_reload(
         if config.is_err() {
             ok = false;
         }
-        render_config(&t, state, source, config);
+        render_config(t, state, source, config);
     }
     if matches!(scope, ReloadScope::All | ReloadScope::Plugins)
         && let Some(plugins) = &plugins
@@ -124,7 +124,7 @@ pub(crate) fn handle_reload(
         if plugins.failed != 0 {
             ok = false;
         }
-        render_plugins(&t, state, source, plugins);
+        render_plugins(t, state, source, plugins);
     }
     if ok { 1 } else { 0 }
 }

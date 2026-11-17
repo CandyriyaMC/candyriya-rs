@@ -24,6 +24,7 @@ use candyriya_scheduler::{TaskId, TaskService};
 
 use crate::handshake::{HandshakeLimits, read_handshake};
 use crate::limit::{ConnectionSlot, SlotAcquireError, try_acquire_slot};
+use crate::roster::PlayerRoster;
 use crate::status::{FaviconCache, handle_status};
 use candyriya_protocol::Intent;
 
@@ -71,6 +72,10 @@ pub struct ProxyState {
     /// global `max-connections` semaphore). Read by the composition root
     /// for the status snapshot and metrics.
     pub connection_rejections: AtomicU64,
+    /// Players currently in the play state, with the backend they landed
+    /// on. Populated on the transition to play, drained when the byte pump
+    /// ends; the source of truth for `glist` and the player counters.
+    pub roster: PlayerRoster,
 }
 
 impl core::fmt::Debug for ProxyState {
@@ -83,6 +88,7 @@ impl core::fmt::Debug for ProxyState {
                 "connection_rejections",
                 &self.connection_rejections.load(Ordering::Relaxed),
             )
+            .field("players_online", &self.roster.len())
             .field("current_connections", &self.limiter.current_connections())
             .finish_non_exhaustive()
     }
@@ -114,6 +120,7 @@ impl ProxyState {
             auth: AuthConfig::default(),
             router: ArcSwap::from_pointee(None),
             connection_rejections: AtomicU64::new(0),
+            roster: PlayerRoster::new(),
         }
     }
 

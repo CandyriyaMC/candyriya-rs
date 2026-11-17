@@ -16,7 +16,8 @@
 use bytes::{Bytes, BytesMut};
 use candyriya_compression::Compression;
 use candyriya_protocol::{
-    Handshake, Intent, Packet, decode_varint, read_string, read_uuid, write_string, write_uuid,
+    DEFAULT_MAX_STRING_LENGTH, Handshake, Intent, Packet, decode_varint, read_string, read_uuid,
+    write_string, write_uuid,
 };
 use candyriya_protocol_registry::{PacketSlot, Registry};
 use tokio::net::TcpStream;
@@ -137,8 +138,9 @@ impl TestClient {
         .await
     }
 
-    /// Send a status request; returns the raw response payload (a JSON
-    /// document the tests parse and assert on).
+    /// Send a status request; returns the JSON document from the
+    /// response, decoded from the length-prefixed `String` payload the
+    /// vanilla wire format demands.
     pub async fn status_request(&mut self, protocol: i32) -> Result<String, HarnessError> {
         let request_id = protocol_id(
             &self.registry,
@@ -163,8 +165,11 @@ impl TestClient {
                 actual: packet.id,
             });
         }
-        let json = String::from_utf8(packet.payload.to_vec()).map_err(|_| {
-            HarnessError::UnexpectedData("status response is not valid UTF-8".to_owned())
+        let mut cursor: &[u8] = &packet.payload;
+        let json = read_string(&mut cursor, DEFAULT_MAX_STRING_LENGTH).map_err(|error| {
+            HarnessError::UnexpectedData(format!(
+                "status response is not a valid length-prefixed string: {error}"
+            ))
         })?;
         Ok(json)
     }

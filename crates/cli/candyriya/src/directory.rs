@@ -9,9 +9,9 @@
 //! - the shared proxy state for live connection counters,
 //! - the routing registry (when wired) for per-backend health.
 //!
-//! There is no session roster in the proxy core yet, so the online-players
-//! list is empty and backend player counts are zero — reported as the truth
-//! rather than invented numbers.
+//! There is no backend query channel for player counts, so per-backend
+//! player numbers are counted from the live session roster (players whose
+//! current backend is that one) rather than invented.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -60,6 +60,22 @@ impl CliDirectory {
     }
 }
 
+impl CliDirectory {
+    /// The live roster as command-layer players, sorted by name.
+    fn roster_players(&self) -> Vec<OnlinePlayer> {
+        self.state
+            .roster
+            .snapshot()
+            .into_iter()
+            .map(|entry| OnlinePlayer {
+                uuid: entry.uuid,
+                name: entry.name,
+                server: entry.server,
+            })
+            .collect()
+    }
+}
+
 fn route_state(state: Option<candyriya_route::BackendState>) -> CmdBackendState {
     match state {
         Some(candyriya_route::BackendState::Online) => CmdBackendState::Online,
@@ -99,11 +115,11 @@ impl NetworkDirectory for CliDirectory {
     }
 
     fn online_players(&self) -> Vec<OnlinePlayer> {
-        // no session roster exists in the proxy core yet; report the truth
-        Vec::new()
+        self.roster_players()
     }
 
     fn snapshot(&self) -> ProxySnapshot {
+        let players = self.roster_players();
         let config = self.config.get();
         let mut backends: Vec<BackendSnapshot> = config
             .servers
@@ -115,7 +131,12 @@ impl NetworkDirectory for CliDirectory {
                     name: name.clone(),
                     address: address.clone(),
                     state: route_state(state),
-                    players: 0,
+                    players: players
+                        .iter()
+                        .filter(|player| player.server.as_deref() == Some(name.as_str()))
+                        .count()
+                        .try_into()
+                        .unwrap_or(u32::MAX),
                     // the backend's own player cap is not observable from
                     // configuration; 0 means "unknown" here
                     max_players: 0,
@@ -141,7 +162,7 @@ impl NetworkDirectory for CliDirectory {
                     .connection_rejections
                     .load(std::sync::atomic::Ordering::Relaxed),
             },
-            players: Vec::new(),
+            players,
             backends,
         }
     }

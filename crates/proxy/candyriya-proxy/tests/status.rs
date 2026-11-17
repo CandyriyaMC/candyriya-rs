@@ -176,12 +176,13 @@ async fn status_flow_answers_without_any_backend_configured() {
     assert_eq!(parsed["version"]["name"], "candyriya");
     assert_eq!(parsed["version"]["protocol"], 767);
     assert_eq!(parsed["players"]["max"], 100);
-    assert!(
+    // a server-list ping is not a logged-in player: the roster is empty
+    assert_eq!(
         parsed["players"]["online"]
             .as_u64()
-            .expect("online is a number")
-            >= 1,
-        "the connection asking for the status counts itself"
+            .expect("online is a number"),
+        0,
+        "a status ping does not count as an online player"
     );
     let description = parsed["description"].to_string();
     assert!(
@@ -257,7 +258,7 @@ async fn status_flow_with_an_unknown_protocol_number_falls_back_cleanly() {
 }
 
 #[tokio::test]
-async fn status_response_frame_is_id_zero_with_a_raw_json_body() {
+async fn status_response_frame_is_id_zero_with_a_length_prefixed_json_string() {
     let (addr, shutdown_tx, service, _state) = default_proxy();
 
     let mut stream = TcpStream::connect(addr).await.expect("connect");
@@ -275,9 +276,14 @@ async fn status_response_frame_is_id_zero_with_a_raw_json_body() {
         .await
         .expect("status response");
     assert_eq!(packet.id, 0x00);
-    // the body is the raw JSON document, not a length-prefixed string
-    assert_eq!(packet.payload[0], b'{');
-    let parsed: serde_json::Value = serde_json::from_slice(&packet.payload).expect("body is json");
+    // the body is a length-prefixed String carrying the JSON document,
+    // exactly what a vanilla client is allowed to assume
+    let mut cursor: &[u8] = &packet.payload;
+    let json =
+        candyriya_protocol::read_string(&mut cursor, candyriya_protocol::DEFAULT_MAX_STRING_LENGTH)
+            .expect("status response payload is a string");
+    assert!(cursor.is_empty(), "no trailing bytes after the string");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("body is json");
     assert_eq!(parsed["version"]["protocol"], 767);
 
     drop(stream);

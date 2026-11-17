@@ -24,9 +24,8 @@
 //!    `version.name` is `"candyriya"`; `version.protocol` echoes the
 //!    client's handshake protocol verbatim (never a translation layer —
 //!    cross-version support is a backend concern); `players.max` is
-//!    `[show-max-players]`; `players.online` is the number of connections
-//!    currently served by this process (the accept-loop accounting, the
-//!    only live counter this slice has; login lands later).
+//!    `[show-max-players]`; `players.online` is the live session-roster
+//!    count (players in the play state right now).
 //!    `description` is the `[motd]` MiniMessage parsed
 //!    *strictly* — the only constructs accepted are named colors, hex
 //!    colors and the formatting tags — and serialized to its JSON
@@ -85,7 +84,9 @@ use tracing::{debug, warn};
 use candyriya_cache::{CacheManager, cache_entry};
 use candyriya_config::Config;
 use candyriya_plugin_api::parse_minimessage;
-use candyriya_protocol::{Packet, PacketCodec, ProtocolError};
+use candyriya_protocol::{
+    DEFAULT_MAX_STRING_LENGTH, Packet, PacketCodec, ProtocolError, write_string,
+};
 use candyriya_protocol_registry::{ConnectionState, Direction, PacketKind, PacketSlot, Registry};
 
 use crate::ProxyError;
@@ -419,9 +420,28 @@ fn motd_component(motd: &str) -> Result<serde_json::Value, ProxyError> {
     })
 }
 
+/// Encodes the status-response JSON as the `String` payload the vanilla
+/// wire format demands (a `VarInt` byte count followed by the UTF-8 bytes).
+///
+/// The JSON document is pure `serde_json` output, so it is valid UTF-8 by
+/// construction; the only way the encode fails is the `String` cap, which
+/// means the resolved favicon pushed the document past `max_len` units.
+fn encode_status_payload(body: &[u8]) -> Result<Bytes, ProxyError> {
+    let json = std::str::from_utf8(body).map_err(|_| {
+        ProxyError::Misconfigured("the status response is not valid UTF-8".to_owned())
+    })?;
+    let mut payload = BytesMut::with_capacity(body.len() + 5);
+    write_string(&mut payload, json, DEFAULT_MAX_STRING_LENGTH).map_err(|error| {
+        ProxyError::Misconfigured(format!(
+            "the status response does not fit the wire: {error}"
+        ))
+    })?;
+    Ok(payload.freeze())
+}
+
 /// Builds the status response body, ready to be framed.
 ///
-/// `online` is the live connection count at the time of the request;
+/// `online` is the live play-state roster count at the time of the request;
 /// `description` is the already-parsed MOTD component.
 fn build_status_json(
     protocol: i32,
@@ -526,7 +546,9 @@ where
     // 2. answer immediately from configuration; no backend is contacted
     let description = motd_component(&config.motd)?;
     let favicon = resolve_favicon(state);
-    let online = state.limiter.current_connections();
+    // "players online" is the live play-state roster, not the raw
+    // connection counter: a server-list ping is not a player
+    let online = state.roster.len() as u64;
     let body = build_status_json(
         protocol,
         config.show_max_players,
@@ -534,18 +556,40 @@ where
         &description,
         &favicon,
     );
+    let body_bytes = body.len();
+    // the vanilla status response carries the JSON as a length-prefixed
+    // String; raw bytes would be read as an (empty) string by the client
+    let payload = match encode_status_payload(&body) {
+        Ok(payload) => payload,
+        Err(error) => {
+            // the resolved favicon pushed the document past the String cap;
+            // the embedded icon is small and always fits
+            warn!(
+                %error,
+                "the status response is too large for the wire; serving it without the configured favicon"
+            );
+            let fallback = build_status_json(
+                protocol,
+                config.show_max_players,
+                online,
+                &description,
+                embedded_favicon_uri(),
+            );
+            encode_status_payload(&fallback)?
+        }
+    };
     debug!(
         protocol,
         latest = registry.latest().protocol,
         online,
-        bytes = body.len(),
+        bytes = body_bytes,
         "serving the status response"
     );
     write_frame(
         conn,
         Packet {
             id: ids.response,
-            payload: Bytes::from(body),
+            payload,
         },
     )
     .await?;
@@ -689,6 +733,23 @@ mod tests {
             let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
             assert_eq!(parsed["version"]["protocol"], protocol);
         }
+    }
+
+    #[test]
+    fn encode_status_payload_frames_the_json_as_a_length_prefixed_string() {
+        // the vanilla status response is a String (VarInt byte count +
+        // UTF-8 bytes); shipping the raw JSON leaves the client decoding an
+        // empty string and showing nothing — pinned down here so a refactor
+        // cannot silently drop the prefix
+        let description = motd_component("hi").expect("valid motd");
+        let body = build_status_json(767, 100, 0, &description, "u");
+        let payload = encode_status_payload(&body).expect("fits the wire");
+
+        let mut cursor: &[u8] = &payload;
+        let json = candyriya_protocol::read_string(&mut cursor, DEFAULT_MAX_STRING_LENGTH)
+            .expect("a valid length-prefixed string");
+        assert_eq!(json.as_bytes(), &body[..]);
+        assert!(cursor.is_empty(), "no trailing bytes after the string");
     }
 
     #[test]
