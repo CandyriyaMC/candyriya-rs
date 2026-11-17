@@ -360,7 +360,7 @@ impl PluginInstance {
     /// the active-call gauge and (on the plugin thread) the wasm thread
     /// time are recorded here. `candyriya_plugin_calls_total` is NOT
     /// recorded here; the caller that owns the outcome label records it
-    /// (see [`crate::metrics`]).
+    /// (see the crate-private metrics module).
     pub fn call_with_timeout(
         &self,
         export: &str,
@@ -388,16 +388,14 @@ impl PluginInstance {
         // decrements the active-call gauge on drop, whatever happens below
         let _active = crate::metrics::active_call(&self.plugin_id);
         let (tx, rx) = sync_channel(1);
-        if let Err(error) = self.send(PluginCommand::Call {
+        // a full mailbox already bumped busy_total inside send(); any
+        // other failure (dead mailbox) is the call sites' business, so
+        // they can label it properly
+        self.send(PluginCommand::Call {
             export: export.to_owned(),
             input: input.to_vec(),
             respond: tx,
-        }) {
-            // a full mailbox already bumped busy_total inside send(); any
-            // other failure (dead mailbox) is the call sites' business, so
-            // they can label it properly
-            return Err(error);
-        }
+        })?;
         let result = match rx.recv_timeout(timeout) {
             Ok(Ok(bytes)) => {
                 if bytes.len() > self.limits.max_output_bytes {
