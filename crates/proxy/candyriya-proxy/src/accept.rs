@@ -247,8 +247,10 @@ pub fn serve(
 ///
 /// The body reads the client's handshake, routes on its intent and takes
 /// over the connection from there. A status-intent handshake is served by
-/// [`handle_status`](crate::handle_status); other intents have no handler
-/// in this slice yet, and the connection is closed instead of held open.
+/// [`handle_status`](crate::handle_status); a login-intent handshake is
+/// handed to [`crate::handle_login`], which owns the session through the
+/// login exchange and the play-state byte pump. Other intents have no
+/// handler yet, and the connection is closed instead of held open.
 /// Any handshake failure closes the connection with a debug log — a peer
 /// that cannot complete a frame is never tolerated.
 pub async fn handle_connection(
@@ -258,7 +260,7 @@ pub async fn handle_connection(
     conn_id: u64,
     slot: ConnectionSlot,
 ) {
-    let _slot = slot; // dropped at the end of the task: releases both slots
+    let slot = slot; // held until the end of the task: releases both slots on drop
 
     if let Err(error) = stream.set_nodelay(true) {
         warn!(conn = conn_id, %peer, %error, "failed to set TCP_NODELAY; continuing");
@@ -281,9 +283,15 @@ pub async fn handle_connection(
                     }
                 }
                 Intent::Login => {
-                    if let Err(error) =
-                        crate::login::handle_login(&state, &mut stream, peer, conn_id, &handshake)
-                            .await
+                    if let Err(error) = crate::login::handle_login(
+                        &state,
+                        &mut stream,
+                        peer,
+                        conn_id,
+                        &handshake,
+                        &slot,
+                    )
+                    .await
                     {
                         debug!(conn = conn_id, %peer, %error, "login exchange ended with an error");
                     }

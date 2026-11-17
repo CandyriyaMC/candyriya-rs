@@ -23,6 +23,7 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -39,6 +40,32 @@ use candyriya_ratelimit::{AtCapacity, ConnectionGuard, ConnectionLimiter};
 /// player-facing proxy: a real client opens 1.
 pub const DEFAULT_PER_IP_MAX: u64 = 64;
 
+/// Where the connection sits in its session lifecycle.
+///
+/// The marker starts at [`SlotPhase::Login`] and is flipped to
+/// [`SlotPhase::Play`] exactly once, when the Login Success frame has been
+/// written to the client and the connection is handed over to the byte
+/// pump. It is observability metadata, not a capability: nothing in the
+/// proxy gates behavior on it yet (metrics and event hooks read it later).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotPhase {
+    /// The connection is between the accepted handshake and the Login
+    /// Success verbatim write.
+    Login = 0,
+    /// The Login Success was delivered; the connection is in the byte-pump
+    /// hot path.
+    Play = 1,
+}
+
+impl SlotPhase {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Play,
+            _ => Self::Login,
+        }
+    }
+}
+
 /// One connection's worth of limit slots.
 ///
 /// Holding a `ConnectionSlot` keeps both the per-IP slot (an RAII
@@ -46,10 +73,15 @@ pub const DEFAULT_PER_IP_MAX: u64 = 64;
 /// [`OwnedSemaphorePermit`]) alive. Drop it — by ending the connection
 /// task — and both slots are released. The struct is not `Clone`:
 /// one connection, one slot, never two.
+///
+/// The slot also carries the session phase flag ([`SlotPhase`]); the login
+/// pipeline flips it to [`SlotPhase::Play`] once the Login Success is
+/// delivered.
 #[derive(Debug)]
 pub struct ConnectionSlot {
     guard: ConnectionGuard,
     permit: OwnedSemaphorePermit,
+    phase: AtomicU8,
 }
 
 impl ConnectionSlot {
@@ -61,6 +93,18 @@ impl ConnectionSlot {
     /// The global semaphore permit held for this connection.
     pub fn permit(&self) -> &OwnedSemaphorePermit {
         &self.permit
+    }
+
+    /// The phase the connection is in right now.
+    pub fn phase(&self) -> SlotPhase {
+        SlotPhase::from_u8(self.phase.load(Ordering::Relaxed))
+    }
+
+    /// Flip the connection to [`SlotPhase::Play`]. Idempotent; called by
+    /// the login pipeline the moment the Login Success frame is written
+    /// to the client.
+    pub fn mark_play(&self) {
+        self.phase.store(SlotPhase::Play as u8, Ordering::Relaxed);
     }
 }
 
@@ -89,7 +133,11 @@ pub fn try_acquire_slot(
 ) -> Result<ConnectionSlot, SlotAcquireError> {
     let guard = limiter.try_new_connection_ip(ip)?;
     match semaphore.clone().try_acquire_owned() {
-        Ok(permit) => Ok(ConnectionSlot { guard, permit }),
+        Ok(permit) => Ok(ConnectionSlot {
+            guard,
+            permit,
+            phase: AtomicU8::new(SlotPhase::Login as u8),
+        }),
         Err(_) => {
             // the guard drops here, releasing the per-IP slot again
             Err(SlotAcquireError::Semaphore)
@@ -159,6 +207,19 @@ mod tests {
         drop(slot);
         let slot2 = try_acquire_slot(&limiter, &semaphore, ip4(2)).expect("slot after release");
         drop(slot2);
+    }
+
+    #[test]
+    fn slot_starts_in_login_and_flips_to_play() {
+        let limiter = ConnectionLimiter::with_per_ip_max(u64::MAX, 10);
+        let semaphore = Arc::new(Semaphore::new(64));
+        let slot = try_acquire_slot(&limiter, &semaphore, ip4(7)).expect("slot");
+        assert_eq!(slot.phase(), SlotPhase::Login);
+        slot.mark_play();
+        assert_eq!(slot.phase(), SlotPhase::Play);
+        // idempotent: marking twice is not an error
+        slot.mark_play();
+        assert_eq!(slot.phase(), SlotPhase::Play);
     }
 
     #[test]

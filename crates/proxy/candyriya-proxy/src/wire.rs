@@ -63,6 +63,23 @@ impl Wire {
     pub(crate) fn enable_compression(&mut self, compression: Option<Compression>) {
         self.compression = compression;
     }
+
+    /// Take the cipher out of this link, leaving `None` behind.
+    ///
+    /// Used by the play-state pump, which needs the CFB8 feedback state on
+    /// paths that are independent of this struct. Splitting through
+    /// [`AesCfb8::into_halves`] keeps the chain intact across the
+    /// transition. Consuming the cipher also means the byte-level pump is
+    /// the only writer of this link from now on — the frame-oriented API
+    /// ([`read_packet`], [`write_packet`]) must not be used afterwards.
+    pub(crate) fn take_cipher(&mut self) -> Option<AesCfb8> {
+        self.cipher.take()
+    }
+
+    /// Whether the link was switched to the compressed layout.
+    pub(crate) fn compression_enabled(&self) -> bool {
+        self.compression.is_some()
+    }
 }
 
 /// Length of the VarInt prefix at `buf[0]` or `None` when the prefix is not

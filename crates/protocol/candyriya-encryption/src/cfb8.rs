@@ -14,13 +14,57 @@ use crate::shared_secret::SharedSecret;
 type Enc = Encryptor<Aes128>;
 type Dec = Decryptor<Aes128>;
 
+/// The encrypting half of a split session cipher.
+///
+/// Owns the CFB8 feedback state of the send direction only. Created by
+/// [`AesCfb8::into_halves`]; the feedback chain is the one that was live at
+/// the moment of the split, so bytes keep decrypting/encrypting seamlessly
+/// across the login -> play transition.
+pub struct Cfb8EncryptHalf(Enc);
+
+/// The decrypting half of a split session cipher.
+///
+/// Owns the CFB8 feedback state of the receive direction only. Created by
+/// [`AesCfb8::into_halves`]; see [`Cfb8EncryptHalf`] for the state contract.
+pub struct Cfb8DecryptHalf(Dec);
+
+impl Cfb8EncryptHalf {
+    /// Encrypt `data` in place, continuing the send direction's CFB
+    /// feedback chain.
+    pub fn encrypt_in_place(&mut self, data: &mut [u8]) {
+        self.0.encrypt(data);
+    }
+}
+
+impl Cfb8DecryptHalf {
+    /// Decrypt `data` in place, continuing the receive direction's CFB
+    /// feedback chain.
+    pub fn decrypt_in_place(&mut self, data: &mut [u8]) {
+        self.0.decrypt(data);
+    }
+}
+
+impl core::fmt::Debug for Cfb8EncryptHalf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Cfb8EncryptHalf([REDACTED])")
+    }
+}
+
+impl core::fmt::Debug for Cfb8DecryptHalf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Cfb8DecryptHalf([REDACTED])")
+    }
+}
+
 /// The encryption/decryption cipher pair of one encrypted session.
 ///
 /// The two directions are independent instances with independent feedback
 /// state, mirroring what vanilla does. The struct is stateful by design:
 /// reusing one instance across the whole session keeps the CFB feedback
 /// chain intact. Creating a fresh pair mid-session desynchronizes the
-/// stream.
+/// stream. When the receive and send halves are needed on independent code
+/// paths (e.g. two concurrent pump tasks), split the pair once with
+/// [`AesCfb8::into_halves`] instead of sharing one `&mut`.
 pub struct AesCfb8 {
     encryptor: Enc,
     decryptor: Dec,
@@ -48,6 +92,24 @@ impl AesCfb8 {
     /// Decrypt `data` in place. The buffer keeps its size.
     pub fn decrypt_in_place(&mut self, data: &mut [u8]) {
         self.decryptor.decrypt(data);
+    }
+
+    /// Split the session into its send and receive halves.
+    ///
+    /// Both halves inherit the CFB feedback state that was live when this
+    /// value was consumed: bytes processed before the split and bytes
+    /// processed after it form one continuous stream, exactly as if the
+    /// pair had never been split. The halves are independent of each
+    /// other — each carries only its own feedback chain — so callers can
+    /// move them onto separate code paths (two concurrent copy pumps)
+    /// without sharing `&mut` on the pair.
+    ///
+    /// Returns `(encrypting, decrypting)`.
+    pub fn into_halves(self) -> (Cfb8EncryptHalf, Cfb8DecryptHalf) {
+        (
+            Cfb8EncryptHalf(self.encryptor),
+            Cfb8DecryptHalf(self.decryptor),
+        )
     }
 }
 
@@ -137,6 +199,43 @@ mod tests {
         enc.encrypt_in_place(&mut wire);
         dec.decrypt_in_place(&mut wire);
         assert_ne!(wire, plaintext);
+    }
+
+    #[test]
+    fn split_halves_keep_the_feedback_chain() {
+        let secret = SharedSecret::from_bytes([0x5A; 16]);
+        let plaintext = sample(96);
+
+        // encrypt the first half normally, then split and finish through
+        // the encrypt half: the wire bytes must equal the one-shot output
+        let mut session = AesCfb8::new(&secret);
+        let mut head = plaintext[..37].to_vec();
+        session.encrypt_in_place(&mut head);
+        let (mut enc_half, _dec_half) = session.into_halves();
+        let mut tail = plaintext[37..].to_vec();
+        enc_half.encrypt_in_place(&mut tail);
+
+        let mut one_shot = AesCfb8::new(&secret);
+        let mut expected = plaintext.clone();
+        one_shot.encrypt_in_place(&mut expected);
+        assert_eq!(
+            head.iter().chain(tail.iter()).copied().collect::<Vec<_>>(),
+            expected
+        );
+
+        // decrypt direction: same trick through the decrypt half
+        let secret_dec = SharedSecret::from_bytes([0x5A; 16]);
+        let mut rx = AesCfb8::new(&secret_dec);
+        let wire_rx = expected.clone();
+        let mut head = wire_rx[..37].to_vec();
+        rx.decrypt_in_place(&mut head);
+        let (_enc_half, mut dec_half) = rx.into_halves();
+        let mut tail = wire_rx[37..].to_vec();
+        dec_half.decrypt_in_place(&mut tail);
+        assert_eq!(
+            head.iter().chain(tail.iter()).copied().collect::<Vec<_>>(),
+            plaintext
+        );
     }
 
     #[test]

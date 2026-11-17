@@ -317,6 +317,17 @@ async fn chat_message_is_met_with_silence() {
     let silence = tokio::time::timeout(Duration::from_millis(300), client.next_packet()).await;
     assert!(silence.is_err(), "backend must not respond to play traffic");
 
+    // synchronize with the fixture actually consuming the frame instead of
+    // racing the close() abort against the read loop
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while fixture.stats().discarded_frames == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture must read the play frame"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
     drop(client);
     let stats = fixture.close().await;
     assert_eq!(

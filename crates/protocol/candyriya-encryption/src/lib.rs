@@ -39,7 +39,7 @@ mod rng;
 mod server_id;
 mod shared_secret;
 
-pub use crate::cfb8::AesCfb8;
+pub use crate::cfb8::{AesCfb8, Cfb8DecryptHalf, Cfb8EncryptHalf};
 pub use crate::error::EncryptionError;
 pub use crate::keypair::EncryptionKeypair;
 pub use crate::server_id::server_id_hash;

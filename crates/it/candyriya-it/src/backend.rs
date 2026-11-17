@@ -15,13 +15,15 @@ use std::sync::{Arc, Mutex};
 use bytes::{Bytes, BytesMut};
 use candyriya_forwarding::verify_forwarding_data;
 use candyriya_protocol::{
-    DEFAULT_MAX_STRING_LENGTH, Handshake, Intent, Packet, decode_varint, parse_login_start_name,
-    write_string, write_uuid, write_varint,
+    DEFAULT_MAX_STRING_LENGTH, Handshake, Intent, Packet, PacketCodec, ProtocolError,
+    decode_varint, parse_login_start_name, write_string, write_uuid, write_varint,
 };
 use candyriya_protocol_registry::{ConnectionState, Direction, PacketKind, PacketSlot, Registry};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio_util::codec::Decoder;
 
 use crate::json::push_json_string;
 use crate::uuid::uuid_from_name;
@@ -54,6 +56,16 @@ const PLAYER_INFO_CHANNEL: &str = "velocity:player_info";
 /// Message id used for the `velocity:player_info` plugin request. The
 /// fixture is single-purpose: one outstanding request per connection.
 const PLAYER_INFO_MESSAGE_ID: i32 = 1;
+
+/// Per-connection inbox depth for raw play-state bytes queued via
+/// [`BackendFixture::send_play_bytes`]. Bounded on purpose: when the client
+/// stops reading, the inbox fills and the sender back-pressures, which is
+/// exactly what the hot-path pressure tests assert on.
+const PLAY_INBOX_DEPTH: usize = 8;
+
+/// Cap on the play-state bytes recorded for assertions. Bytes beyond it
+/// are counted in `play_bytes_dropped` and not stored.
+const PLAY_RECORD_CAP: usize = 8 * 1024 * 1024;
 
 /// Seed for a fake backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +118,12 @@ pub struct BackendStatsSnapshot {
     pub forced_disconnects: u64,
     /// Frames received in the play state and ignored (never replied to).
     pub discarded_frames: u64,
+    /// Total play-state bytes read off the connection, including bytes
+    /// dropped from the assertion record (see `play_bytes_dropped`).
+    pub play_bytes_recorded: u64,
+    /// Play-state bytes that arrived after the assertion record cap was
+    /// reached (or the record lock poisoned) and were not stored.
+    pub play_bytes_dropped: u64,
     /// Protocol-level problems: undecodable frames, unexpected packet ids,
     /// malformed handshakes, login starts that fail to parse.
     pub protocol_errors: u64,
@@ -128,6 +146,8 @@ struct BackendStats {
     forwarding_failures: AtomicU64,
     forced_disconnects: AtomicU64,
     discarded_frames: AtomicU64,
+    play_bytes_recorded: AtomicU64,
+    play_bytes_dropped: AtomicU64,
     protocol_errors: AtomicU64,
     write_errors: AtomicU64,
     connections_closed: AtomicU64,
@@ -149,6 +169,8 @@ impl BackendStats {
             forwarding_failures: self.forwarding_failures.load(Ordering::Relaxed),
             forced_disconnects: self.forced_disconnects.load(Ordering::Relaxed),
             discarded_frames: self.discarded_frames.load(Ordering::Relaxed),
+            play_bytes_recorded: self.play_bytes_recorded.load(Ordering::Relaxed),
+            play_bytes_dropped: self.play_bytes_dropped.load(Ordering::Relaxed),
             protocol_errors: self.protocol_errors.load(Ordering::Relaxed),
             write_errors: self.write_errors.load(Ordering::Relaxed),
             connections_closed: self.connections_closed.load(Ordering::Relaxed),
@@ -163,6 +185,18 @@ struct BackendInner {
     /// stop stragglers; finished handles are pruned on every accept.
     connections: Mutex<Vec<JoinHandle<()>>>,
     shutdown: watch::Receiver<bool>,
+    /// Raw bytes received on play-state connections, for the hot-path
+    /// assertions. Bounded by [`PLAY_RECORD_CAP`]; overflow lands in
+    /// `play_bytes_dropped`. Every connection appends under this one lock —
+    /// bytes from parallel connections interleave, but each connection's
+    /// own byte order is preserved and every byte is recorded exactly once.
+    play_received: Mutex<Vec<u8>>,
+    /// Per-play-connection inboxes for raw bytes queued via
+    /// [`BackendFixture::send_play_bytes`]. Keyed by a connection-local
+    /// sequence number so dead connections can unregister themselves.
+    play_writers: Mutex<Vec<(u64, mpsc::Sender<Bytes>)>>,
+    /// Monotonic sequence for tagging play connections.
+    play_conn_seq: AtomicU64,
 }
 
 /// An ephemeral loopback Minecraft backend bound to `127.0.0.1:0`.
@@ -205,8 +239,12 @@ struct BackendInner {
 ///   no set-compression packet is sent; framing stays in the uncompressed
 ///   format for the whole connection.
 /// * **Play state.** After login success the connection is held open until
-///   the client drops it. Play-state frames are read and discarded; the
-///   backend never replies in this state.
+///   the client drops it. Play-state frames are read and discarded (counted
+///   in `discarded_frames`); every byte the connection received is recorded
+///   verbatim (bounded, see [`BackendFixture::take_play_bytes`]) so tests can
+///   assert byte-exact copying. Tests can also inject raw bytes into the
+///   connection(s) with [`BackendFixture::send_play_bytes`]; the bytes go
+///   onto the wire verbatim.
 /// * **Close.** When the client disconnects, or a malformed packet arrives,
 ///   the read loop ends, the socket is dropped and the task finishes.
 ///
@@ -248,6 +286,9 @@ impl BackendFixture {
             stats: BackendStats::default(),
             connections: Mutex::new(Vec::new()),
             shutdown: shutdown_rx,
+            play_received: Mutex::new(Vec::new()),
+            play_writers: Mutex::new(Vec::new()),
+            play_conn_seq: AtomicU64::new(0),
         });
         let accept = tokio::spawn(accept_loop(listener, Arc::clone(&inner)));
         Ok(Self {
@@ -271,6 +312,54 @@ impl BackendFixture {
     /// A point-in-time copy of the backend counters.
     pub fn stats(&self) -> BackendStatsSnapshot {
         self.inner.stats.snapshot()
+    }
+
+    /// Send raw bytes to every play-state connection the fixture currently
+    /// holds open (i.e. those that finished the login exchange and have not
+    /// disconnected yet). Returns how many connections the bytes were
+    /// queued on.
+    ///
+    /// The bytes are delivered verbatim — no framing is added or stripped,
+    /// which is what the hot path promises end to end. The per-connection
+    /// inbox is bounded (8 messages) and `send` awaits capacity, so this
+    /// future back-pressures when the client stopped reading, exactly like
+    /// the pump under test.
+    pub async fn send_play_bytes(&self, bytes: &[u8]) -> usize {
+        let senders: Vec<mpsc::Sender<Bytes>> = match self.inner.play_writers.lock() {
+            Ok(mut guard) => {
+                guard.retain(|(_, sender)| !sender.is_closed());
+                guard.iter().map(|(_, sender)| sender.clone()).collect()
+            }
+            Err(_) => Vec::new(),
+        };
+        let mut queued = 0usize;
+        for sender in senders {
+            if sender.send(Bytes::copy_from_slice(bytes)).await.is_ok() {
+                queued += 1;
+            }
+        }
+        queued
+    }
+
+    /// Take the play-state bytes recorded on the connection(s), draining
+    /// the buffer. Empty when nothing was received since the last call.
+    pub fn take_play_bytes(&self) -> Vec<u8> {
+        match self.inner.play_received.lock() {
+            Ok(mut guard) => std::mem::take(&mut guard),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Total play-state bytes read off the connection(s), including bytes
+    /// beyond the assertion record cap.
+    pub fn play_bytes_recorded(&self) -> u64 {
+        self.inner.stats.play_bytes_recorded.load(Ordering::Relaxed)
+    }
+
+    /// Play-state bytes that arrived after the assertion record cap was
+    /// reached and were not stored.
+    pub fn play_bytes_dropped(&self) -> u64 {
+        self.inner.stats.play_bytes_dropped.load(Ordering::Relaxed)
     }
 
     /// Shut the backend down deterministically.
@@ -471,6 +560,54 @@ async fn handle_connection(stream: TcpStream, inner: Arc<BackendInner>) {
     let mut login_step = LoginStep::Idle;
 
     loop {
+        // the play state never reaches the frame-oriented reader below:
+        // it runs its own select loop (raw byte recording + injected
+        // writes) and leaves the function when both sides are done
+        if matches!(phase, Phase::Play) {
+            let play_id = inner.play_conn_seq.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = mpsc::channel::<Bytes>(PLAY_INBOX_DEPTH);
+            if let Ok(mut writers) = inner.play_writers.lock() {
+                writers.push((play_id, tx));
+            }
+            let mut inbox = Some(rx);
+            loop {
+                tokio::select! {
+                    biased;
+                    msg = async {
+                        match &mut inbox {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending::<Option<Bytes>>().await,
+                        }
+                    } => {
+                        match msg {
+                            Some(bytes) => {
+                                if stream.write_all(&bytes).await.is_err() {
+                                    break;
+                                }
+                            }
+                            // the sending half went away: keep draining
+                            // reads only
+                            None => inbox = None,
+                        }
+                    }
+                    res = read_packet_recording(&mut stream, &mut buf, &inner) => {
+                        match res {
+                            Ok(Some(_)) => BackendStats::incr(&inner.stats.discarded_frames),
+                            Ok(None) => break,
+                            Err(_) => {
+                                BackendStats::incr(&inner.stats.protocol_errors);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if let Ok(mut writers) = inner.play_writers.lock() {
+                writers.retain(|(id, _)| *id != play_id);
+            }
+            break;
+        }
+
         let packet = match wire::read_packet(&mut stream, &mut buf).await {
             Ok(Some(packet)) => packet,
             Ok(None) => break, // clean EOF: client went away
@@ -730,12 +867,72 @@ async fn handle_connection(stream: TcpStream, inner: Arc<BackendInner>) {
                 }
             }
             Phase::Play => {
-                // hold the connection open, drain and ignore play traffic;
-                // the backend must never answer or parse it
-                BackendStats::incr(&inner.stats.discarded_frames);
+                // handled before the frame-oriented read at the top of the
+                // loop; if this arm ever ran, closing beats looping
+                break;
             }
         }
     }
 
     BackendStats::incr(&inner.stats.connections_closed);
+}
+
+/// Read one frame like [`wire::read_packet`], appending every byte read
+/// from the socket to the fixture's play-state record (bounded by
+/// [`PLAY_RECORD_CAP`]). Everything else — framing, EOF semantics, error
+/// classification — matches the shared reader, so play traffic behaves
+/// exactly like it does for the non-recording phases.
+async fn read_packet_recording(
+    stream: &mut TcpStream,
+    buf: &mut BytesMut,
+    inner: &BackendInner,
+) -> Result<Option<Packet>, HarnessError> {
+    let mut codec = PacketCodec::new();
+    loop {
+        match codec.decode(buf)? {
+            Some(packet) => return Ok(Some(packet)),
+            None => {
+                let before = buf.len();
+                if stream.read_buf(buf).await? == 0 {
+                    return if before == 0 {
+                        Ok(None)
+                    } else {
+                        Err(ProtocolError::Truncated.into())
+                    };
+                }
+                record_play_bytes(inner, &buf[before..]);
+            }
+        }
+    }
+}
+
+/// Append `bytes` to the play-state record, evicting nothing and counting
+/// everything: bytes beyond the cap are tallied in `play_bytes_dropped`
+/// instead of stored.
+fn record_play_bytes(inner: &BackendInner, bytes: &[u8]) {
+    inner
+        .stats
+        .play_bytes_recorded
+        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    match inner.play_received.lock() {
+        Ok(mut record) => {
+            let room = PLAY_RECORD_CAP.saturating_sub(record.len());
+            let take = room.min(bytes.len());
+            if take > 0 {
+                record.extend_from_slice(&bytes[..take]);
+            }
+            if take < bytes.len() {
+                inner
+                    .stats
+                    .play_bytes_dropped
+                    .fetch_add((bytes.len() - take) as u64, Ordering::Relaxed);
+            }
+        }
+        Err(_) => {
+            inner
+                .stats
+                .play_bytes_dropped
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        }
+    }
 }

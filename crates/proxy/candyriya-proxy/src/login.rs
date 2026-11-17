@@ -76,10 +76,14 @@
 //! expected to produce) stops the read: the budget expires and the
 //! connection is dropped.
 //!
-//! **Session hand-off.** After the Login Success is forwarded, this slice
-//! returns [`Ok(())`]. The play-state pump (zero-copy bidirectional copy)
-//! is the next slice; until it lands, the connection is closed cleanly
-//! instead of held open with a half-done pipeline.
+//! **Session hand-off.** Once the Login Success has been written to the
+//! client, the connection transitions to the play state: the
+//! [`ConnectionSlot`](crate::ConnectionSlot) phase flips `login` -> `play`,
+//! `conn=N transitioning to play state` is logged, and the sockets are
+//! handed to the play-state byte pump (`crate::play`), which copies bytes
+//! bidirectionally without parsing until both sides close. The function
+//! returns only after that pump stops — the connection is never closed
+//! early by the login slice itself.
 
 use std::net::SocketAddr;
 use std::sync::OnceLock;
@@ -110,6 +114,7 @@ use candyriya_route::{Backend, BackendState};
 use crate::ProxyError;
 use crate::accept::ProxyState;
 use crate::handshake::HandshakeResult;
+use crate::limit::ConnectionSlot;
 use crate::registry::embedded_registry;
 use crate::wire::{self, Wire};
 
@@ -148,8 +153,11 @@ fn attempt_budget(config: &Config) -> Duration {
 
 /// The outcome of one backend attempt.
 enum Attempt {
-    /// Login Success was forwarded to the client; the session is done.
-    Done,
+    /// Login Success was delivered to the client; the session is now in
+    /// the play state. The backend connection is handed to the byte pump —
+    /// the backend wire state stays behind (the pump copies bytes
+    /// verbatim, so it needs none of it).
+    Done { backend: TcpStream },
     /// The client connection is gone (or its socket died); nothing to do.
     ClientGone,
     /// The backend kicked the player (or is not viable); the chain moves
@@ -167,9 +175,13 @@ enum Attempt {
 ///
 /// `stream` has already been read by exactly the handshake frame
 /// ([`crate::read_handshake`]); the pipeline continues in this function and
-/// returns once the session has either reached the backend, been kicked by
-/// it, or expired. Every wait inside is armed: no path blocks forever.
-/// See the module docs for the full contract.
+/// returns once the session has either reached the play state (and the
+/// byte pump has stopped), been kicked by a backend, or expired. Every
+/// wait inside is armed: no path blocks forever. See the module docs for
+/// the full contract.
+///
+/// `slot` is the connection's guard; its phase flag is flipped to
+/// `play` the moment the Login Success reaches the client.
 ///
 /// # Errors
 ///
@@ -182,8 +194,9 @@ pub async fn handle_login(
     peer: SocketAddr,
     conn_id: u64,
     handshake: &HandshakeResult,
+    slot: &ConnectionSlot,
 ) -> Result<(), ProxyError> {
-    login_flow(state, stream, peer, conn_id, handshake).await
+    login_flow(state, stream, peer, conn_id, handshake, slot).await
 }
 
 /// The whole login exchange. Split from [`handle_login`] so the entry
@@ -194,6 +207,7 @@ async fn login_flow(
     peer: SocketAddr,
     conn_id: u64,
     handshake: &HandshakeResult,
+    slot: &ConnectionSlot,
 ) -> Result<(), ProxyError> {
     if embedded_registry().is_none() {
         // build bug: the compiled-in tables are invalid. Loud in the log,
@@ -305,8 +319,24 @@ async fn login_flow(
         )
         .await;
         match outcome {
-            Ok(Attempt::Done) => {
-                info!(conn = conn_id, %peer, "player logged in");
+            Ok(Attempt::Done { backend, .. }) => {
+                // the backend wire state is not needed by the pump: zlib
+                // passes through untouched, and the backend never carries
+                // a cipher — drop it on the floor
+                info!(conn = conn_id, %peer, "conn={conn_id} transitioning to play state");
+                slot.mark_play();
+                let mut backend = backend;
+                let write_stall =
+                    Duration::from_millis(u64::from(state.config.advanced.read_timeout));
+                crate::play::run_play_state(
+                    stream,
+                    &mut backend,
+                    &mut client,
+                    conn_id,
+                    peer,
+                    write_stall,
+                )
+                .await;
                 return Ok(());
             }
             Ok(Attempt::ClientGone) => return Ok(()),
@@ -658,7 +688,9 @@ async fn attempt_backend(
                 if wire::write_packet(stream, client, packet).await.is_err() {
                     return Attempt::ClientGone;
                 }
-                return Attempt::Done;
+                return Attempt::Done {
+                    backend: backend_stream,
+                };
             }
             // anything else (cookie packets, acknowledged, play packets
             // early): the backend is speaking a shape we do not model here

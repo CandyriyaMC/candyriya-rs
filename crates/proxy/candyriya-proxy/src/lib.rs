@@ -26,6 +26,13 @@
 //!   Set Compression, modern `velocity:player_info` forwarding (BungeeGuard
 //!   and legacy included) or Login Disconnect, forwarding the Login Success
 //!   verbatim to the client.
+//! - The **play-state hot path**: once the Login Success has been
+//!   delivered, the proxy stops parsing packets and copies bytes
+//!   bidirectionally between the two sockets (AES-128-CFB8 carried over
+//!   from the login phase where online mode established it; zlib passes
+//!   through untouched), bounded by an 8 KiB buffer per direction and a
+//!   per-chunk write stall so a peer that stops reading is torn down
+//!   instead of buffered forever.
 //! - [`read_handshake`] — reading and validating the client's first frame:
 //!   framing through [`candyriya_protocol::PacketCodec`], the frame-size
 //!   cap, the packet id and intent checks, and the `server_address`
@@ -65,6 +72,7 @@ mod accept;
 mod handshake;
 mod limit;
 mod login;
+mod play;
 mod registry;
 mod socket;
 mod status;
@@ -74,7 +82,9 @@ pub use crate::accept::{ProxyState, accept_loop, handle_connection, serve};
 pub use crate::handshake::{
     DEFAULT_MAX_ADDRESS_LEN, HandshakeLimits, HandshakeRead, HandshakeResult, read_handshake,
 };
-pub use crate::limit::{ConnectionSlot, DEFAULT_PER_IP_MAX, SlotAcquireError, try_acquire_slot};
+pub use crate::limit::{
+    ConnectionSlot, DEFAULT_PER_IP_MAX, SlotAcquireError, SlotPhase, try_acquire_slot,
+};
 pub use crate::login::{handle_login, registry_from_config};
 pub use crate::socket::{ProxySocket, REUSE_PORT_SUPPORTED, SocketConfig};
 pub use crate::status::{FaviconCache, handle_status};
