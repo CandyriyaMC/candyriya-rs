@@ -6,7 +6,8 @@ and submitting changes, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 ## Audit pipeline
 
 CI is the security gate for the dependency tree. On every push and pull
-request, the `security` job runs [cargo-deny](https://embarkstudios.github.io/cargo-deny/)
+request (against `dev` and `main`, see the branching model in CONTRIBUTING.md),
+the `security` job runs [cargo-deny](https://embarkstudios.github.io/cargo-deny/)
 against the checked-in `Cargo.lock`: `advisories` fails on known RustSec
 vulnerabilities, unmaintained or unsound crates, `licenses` enforces the
 allowlist (GPL-3.0-only for this workspace itself, permissive licenses
@@ -17,4 +18,6 @@ in `deny.toml` documents the duplicates that are blocked on upstream), and
 RustSec advisory database and annotates the run. Goal: no known-vulnerable or
 license-violating code reaches `main`, and dependency hygiene issues surface
 in review, not in production. The CI jobs are the gate — running cargo-deny
-locally is a convenience, not a requirement.
+locally is a convenience, not a requirement. Commits or PR titles containing
+`[ci ignore]` (docs/metadata-only changes) skip the pipeline; see
+CONTRIBUTING.md for when that is acceptable.

@@ -21,6 +21,9 @@ permissions: {}
 jobs:
   notify:
     runs-on: ubuntu-latest
+    # native [skip ci] stops the whole workflow; [ci ignore] (handled in ci.yml)
+    # silences the chat feed too. PRs and issues still announce.
+    if: ${{ !contains(github.event.head_commit.message || '', '[ci ignore]') }}
     steps:
       - name: Post to Discord
         env:

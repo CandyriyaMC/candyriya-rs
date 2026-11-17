@@ -90,8 +90,29 @@ Guidelines, and strict Clippy lints.
 - No unnecessary dependencies.
 - All public APIs must have meaningful documentation.
 
+## Branching model
+
+- **`dev` is the integration branch.** All day-to-day work lands there.
+- **`main` tracks the released state** and only moves when a batch of dev
+  changes is merged deliberately — not per pull request.
+- Branch off `dev`, open your PR **against `dev`**. Once a decent batch has
+  accumulated, it is squash-merged into `main`, and tagged `v*` releases are
+  cut from `main` (the release workflow builds all targets automatically).
+- Direct pushes to both `main` and `dev` are blocked by a repository ruleset:
+  everything goes through a pull request, and the CI checks must be green.
+- If a change is docs/metadata-only and CI would waste a full build, put
+  `[ci ignore]` in the commit message (push) or the PR title
+  (pull_request). The CI jobs are then reported as skipped (which counts as
+  green) and the Discord feed stays quiet. Never use it for code changes —
+  reviewers may revert it. GitHub's native `[skip ci]` markers also work,
+  but they leave required checks pending and will block the merge.
+- Dependabot targets `dev` by default (it is the repository's default
+  branch).
+
 ## Pull requests
 
+- PRs target **`dev`**, not `main`. `dev` is squash-merged into `main` in
+  batches; you never open a PR against `main` directly.
 - **Squash-only.** This repository squash-merges pull requests. Your branch
   will land as a single commit, so keep the final commit message
   ([Conventional Commits](https://www.conventionalcommits.org/), subject ≤ 50
