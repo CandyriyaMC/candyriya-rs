@@ -1,0 +1,38 @@
+name: Discord release notify
+
+# Pings the @Release Alerts role in the CandyriyaMC Discord server when a
+# release is published. Separate workflow and separate webhook from
+# discord-notify (repo activity feed) on purpose: this one announces
+# releases only and pings a role; the other stays quiet.
+#
+# Webhook URL lives in the DISCORD_WEBHOOK_URL_RELEASES repository secret.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Discord
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL_RELEASES }}
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "release" ]; then
+            content=$(printf '🚀 <@&1572211358563573771> — **Candyriya %s is out**\n%s' "$RELEASE_TAG" "$RELEASE_URL")
+            mentions='{"roles": ["1572211358563573771"]}'
+          else
+            content=$(printf '🔧 release-notify is wired and working — connection test, no role mention')
+            mentions='{"roles": []}'
+          fi
+          jq -nc --arg content "$content" --argjson allowed_mentions "$mentions" \
+            '{content: $content, allowed_mentions: $allowed_mentions}' \
+            | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$WEBHOOK_URL"

@@ -10,8 +10,6 @@ name: Discord notify
 on:
   push:
     branches: [main]
-  release:
-    types: [published]
   pull_request:
     types: [opened, closed]
   issues:
