@@ -54,6 +54,10 @@ pub const SWITCH_PLAYER_FN: &str = "candyriya:switchPlayer";
 pub const CANCEL_EVENT_FN: &str = "candyriya:cancelEvent";
 /// `candyriya:subscribeToEvents` — input is a JSON array of event kind strings, output a [`HostOk`].
 pub const SUBSCRIBE_TO_EVENTS_FN: &str = "candyriya:subscribeToEvents";
+/// `candyriya:i18nT` — input is an [`I18nTRequest`], output is the resolved UTF-8 string.
+pub const I18N_T_FN: &str = "candyriya:i18nT";
+/// `candyriya:i18nLocale` — input is ignored, output is the active locale id.
+pub const I18N_LOCALE_FN: &str = "candyriya:i18nLocale";
 
 /// The severity of a [`LogMessage`] a plugin wants the host to emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +196,27 @@ pub struct CancelEventRequest {
     pub reason: Option<String>,
 }
 
+/// Input to `candyriya:i18nT` (`{"key": "...", "args"?: {"name": "...", ...}}`).
+///
+/// Resolves `key` through the plugin-scoped chain: the plugin's own locale
+/// file (active, then `en`), then the shared `common` tables (active, then
+/// `en`), then the key itself. Core `candyriya` tables and other plugins'
+/// files are out of reach. `args` values interpolate into `{name}`
+/// placeholders of the resolved template; a JSON string value is used
+/// as-is, any other value is stringified as compact JSON. Positional
+/// `{0}` placeholders resolve against the object's entries in JSON
+/// iteration order (sorted by key in this build); use named placeholders.
+/// The plugin's scope covers its own `plugin.<id>.*` keys plus shared
+/// `common.*` keys; anything else answers with the key itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct I18nTRequest {
+    /// The locale key to resolve, e.g. `plugin.my-plugin.connected`.
+    pub key: String,
+    /// Placeholders to interpolate into the resolved template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 /// The typed view of the host-function surface.
 ///
 /// Implemented by the host runtime (the proxy's plugin engine); plugin
@@ -281,6 +306,32 @@ pub trait CandyriyaHostApi: Send + Sync {
     /// - Input: [`CancelEventRequest`], e.g. `{"cancel": true, "reason": "lobby is full"}`.
     /// - Output: [`HostOk`], e.g. `{"ok": true}`.
     fn cancel_event(&self, request: &CancelEventRequest) -> HostOk;
+
+    /// `candyriya:i18nT` — render a locale key for this plugin.
+    ///
+    /// Resolves `request.key` through the plugin-scoped chain — this
+    /// plugin's own locale file (active, then `en`), then the shared
+    /// `common` tables (active, then `en`), then the key itself — and
+    /// interpolates `request.args` into the resolved template, so the
+    /// answer never contains an unresolved `{name}` the args covered.
+    /// Only keys in this plugin's own `plugin.<id>.*` namespace plus
+    /// shared `common.*` keys resolve; out-of-scope keys answer with the
+    /// key itself (same shape as a missing key). The call never panics
+    /// and a missing key is never an error.
+    ///
+    /// - Input: [`I18nTRequest`], e.g.
+    ///   `{"key": "plugin.my-plugin.connected", "args": {"server": "hub"}}`.
+    /// - Output: a raw UTF-8 string, e.g. `Connected to hub`.
+    fn i18n_t(&self, request: &I18nTRequest) -> String;
+
+    /// `candyriya:i18nLocale` — the active locale for this plugin.
+    ///
+    /// Same value [`CandyriyaHostApi::get_locale`] answers; the two are
+    /// the same wire value under the plugin-facing `i18n` name.
+    ///
+    /// - Input: ignored.
+    /// - Output: a raw UTF-8 string, e.g. `en`.
+    fn i18n_locale(&self) -> String;
 
     /// `candyriya:subscribeToEvents` — opt this plugin into specific event kinds.
     ///

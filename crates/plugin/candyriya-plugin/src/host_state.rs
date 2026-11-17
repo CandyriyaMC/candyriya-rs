@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use candyriya_plugin_api::OutcomeReport;
 
 use crate::limits::InstanceSlots;
+use crate::locales::SharedLocales;
 use crate::service_registry::ServiceRegistry;
 
 /// State the host keeps per plugin and hands to the host functions.
@@ -50,6 +51,13 @@ use crate::service_registry::ServiceRegistry;
 /// every host state created for a single scope (e.g. one loader run). The
 /// loader uses the shared form so its whole run enforces the cap
 /// collectively.
+///
+/// `locales` carries the shared pair of i18n machines `candyriya:i18nT`
+/// resolves through. [`HostState::new`] binds a private embedded-defaults
+/// pair so standalone host states and tests still resolve core keys; the
+/// loader and reloader replace it with the proxy's shared pair via
+/// [`HostState::with_locales`], which is what makes plugin registrations
+/// and `/candyriya reload` visible to the host functions.
 #[derive(Clone)]
 pub struct HostState {
     /// The directory this plugin owns (the same path as `config_dir`).
@@ -73,6 +81,11 @@ pub struct HostState {
     /// The plugin that initiated the call currently in flight, if any;
     /// `None` when the proxy itself is the caller.
     pub caller_plugin_id: Arc<Mutex<Option<String>>>,
+    /// The shared pair of i18n machines `candyriya:i18nT` resolves
+    /// through. `None` only when even the embedded tables fail to load
+    /// (a crate build defect); the host function then answers with the
+    /// key itself, like any other missing key.
+    pub locales: Option<SharedLocales>,
     /// Cancellation recorded via `candyriya:cancelEvent` for the call in
     /// flight. Cleared by the caller before the call and read back after.
     pub(crate) pending_outcome: Arc<Mutex<Option<OutcomeReport>>>,
@@ -120,6 +133,7 @@ impl HostState {
             subscribers: Arc::new(Mutex::new(HashSet::new())),
             caller_plugin_id: Arc::new(Mutex::new(None)),
             pending_outcome: Arc::new(Mutex::new(None)),
+            locales: SharedLocales::embedded().ok(),
             instance_slots,
         }
     }
@@ -137,6 +151,18 @@ impl HostState {
     #[must_use]
     pub fn with_locale(self, locale: &str) -> Self {
         *self.i18n_locale.lock() = locale.to_owned();
+        self
+    }
+
+    /// Resolve plugin strings through `locales` instead of the private
+    /// embedded-defaults pair [`HostState::new`] binds.
+    ///
+    /// The loader and reloader call this with the proxy's shared pair so
+    /// plugin locale registrations and `/candyriya reload` are visible
+    /// to the host functions.
+    #[must_use]
+    pub fn with_locales(mut self, locales: SharedLocales) -> Self {
+        self.locales = Some(locales);
         self
     }
 

@@ -44,6 +44,7 @@ use crate::host_state::HostState;
 use crate::instance::PluginInstance;
 use crate::library_plugin::{LibraryPlugin, PluginOrigin};
 use crate::limits::{InstanceSlots, Limits};
+use crate::locales::SharedLocales;
 use crate::manifest::{PluginManifest, validate_unique};
 
 /// One discovery problem, as a `(where, why)` tuple.
@@ -79,12 +80,17 @@ pub struct LoadReport {
 /// Host functions see the same [`crate::ServiceRegistry`] the loader is built with;
 /// use [`PluginLoader::with_services`] to share one with the rest of the
 /// proxy (the dispatcher is required for `candyriya:callApi` to work).
+/// The shared i18n machines are likewise injectable via
+/// [`PluginLoader::with_locales`]; without them, plugin host functions
+/// resolve against a private embedded-defaults pair and plugin locale
+/// files are never registered.
 pub struct PluginLoader<'a> {
     plugins_dir: PathBuf,
     libraries_dir: PathBuf,
     cache: &'a CacheManager,
     limits: Limits,
     services: crate::service_registry::ServiceRegistry,
+    locales: Option<SharedLocales>,
 }
 
 impl<'a> PluginLoader<'a> {
@@ -106,6 +112,7 @@ impl<'a> PluginLoader<'a> {
             cache,
             limits,
             services: crate::service_registry::ServiceRegistry::new(),
+            locales: None,
         }
     }
 
@@ -119,6 +126,19 @@ impl<'a> PluginLoader<'a> {
     #[must_use]
     pub fn with_services(mut self, services: crate::service_registry::ServiceRegistry) -> Self {
         self.services = services;
+        self
+    }
+
+    /// The shared i18n machines this loader registers plugin locales into
+    /// and hands to every plugin's host state.
+    ///
+    /// Pass the same clones the command layer serves from; plugin
+    /// registrations and `/candyriya reload` then apply to the host
+    /// functions too. Without this, `[locales]` in a plugin.toml has no
+    /// effect on resolution.
+    #[must_use]
+    pub fn with_locales(mut self, locales: SharedLocales) -> Self {
+        self.locales = Some(locales);
         self
     }
 
@@ -358,8 +378,12 @@ impl<'a> PluginLoader<'a> {
             return LibraryPlugin::failed(dir, manifest, origin, why);
         }
 
-        let host_state = HostState::with_instance_slots(data_root, Arc::clone(instance_slots), &id)
-            .with_services(Arc::new(self.services.clone()));
+        let mut host_state =
+            HostState::with_instance_slots(data_root, Arc::clone(instance_slots), &id)
+                .with_services(Arc::new(self.services.clone()));
+        if let Some(locales) = &self.locales {
+            host_state = host_state.with_locales(locales.clone());
+        }
         let instance = match PluginInstance::new(&wasm_path, host_state, &id, &self.limits) {
             Ok(instance) => instance,
             Err(e) => {
@@ -371,7 +395,12 @@ impl<'a> PluginLoader<'a> {
 
         // enforce the manifest's contract: plugin_main must exist
         match instance.function_exists(manifest.plugin_main()) {
-            Ok(true) => LibraryPlugin::new(dir, manifest, origin, instance),
+            Ok(true) => {
+                if manifest.has_locales() {
+                    self.register_plugin_locales(&id, &dir, issues);
+                }
+                LibraryPlugin::new(dir, manifest, origin, instance)
+            }
             Ok(false) => {
                 let reason = format!(
                     "plugin `{id}` declares plugin_main `{}` but the wasm module does not export it",
@@ -387,6 +416,30 @@ impl<'a> PluginLoader<'a> {
                 issues.push((dir.clone(), reason.clone()));
                 LibraryPlugin::failed(dir, manifest, origin, reason)
             }
+        }
+    }
+
+    /// Register the plugin's `locales/` directory into the shared i18n
+    /// machines, when this loader carries one and the manifest declares
+    /// `[locales]`. A registration problem is reported as an issue, never
+    /// as a load failure — the plugin runs fine without its strings, the
+    /// keys just fall back.
+    fn register_plugin_locales(&self, id: &str, dir: &Path, issues: &mut Vec<LoadIssue>) {
+        let Some(locales) = &self.locales else {
+            issues.push((
+                dir.join("locales"),
+                format!(
+                    "plugin `{id}` declares [locales] but no shared i18n machine was provided to the loader; plugin keys will resolve against embedded defaults only"
+                ),
+            ));
+            return;
+        };
+        let locales_dir = dir.join("locales");
+        if let Err(error) = locales.register_plugin_locale(id, &locales_dir) {
+            issues.push((
+                locales_dir,
+                format!("plugin `{id}` locale files not registered: {error}"),
+            ));
         }
     }
 

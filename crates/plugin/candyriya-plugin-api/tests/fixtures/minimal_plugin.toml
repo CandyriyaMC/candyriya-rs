@@ -16,6 +16,8 @@ permissions = ["players.read", "servers.switch"]
 cache_quota_bytes = 67108864
 cache_quota_resources = 1024
 
+[locales]
+
 [api]
 exports = [
     { name = "greet" },

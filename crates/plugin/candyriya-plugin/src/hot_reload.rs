@@ -63,6 +63,7 @@ use crate::host_state::HostState;
 use crate::instance::PluginInstance;
 use crate::library_plugin::{LibraryPlugin, PluginState};
 use crate::limits::Limits;
+use crate::locales::SharedLocales;
 use crate::manifest::PluginManifest;
 use crate::plugin_loader::{LoadIssue, PluginLoader, select_wasm};
 use crate::plugin_set::PluginSet;
@@ -154,6 +155,7 @@ pub struct PluginReloader {
     config_root: PathBuf,
     services: ServiceRegistry,
     limits: Limits,
+    locales: Option<SharedLocales>,
 }
 
 impl PluginReloader {
@@ -182,7 +184,21 @@ impl PluginReloader {
             config_root,
             services,
             limits,
+            locales: None,
         }
+    }
+
+    /// The shared i18n machines reloaded plugins resolve through and
+    /// re-register their `locales/` directory into.
+    ///
+    /// Same clones the loader and the command layer use. Without this,
+    /// `[locales]` in a reloaded plugin.toml has no effect on resolution
+    /// (the file contents of an already-registered plugin are picked up
+    /// by `I18n::reload` regardless).
+    #[must_use]
+    pub fn with_locales(mut self, locales: SharedLocales) -> Self {
+        self.locales = Some(locales);
+        self
     }
 
     /// Reload plugin `id` from the files currently on disk.
@@ -242,8 +258,11 @@ impl PluginReloader {
             source,
         })?;
 
-        let host_state =
+        let mut host_state =
             HostState::new(data_root, id).with_services(Arc::new(self.services.clone()));
+        if let Some(locales) = &self.locales {
+            host_state = host_state.with_locales(locales.clone());
+        }
         let instance = PluginInstance::new(&wasm_path, host_state, id, &self.limits)?;
         match instance.function_exists(manifest.plugin_main()) {
             Ok(true) => {}
@@ -254,6 +273,24 @@ impl PluginReloader {
                 });
             }
             Err(error) => return Err(error),
+        }
+
+        // the replacement staged cleanly: refresh the plugin's locale
+        // registration so edits (or a newly declared [locales] section)
+        // are visible right after the swap. never fatal — the swap
+        // proceeds either way, the plugin just falls back to common keys
+        if manifest.has_locales()
+            && let Some(locales) = &self.locales
+        {
+            let locales_dir = dir.join("locales");
+            if let Err(error) = locales.register_plugin_locale(id, &locales_dir) {
+                tracing::warn!(
+                    plugin = %id,
+                    path = %locales_dir.display(),
+                    %error,
+                    "plugin locale files not registered; plugin keys fall back to common",
+                );
+            }
         }
 
         // the replacement is ready; the swap drops the old world's

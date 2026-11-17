@@ -370,6 +370,92 @@ fn args_without_tokens_are_ignored_and_do_not_panic() {
 }
 
 #[test]
+fn t_for_plugin_scoped_to_own_file_then_common() {
+    let tmp = TempDir::new("t-for-plugin");
+    tmp.write_file(
+        "plugin-a/ex_girl/myplugin.toml",
+        "\"myplugin.chain\" = \"из active\"\n\"myplugin.shared\" = \"плагин active\"\n",
+    );
+    tmp.write_file(
+        "plugin-a/en/myplugin.toml",
+        "\"myplugin.chain\" = \"from en\"\n\"myplugin.only_en\" = \"only en\"\n",
+    );
+    tmp.write_file(
+        "plugin-b/ex_girl/other.toml",
+        "\"myplugin.chain\" = \"из другого плагина\"\n\"other.secret\" = \"не тебе\"\n",
+    );
+
+    let i18n = I18n::new("ex_girl").expect("embedded loads");
+    i18n.register_plugin_locale("myplugin", &tmp.path().join("plugin-a"))
+        .expect("own plugin registers");
+    i18n.register_plugin_locale("other", &tmp.path().join("plugin-b"))
+        .expect("other plugin registers");
+
+    // own active file wins
+    assert_eq!(
+        i18n.t_for_plugin("myplugin", "myplugin.chain", &[]),
+        "из active"
+    );
+    // own en file fills in what the active file misses
+    assert_eq!(
+        i18n.t_for_plugin("myplugin", "myplugin.only_en", &[]),
+        "only en"
+    );
+    // another plugin's file with the same key is not consulted
+    let key_answer = i18n.t_for_plugin("myplugin", "myplugin.chain", &[]);
+    assert_eq!(key_answer, "из active");
+    // keys the other plugin owns come back as themselves
+    assert_eq!(
+        i18n.t_for_plugin("myplugin", "other.secret", &[]),
+        "other.secret"
+    );
+    // common keys resolve through the shared chain
+    assert_eq!(i18n.t_for_plugin("myplugin", "common.yes", &[]), "Да");
+    // interpolation works like in the core path
+    tmp.write_file(
+        "plugin-a/ex_girl/myplugin.toml",
+        "\"myplugin.interp\" = \"Привет, {name}\"\n",
+    );
+    i18n.register_plugin_locale("myplugin", &tmp.path().join("plugin-a"))
+        .expect("re-register");
+    assert_eq!(
+        i18n.t_for_plugin("myplugin", "myplugin.interp", &[("name", "Steve")]),
+        "Привет, Steve"
+    );
+    // never panics, missing keys come back as the key
+    assert_eq!(
+        i18n.t_for_plugin("myplugin", "myplugin.absent", &[]),
+        "myplugin.absent"
+    );
+}
+
+#[test]
+fn t_for_plugin_does_not_see_core_candyriya_keys() {
+    let i18n = I18n::new("en").expect("embedded loads");
+    // the key exists in the embedded core candyriya.toml, but the
+    // plugin-scoped chain never checks it
+    let core_key: String = load_toml(EN_CANDYRIYA)
+        .keys()
+        .next()
+        .expect("embedded core locale must not be empty")
+        .to_owned();
+    assert_eq!(i18n.t_for_plugin("myplugin", &core_key, &[]), core_key);
+}
+
+#[test]
+fn t_for_plugin_without_registration_uses_common_only() {
+    let i18n = I18n::new("en").expect("embedded loads");
+    assert_eq!(i18n.t_for_plugin("ghost", "common.yes", &[]), "Yes");
+    // a plugin that never registered still cannot read the core table
+    let core_key: String = load_toml(EN_CANDYRIYA)
+        .keys()
+        .next()
+        .expect("embedded core locale must not be empty")
+        .to_owned();
+    assert_eq!(i18n.t_for_plugin("ghost", &core_key, &[]), core_key);
+}
+
+#[test]
 fn register_plugin_locale_end_to_end() {
     let tmp = TempDir::new("plugin-e2e");
     tmp.write_file(
