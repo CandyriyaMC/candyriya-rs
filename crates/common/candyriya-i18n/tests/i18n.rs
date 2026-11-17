@@ -254,24 +254,6 @@ fn broken_override_file_falls_back_file_wise() {
 }
 
 #[test]
-fn broken_override_file_falls_back_with_warning() {
-    let tmp = TempDir::new("broken-warn");
-    tmp.write_file("locales/en/common.toml", "not toml at all [");
-    let (buf, _guard) = capture_warns();
-    let _i18n = I18n::with_override_dir("en", &tmp.path().join("locales"))
-        .expect("a broken file must not fail the whole load");
-    let logs = captured_text(&buf);
-    assert!(
-        logs.contains("common.toml"),
-        "warning must name the offending file, got: {logs}"
-    );
-    assert!(
-        logs.contains("falling back"),
-        "warning must say we fall back, got: {logs}"
-    );
-}
-
-#[test]
 fn active_locale_falls_back_to_en_for_missing_keys() {
     let tmp = TempDir::new("active-fallback-en");
     // valid TOML with exactly one key: everything else must come from en

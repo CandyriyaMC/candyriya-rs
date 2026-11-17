@@ -28,7 +28,6 @@ members = [
     "crates/network/candyriya-route",
     "crates/network/candyriya-ratelimit",
     "crates/proxy/candyriya-proxy",
-    "crates/cli/candyriya",
     "crates/commands/candyriya-command",
     "crates/bench/candyriya-bench",
     "crates/bench/fuzz",
@@ -48,7 +47,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 socket2 = "0.6"
-dashmap = "6"
 parking_lot = "0.12"
 arc-swap = "1"
 tracing = "0.1"
@@ -65,7 +63,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 figment = { version = "0.10", features = ["toml"] }
 toml = "1"
-validator = { version = "0.20", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "v3", "serde"] }
 hmac = "0.12"
 sha1 = "0.10"
@@ -83,14 +80,12 @@ extism = { version = "1", default-features = false, features = ["wasmtime-defaul
 cachegirl = { version = "1", features = ["memory", "cache", "async", "tokio", "tracing"] }
 tokio-cron-scheduler = "0.15"
 anyhow = "1"
-url = "2"
 zeroize = "1"
 aes = "0.9"
 cfb8 = "0.9"
 rand = "0.9"
 rsa = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
-notify = "8"
 tracing-appender = "0.2"
 semver = "1"
 criterion = "0.7"
