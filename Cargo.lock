@@ -494,6 +494,8 @@ dependencies = [
 name = "candyriya-plugin-api"
 version = "0.1.0"
 dependencies = [
+ "candyriya-i18n",
+ "lobsterchat",
  "semver",
  "serde",
  "serde_json",

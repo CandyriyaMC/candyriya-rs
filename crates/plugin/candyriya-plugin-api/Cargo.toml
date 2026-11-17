@@ -1,6 +1,6 @@
 [package]
 name = "candyriya-plugin-api"
-description = "Shared candyriya plugin ABI contract types: proxy version, plugin metadata and events exchanged between the host and WASM plugins."
+description = "Shared candyriya plugin ABI contract types: proxy version, plugin metadata, events and the chat/message-level building blocks (components, kick reasons, MiniMessage) the proxy renders host-side."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,8 @@ authors.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 semver = { workspace = true }
+lobsterchat = { workspace = true }
+candyriya-i18n = { path = "../../common/candyriya-i18n" }
 
 [dev-dependencies]
 serde_json = { workspace = true }

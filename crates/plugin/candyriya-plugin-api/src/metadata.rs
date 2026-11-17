@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::version::parse_major_minor;
 
-/// Errors produced while validating [`PluginMetadata`].
+/// Errors produced while validating [`PluginMetadata`] or while checking
+/// MiniMessage input in [`crate::parse_minimessage`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum MetadataError {
@@ -27,6 +28,15 @@ pub enum MetadataError {
     /// in a single pass instead of a edit-load-fix loop.
     #[error("invalid plugin metadata: {0}")]
     Validation(String),
+    /// The input was not a MiniMessage string this ABI can fully parse.
+    /// lobsterchat itself never reports parse failures (it silently stops
+    /// at the first bad tag); `parse_minimessage` rejects those inputs
+    /// instead, so callers can trust an `Ok` means nothing was dropped.
+    #[error("invalid MiniMessage input: {reason}")]
+    MiniMessage {
+        /// What was wrong and where, e.g. `unknown tag <rainbow> at byte 3`.
+        reason: String,
+    },
 }
 
 /// A single entry of the `[api].exports` table.

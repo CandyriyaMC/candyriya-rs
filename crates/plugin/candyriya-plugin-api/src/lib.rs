@@ -34,14 +34,39 @@
 //!   other plugins may call through the host.
 //! - [`EventKind`] / [`EventPayload`] (alias [`PluginEvent`]) /
 //!   [`PlayerRef`] — events the host dispatches into plugins.
+//! - [`ComponentBuilder`] — fluent wrapper around lobsterchat's component
+//!   construction for the typical chat/kick/title line; components are
+//!   built, serialized and handed over whole.
+//! - [`MessageMode`] — how the host should deliver a message
+//!   (plain chat, system message or the actionbar overlay).
+//! - [`KickReason`] / [`DisconnectReason`] — the pre-built kick and
+//!   disconnect reasons, renderable to MiniMessage via candyriya-i18n.
+//! - [`text`] / [`translatable`] — the two component constructors plugin
+//!   code generators target.
+//! - [`parse_minimessage`] — the strict MiniMessage acceptance gate;
+//!   rejects anything lobsterchat would silently truncate.
+//! - [`escape_minimessage`] — escapes untrusted text for interpolation
+//!   into MiniMessage strings.
 //!
-//! Errors from manifest validation are reported as [`MetadataError`].
+//! Errors are reported as [`MetadataError`]: manifest validation problems
+//! and MiniMessage acceptance failures.
 #![forbid(unsafe_code)]
 
 mod event;
+mod kick;
+mod message;
 mod metadata;
+mod minimessage;
 mod version;
 
 pub use crate::event::{EventKind, EventPayload, PlayerRef, PluginEvent};
+pub use crate::kick::{DisconnectReason, KickReason};
+pub use crate::message::{ComponentBuilder, MessageMode, text, translatable};
 pub use crate::metadata::{ApiExport, ApiInfo, MetadataError, PluginMetadata};
+pub use crate::minimessage::{escape_minimessage, parse_minimessage};
 pub use crate::version::{API_VERSION, IMPLEMENTATION, ProxyVersion};
+
+// lobsterchat is the project-wide component library; the ABI carries its
+// types directly, so re-export the ones the host functions and the
+// plugin SDK both name.
+pub use lobsterchat::component::{ClickEvent, Component, HoverEvent, NamedColor, TextColor};
