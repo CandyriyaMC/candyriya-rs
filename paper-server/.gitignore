@@ -1,0 +1,10 @@
+# Everything Paper generates at runtime (jar, worlds, logs, stats, caches)
+# stays out of git. Only the template files listed below are tracked.
+
+*
+!/.gitignore
+!/eula.txt
+!/server.properties
+!/spigot.yml
+!/config
+!/config/paper-global.yml

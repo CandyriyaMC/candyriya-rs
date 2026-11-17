@@ -13,6 +13,13 @@ categories = ["development-tools", "network-programming", "games"]
 readme = "../../../README.md"
 exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 
+[features]
+# Live smoke test against a real Paper 1.21.1 backend (see
+# tests/smoke_paper.rs). Off by default: CI does not download a 54 MB jar.
+# Run it deliberately with:
+#   CANDYRIYA_SMOKE=1 cargo test --features smoke -p candyriya-it --test smoke_paper -- --test-threads=1 --nocapture
+smoke = []
+
 [dependencies]
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -24,17 +31,26 @@ candyriya-protocol-registry = { version = "0.1.0", path = "../../protocol/candyr
 # sealed payload) - the fixture implements the server side of the contract
 candyriya-forwarding = { version = "0.1.0", path = "../../network/candyriya-forwarding" }
 candyriya-player = { version = "0.1.0", path = "../../player/candyriya-player" }
+# the client negotiates framing compression exactly the way a real client
+# does: Set Compression flips the link over to zlib frames
+candyriya-compression = { version = "0.1.0", path = "../../protocol/candyriya-compression" }
 uuid = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 base64 = { workspace = true }
-# the end-to-end test drives the real proxy stack (accept loop, handshake,
-# login, play pump) as a library, not through the CLI: the proxy, the config
-# loader and the scheduler are exactly what the composition root wires up
-candyriya-proxy = { version = "0.1.0", path = "../../proxy/candyriya-proxy" }
-candyriya-config = { version = "0.1.0", path = "../../config/candyriya-config" }
-candyriya-scheduler = { version = "0.1.0", path = "../../common/candyriya-scheduler" }
+ # the end-to-end test drives the real proxy stack (accept loop, handshake,
+ # login, play pump) as a library, not through the CLI: the proxy, the config
+ # loader and the scheduler are exactly what the composition root wires up
+ candyriya-proxy = { version = "0.1.0", path = "../../proxy/candyriya-proxy" }
+ candyriya-config = { version = "0.1.0", path = "../../config/candyriya-config" }
+ candyriya-scheduler = { version = "0.1.0", path = "../../common/candyriya-scheduler" }
+ # jar download for the smoke test (the rest of the suite is loopback-only)
+ reqwest = { workspace = true }
+ # jar integrity check for the smoke test
+ sha2 = { workspace = true }
+ # the proxy's interactive console only engages on a TTY; the smoke drives it
+ # through a pseudo-terminal
 
 [lints]
 workspace = true

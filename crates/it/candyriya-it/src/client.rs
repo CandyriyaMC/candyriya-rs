@@ -4,8 +4,9 @@
 //! (or `candyriya-protocol-registry` for per-version packet ids). Nothing is
 //! stubbed: the bytes go onto the socket verbatim, and the client fails on
 //! unexpected ids instead of silently ignoring them. The client owns one
-//! reusable read buffer, and never blocks longer than the socket itself
-//! would.
+//! reusable read buffer, never blocks longer than the socket itself would,
+//! and flips to zlib-framed packets the moment a Set Compression packet is
+//! observed — the way a real client does.
 //!
 //! Packet ids are resolved from the registry for the given protocol version;
 //! for protocol numbers the registry does not know, the ids of the newest
@@ -13,8 +14,9 @@
 //! the protocol number itself.
 
 use bytes::{Bytes, BytesMut};
+use candyriya_compression::Compression;
 use candyriya_protocol::{
-    Handshake, Intent, Packet, read_string, read_uuid, write_string, write_uuid,
+    Handshake, Intent, Packet, decode_varint, read_string, read_uuid, write_string, write_uuid,
 };
 use candyriya_protocol_registry::{PacketSlot, Registry};
 use tokio::net::TcpStream;
@@ -73,10 +75,17 @@ impl LoginSuccess {
 /// they compose into the full status / login flows used by the integration
 /// tests. The client never times anything out on its own — wrap calls in
 /// `tokio::time::timeout` when a negative wait is part of the assertion.
+///
+/// The client tracks framing compression the way a real one does: once a
+/// Set Compression packet is observed, every following frame in both
+/// directions is zlib-framed. The plain layout is used before that point.
+/// [`compression_threshold`](TestClient::compression_threshold) reports the
+/// negotiated threshold, or `None` while compression is off.
 pub struct TestClient {
     stream: TcpStream,
     buf: BytesMut,
     registry: Registry,
+    compression: Option<Compression>,
 }
 
 impl std::fmt::Debug for TestClient {
@@ -97,6 +106,7 @@ impl TestClient {
             stream,
             buf: BytesMut::with_capacity(4096),
             registry,
+            compression: None,
         })
     }
 
@@ -120,13 +130,10 @@ impl TestClient {
             intent,
         };
         let payload = handshake.encode_payload()?;
-        wire::write_packet(
-            &mut self.stream,
-            Packet {
-                id: Handshake::PACKET_ID,
-                payload,
-            },
-        )
+        self.write_frame(Packet {
+            id: Handshake::PACKET_ID,
+            payload,
+        })
         .await
     }
 
@@ -143,13 +150,10 @@ impl TestClient {
             protocol,
             PacketSlot::StatusClientboundResponse,
         )?;
-        wire::write_packet(
-            &mut self.stream,
-            Packet {
-                id: request_id,
-                payload: Bytes::new(),
-            },
-        )
+        self.write_frame(Packet {
+            id: request_id,
+            payload: Bytes::new(),
+        })
         .await?;
         let packet = self.read_packet("status response").await?;
         if packet.id != response_id {
@@ -169,13 +173,10 @@ impl TestClient {
     pub async fn status_ping(&mut self, protocol: i32, payload: i64) -> Result<i64, HarnessError> {
         let ping_id = protocol_id(&self.registry, protocol, PacketSlot::StatusServerboundPing)?;
         let pong_id = protocol_id(&self.registry, protocol, PacketSlot::StatusClientboundPong)?;
-        wire::write_packet(
-            &mut self.stream,
-            Packet {
-                id: ping_id,
-                payload: Bytes::copy_from_slice(&payload.to_be_bytes()),
-            },
-        )
+        self.write_frame(Packet {
+            id: ping_id,
+            payload: Bytes::copy_from_slice(&payload.to_be_bytes()),
+        })
         .await?;
         let packet = self.read_packet("status pong").await?;
         if packet.id != pong_id {
@@ -211,18 +212,21 @@ impl TestClient {
             let (msb, lsb) = uuid_from_name(name);
             write_uuid(msb, lsb, &mut payload);
         }
-        wire::write_packet(
-            &mut self.stream,
-            Packet {
-                id,
-                payload: payload.freeze(),
-            },
-        )
+        self.write_frame(Packet {
+            id,
+            payload: payload.freeze(),
+        })
         .await
     }
 
     /// Read and decode the login success packet sent in response to a login
     /// start. Fails on an unexpected packet id or a malformed body.
+    ///
+    /// A Set Compression packet arriving before the success (vanilla sends
+    /// one when the server compresses the link) is consumed transparently:
+    /// the client switches to the compressed frame layout, exactly like a
+    /// real client, and keeps waiting for the success. The negotiated
+    /// threshold is visible via [`compression_threshold`](Self::compression_threshold).
     pub async fn expect_login_success(
         &mut self,
         protocol: i32,
@@ -232,19 +236,53 @@ impl TestClient {
             protocol,
             PacketSlot::LoginClientboundLoginSuccess,
         )?;
-        let packet = self.read_packet("login success").await?;
-        if packet.id != success_id {
-            return Err(HarnessError::UnexpectedPacketId {
-                context: "login success",
-                expected: success_id,
-                actual: packet.id,
-            });
+        let set_compression_id = protocol_id(
+            &self.registry,
+            protocol,
+            PacketSlot::LoginClientboundSetCompression,
+        )?;
+        loop {
+            let packet = self.read_packet("login success").await?;
+            if packet.id == set_compression_id {
+                self.handle_set_compression(packet.payload)?;
+                continue;
+            }
+            if packet.id != success_id {
+                return Err(HarnessError::UnexpectedPacketId {
+                    context: "login success",
+                    expected: success_id,
+                    actual: packet.id,
+                });
+            }
+            let mut cursor: &[u8] = &packet.payload;
+            let uuid = read_uuid(&mut cursor)?;
+            let name = read_string(&mut cursor, 16)?;
+            let extra = Bytes::copy_from_slice(cursor);
+            return Ok(LoginSuccess { uuid, name, extra });
         }
-        let mut cursor: &[u8] = &packet.payload;
-        let uuid = read_uuid(&mut cursor)?;
-        let name = read_string(&mut cursor, 16)?;
-        let extra = Bytes::copy_from_slice(cursor);
-        Ok(LoginSuccess { uuid, name, extra })
+    }
+
+    /// The compression threshold negotiated with the server, or `None` while
+    /// the link is in the plain layout.
+    pub fn compression_threshold(&self) -> Option<i32> {
+        self.compression
+            .as_ref()
+            .map(|compression| compression.threshold)
+    }
+
+    /// Switch the client over to the compressed frame layout. Called when a
+    /// Set Compression packet is observed; `body` is its raw payload (a
+    /// VarInt threshold). A negative threshold disables compression and is a
+    /// no-op for the link state.
+    fn handle_set_compression(&mut self, body: Bytes) -> Result<(), HarnessError> {
+        let mut cursor: &[u8] = &body;
+        let threshold = decode_varint(&mut cursor)?;
+        self.compression = if threshold >= 0 {
+            Some(Compression::new(threshold, -1).map_err(HarnessError::from)?)
+        } else {
+            None
+        };
+        Ok(())
     }
 
     /// Send a raw frame. Explicit id, explicit payload bytes.
@@ -253,13 +291,10 @@ impl TestClient {
     /// frames, whose ids are deliberately not tracked by the registry. The
     /// loopback backend accepts them blindly and never replies.
     pub async fn send_frame(&mut self, packet_id: i32, payload: &[u8]) -> Result<(), HarnessError> {
-        wire::write_packet(
-            &mut self.stream,
-            Packet {
-                id: packet_id,
-                payload: Bytes::copy_from_slice(payload),
-            },
-        )
+        self.write_frame(Packet {
+            id: packet_id,
+            payload: Bytes::copy_from_slice(payload),
+        })
         .await
     }
 
@@ -282,13 +317,35 @@ impl TestClient {
     /// Read the next frame; `Ok(None)` on a clean end-of-stream. Used by
     /// teardown assertions (see the integration tests).
     pub async fn next_packet(&mut self) -> Result<Option<Packet>, HarnessError> {
-        wire::read_packet(&mut self.stream, &mut self.buf).await
+        self.read_frame().await
     }
 
     async fn read_packet(&mut self, context: &'static str) -> Result<Packet, HarnessError> {
-        wire::read_packet(&mut self.stream, &mut self.buf)
+        self.read_frame()
             .await?
             .ok_or(HarnessError::UnexpectedEof(context))
+    }
+
+    /// Write one frame in whatever layout the link is currently in (plain
+    /// before Set Compression, compressed after).
+    async fn write_frame(&mut self, packet: Packet) -> Result<(), HarnessError> {
+        match &self.compression {
+            Some(compression) => {
+                wire::write_packet_compressed(&mut self.stream, packet, compression).await
+            }
+            None => wire::write_packet(&mut self.stream, packet).await,
+        }
+    }
+
+    /// Read one frame in whatever layout the link is currently in (plain
+    /// before Set Compression, compressed after).
+    async fn read_frame(&mut self) -> Result<Option<Packet>, HarnessError> {
+        match &self.compression {
+            Some(compression) => {
+                wire::read_packet_compressed(&mut self.stream, &mut self.buf, compression).await
+            }
+            None => wire::read_packet(&mut self.stream, &mut self.buf).await,
+        }
     }
 }
 

@@ -38,8 +38,9 @@
 //!
 //! Loopback only. The backend binds `127.0.0.1`, the client connects to
 //! wherever the fixture tells it to, and nothing else on the network is
-//! reachable from here. There is no TLS, and compression/encryption are
-//! deliberately never negotiated.
+//! reachable from here. There is no TLS; framing compression is negotiated
+//! by the client (Set Compression flips the link), and encryption is never
+//! negotiated.
 #![forbid(unsafe_code)]
 
 mod backend;

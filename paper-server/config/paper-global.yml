@@ -1,0 +1,23 @@
+# Paper global configuration — smoke backend template.
+#
+# `_version` must match the Paper build the smoke runs against. Paper migrates
+# a file with only the sections below by filling in everything else with its
+# defaults, and it keeps the values set here (verified against
+# paper-1.21.1-133).
+#
+# `proxies.velocity.enabled` turns on modern forwarding enforcement: players
+# who log in directly (not through the proxy) are kicked. `secret` must match
+# the proxy's `forwarding.secret` file byte for byte — the smoke substitutes a
+# fresh per-run secret in place of the placeholder before first launch, so the
+# real value never lands in git.
+#
+# `proxies.velocity.online-mode` must equal the proxy's `online-mode`. The
+# proxy authenticates players (offline mode for the smoke), so this is false.
+
+_version: 29
+proxies:
+  velocity:
+    enabled: true
+    online-mode: false
+    secret: 'SMOKE_SECRET_PLACEHOLDER'
+    ping-passthrough: DISABLED

@@ -1,5 +1,6 @@
 //! Error type shared by the backend and the test client.
 
+use candyriya_compression::CompressionError;
 use candyriya_protocol::ProtocolError;
 use candyriya_protocol_registry::RegistryError;
 use thiserror::Error;
@@ -43,4 +44,8 @@ pub enum HarnessError {
     /// invariant violation, never a runtime condition.
     #[error("protocol registry error: {0}")]
     Registry(#[from] RegistryError),
+
+    /// The zlib layer of a compressed link rejected a frame.
+    #[error("compression error: {0}")]
+    Compression(#[from] CompressionError),
 }
