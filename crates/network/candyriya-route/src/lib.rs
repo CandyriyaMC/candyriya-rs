@@ -18,7 +18,7 @@
 //!
 //! # The `route` unit
 //!
-//! The [`unit`] module carries the supervision-tree contract for this
+//! The `unit` module carries the supervision-tree contract for this
 //! crate: the `RouteMsg`/`RouteResp` protocol, the `route` and
 //! `route.health` unit specs ([`route_spec`]/[`health_spec`]), and the
 //! shared store type the composition root and the reload path use. See the
