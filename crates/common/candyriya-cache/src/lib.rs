@@ -20,6 +20,14 @@
 //! | `cache/<plugin>`  | plugin cache                          |
 //! | `temp/<plugin>`   | plugin scratch space                  |
 //!
+//! ## Talking to the cache from another subsystem
+//!
+//! Cross-subsystem callers do not take a `&CacheManager`; they call the
+//! supervised `cache` unit through the tree ([`cache_spec`],
+//! [`cache_call`], [`CacheMsg`]). The unit serves the core namespace only
+//! and validates keys with the same rules cachegirl enforces — see the
+//! [`unit`] module for the protocol and its semantics.
+//!
 //! `<plugin>` is a validated plugin id (`[a-z0-9_.-]{1,32}`, no reserved
 //! device names) — see [`validate_plugin_id`]. One namespace per plugin
 //! per family, so quotas and cleanup passes are scoped per plugin.
@@ -147,10 +155,11 @@ use std::time::Duration;
 
 pub mod cache_entry;
 mod error;
+mod key;
 mod plugin_id;
+mod unit;
 
 pub use error::{Error, Result};
-
 // Selective re-exports: the handles and value types callers actually
 // name. cachegirl's manager-wide internals (registries, leases,
 // recovery policy) stay out so this crate stays the opinionated surface.
@@ -162,7 +171,9 @@ pub use cachegirl::{
     TempManager, Ttl,
 };
 
+pub use key::validate_cache_key;
 pub use plugin_id::validate_plugin_id;
+pub use unit::{CacheMsg, CacheResp, cache_call, cache_spec};
 
 /// The core namespace suffix; cache and temp families both use it.
 const CORE_NAMESPACE: &str = "candyriya";

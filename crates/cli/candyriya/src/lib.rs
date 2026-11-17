@@ -18,8 +18,9 @@
 //!    and the central [`TaskService`] with a fixed rayon blocking pool from
 //!    `[runtime] blocking-threads`. Every task in the process is registered
 //!    with the service by name; there are no ad-hoc spawns.
-//! 5. **Subsystems** — the cache manager (favicon uniquification), the
-//!    Prometheus exporter (only when `[metrics] prometheus = true`), the
+//! 5. **Subsystems** — the cache manager (fronting the supervised `cache`
+//!    unit every runtime cache read/write goes through), the Prometheus
+//!    exporter (only when `[metrics] prometheus = true`), the
 //!    Mojang/offline session validators selected from `online-mode`, the
 //!    routing registry, the command tree and the interactive console REPL.
 //!    Routing reads go to the `route` unit through the same IPC plane —
@@ -34,7 +35,9 @@
 //!    already-exited unit once the tree is up.
 //! 6. **Lifecycle** — once the loader is done, the phases that keep
 //!    running boot as units in `init`: `config` (the configuration source
-//!    of truth), `proxy.accept` (long-lived, the unit body drives the
+//!    of truth), `cache` (the supervised owner of the live cache manager,
+//!    a separate record from the `cache.manager` bootstrap adoption),
+//!    `proxy.accept` (long-lived, the unit body drives the
 //!    listener), `stats.every-60s` and `players.roster-refresh`
 //!    (periodic), `console` (the interactive REPL) and, at shutdown,
 //!    `cache.shutdown` and `metrics.shutdown` (one-shot finalizers, the
@@ -65,7 +68,7 @@ use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use candyriya_auth::{AuthConfig, AuthMode, MojangSessionValidator, OfflineSessionValidator};
-use candyriya_cache::CacheManager;
+use candyriya_cache::{CacheManager, cache_spec};
 use candyriya_command::{CommandRegistry, CommandState, ShutdownHandle};
 use candyriya_config::{Config, ConfigStore, DEFAULT_CONFIG_TOML};
 use candyriya_i18n::I18n;
@@ -386,9 +389,11 @@ async fn cascade_shutdown(
 
     // stop the serving units through the tree, newest first: console,
     // players.roster-refresh, stats.every-60s, proxy.accept, route.health,
-    // route. route.health is a child of route, so cancelling it before route
-    // keeps the order; when route exits the child re-parents to the root
-    // and the wait below reaps it there
+    // cache, route. route.health is a child of route, so cancelling it before
+    // route keeps the order; the cache unit is cancelled in the sweep, so it
+    // is gone by the time the `cache.shutdown` finalizer closes the manager.
+    // when route exits the child re-parents to the root and the wait below
+    // reaps it there
     for (pid, _) in boot_units.iter().rev() {
         if let Err(error) = tree.cancel(*pid) {
             debug!(%error, %pid, "unit already gone in the cancel sweep");
@@ -657,7 +662,8 @@ async fn run_async(
         Arc::new(service.clone()) as Arc<dyn std::any::Any + Send + Sync>,
     );
 
-    // ---- cache (favicon uniquification goes through here)
+    // ---- the cache manager (the `cache` unit spawned below serves the
+    // runtime reads; plugins borrow the manager for their quotas)
     let cache = match CacheManager::new(data_dir) {
         Ok(cache) => {
             let cache = Arc::new(cache);
@@ -685,15 +691,46 @@ async fn run_async(
         Arc::clone(&cache) as Arc<dyn std::any::Any + Send + Sync>,
     );
 
-    let favicon_cache: Option<Arc<FaviconCache>> =
-        match FaviconCache::new(&cache, Duration::from_secs(3600)) {
-            Ok(favicon_cache) => Some(Arc::new(favicon_cache)),
-            Err(error) => {
-                warn!(%error, "favicon cache unavailable; favicons are read from disk per ping");
-                None
-            }
-        };
-    warm_favicon(&config, favicon_cache.as_deref());
+    // ---- the cache unit: the supervised owner of the live manager. The
+    // loader adopted `cache.manager` above as an already-exited bootstrap
+    // step; this is the real, long-lived unit that serves runtime cache
+    // operations — the adopt marker and the running unit are separate
+    // records in the tree. Always spawned: an empty cache is an honest
+    // state (callers see misses), not a reason to run without the unit.
+    let cache_pid = match tree.spawn_unit(Pid::INIT, cache_spec(Arc::clone(&cache))) {
+        Ok(pid) => {
+            info!(pid = %pid, "cache unit spawned");
+            pid
+        }
+        Err(error) => {
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &config_unwind,
+                CliError::Runtime(format!("failed to spawn cache: {error}")),
+            )
+            .await);
+        }
+    };
+    // the cache unit joins the early boot phase like config and route: a
+    // boot abort after this point unwinds it alongside them
+    let config_unwind = [
+        (config_pid, "config"),
+        (route_pid, "route"),
+        (cache_pid, "cache"),
+    ];
+
+    // the favicon handle is a thin IPC shim over the cache unit: the proxy
+    // holds `Init + cache_pid`, never a namespace handle. Always wired at
+    // boot; the `Option` is the wiring contract the reload path was built
+    // against. TTL-bounded so a `[motd-favicon]` edit is picked up without
+    // a restart.
+    let favicon_cache: Option<Arc<FaviconCache>> = Some(Arc::new(FaviconCache::new(
+        tree.clone(),
+        cache_pid,
+        Duration::from_secs(3600),
+    )));
+    warm_favicon(&config, favicon_cache.as_deref()).await;
 
     // ---- metrics (off unless [metrics] prometheus = true)
     let metrics_addr = if config.metrics.prometheus {
@@ -865,6 +902,7 @@ async fn run_async(
         registry.clone(),
         data_dir,
         plugin_locales,
+        tokio::runtime::Handle::current(),
     );
     let command_registry =
         CommandRegistry::new(command_state, shutdown.clone()).with_reload(reload_fn);
@@ -923,9 +961,15 @@ async fn run_async(
     // abort machinery needs them) and ride in the list so a runtime
     // collapse is caught by the same watchdog as a serving unit dying;
     // route.health rides along too and is cancelled before its parent
-    // (reverse spawn order).
-    let mut boot_units: Vec<(Pid, &'static str)> =
-        vec![(config_pid, "config"), (route_pid, "route")];
+    // (reverse spawn order). The cache unit rides in the list as well: a
+    // unit that dies permanently mid-run is an operator-relevant event,
+    // the same trade config and route make, and the sweep must cancel it
+    // before the cache.shutdown finalizer closes the manager.
+    let mut boot_units: Vec<(Pid, &'static str)> = vec![
+        (config_pid, "config"),
+        (route_pid, "route"),
+        (cache_pid, "cache"),
+    ];
     if let Some((pid, name)) = health_boot {
         boot_units.push((pid, name));
     }
@@ -963,10 +1007,11 @@ async fn run_async(
         }
     })
     .with_service_kind(ServiceKind::Accept)
-    // the accept unit reads the configuration; sibling units never reach
-    // it through the subtree rule, so the grant rides its spawn like an
-    // inherited fd
-    .with_grant(config_pid);
+    // the accept unit reads the configuration and the cache; sibling units
+    // never reach them through the subtree rule, so the grants ride its
+    // spawn like inherited fds
+    .with_grant(config_pid)
+    .with_grant(cache_pid);
     match tree.spawn_unit(Pid::INIT, accept_spec) {
         Ok(pid) => {
             boot_units.push((pid, "proxy.accept"));
@@ -1283,10 +1328,13 @@ async fn log_stats(state: &ProxyState) {
 
 /// Load the configured favicon into the cache unconditionally.
 ///
-/// Used by `/candyriya reload` to drop a stale cached icon. Returns
-/// `true` when the cache now holds the configured icon; `false` keeps
+/// Used by `/candyriya reload` to drop a stale cached icon and by the boot
+/// warm-up. The reload closure runs synchronously on the REPL's blocking
+/// thread, so that caller drives this future with a blocking hand-off (the
+/// same pattern the directory uses); the async boot path awaits it directly.
+/// Returns `true` when the cache now holds the configured icon; `false` keeps
 /// whatever the cache held before (or the embedded fallback).
-fn refresh_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) -> bool {
+async fn refresh_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) -> bool {
     const MAX_FAVICON_BYTES: u64 = 1024 * 1024;
     let Some(cache) = favicon_cache else {
         return false;
@@ -1296,7 +1344,7 @@ fn refresh_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) -> boo
         Ok(bytes) => {
             let magic_ok = bytes.len() >= 8 && bytes.starts_with(b"\x89PNG\r\n\x1a\n");
             if magic_ok && (bytes.len() as u64) <= MAX_FAVICON_BYTES {
-                cache.put(&bytes);
+                cache.put(&bytes).await;
                 info!(path = %path.display(), bytes = bytes.len(), "favicon loaded and cached");
                 true
             } else {
@@ -1329,6 +1377,11 @@ fn refresh_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) -> boo
 /// `servers.names` host service and the favicon are only swapped when
 /// their own rebuild succeeds, so a half-applied reload cannot leak out.
 /// Returns an operator-facing note on success.
+///
+/// The favicon swap reaches the `cache` unit through the tree: this phase
+/// runs synchronously on the REPL's blocking thread, so the IPC round trip
+/// is driven inline with a blocking hand-off — the same bridge the command
+/// directory uses for its config and route calls.
 // ipc-migration: Config.Reload / Route.Replace / I18n.Reload — the phase swaps shared state straight across subsystem boundaries
 fn reload_config_phase(
     store: &ConfigStore,
@@ -1337,6 +1390,7 @@ fn reload_config_phase(
     favicon_cache: Option<&FaviconCache>,
     locales: &candyriya_command::Locales,
     services: &ServiceRegistry,
+    runtime: &tokio::runtime::Handle,
 ) -> Result<String, String> {
     let config = store
         .reload(config_path)
@@ -1384,7 +1438,11 @@ fn reload_config_phase(
         }
     }
 
-    if refresh_favicon(&config, favicon_cache) {
+    // the favicon rides the tree: driven inline on the blocking REPL
+    // thread, exactly the way the directory drives its config and route
+    // calls; a failure of the cache unit degrades to the disk read and the
+    // embedded fallback, never to a failed ping
+    if runtime.block_on(refresh_favicon(&config, favicon_cache)) {
         notes.push("favicon refreshed".to_owned());
     }
 
@@ -1475,6 +1533,9 @@ fn reload_plugins_phase(
 /// The closure is synchronous and total: every failure is reported through
 /// the returned report, never panicked. Scope selects the phases; the
 /// default scope is both, config first.
+///
+/// `runtime` is the handle the closure uses to drive its IPC calls inline —
+/// the closure runs on the REPL's blocking thread, never on an async worker.
 // ipc-migration: Config.Reload / Plugins.Reload — ReloadFn runs synchronously on the REPL's blocking thread
 #[allow(clippy::too_many_arguments)]
 fn build_reload_fn(
@@ -1488,6 +1549,7 @@ fn build_reload_fn(
     services: ServiceRegistry,
     data_dir: &Path,
     plugin_locales: SharedLocales,
+    runtime: tokio::runtime::Handle,
 ) -> candyriya_command::ReloadFn {
     use candyriya_command::{ReloadReport, ReloadScope};
 
@@ -1504,6 +1566,7 @@ fn build_reload_fn(
                 favicon_cache.as_deref(),
                 &locales,
                 &services,
+                &runtime,
             )
         });
         let plugins = plugin_phase.then(|| {
@@ -1522,15 +1585,15 @@ fn build_reload_fn(
 }
 
 /// Cache the configured favicon on first use; fall back to the embedded icon.
-fn warm_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) {
+async fn warm_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) {
     let Some(cache) = favicon_cache else {
         return; // no cache: the status handler reads from disk per request
     };
-    if cache.get().is_some() {
+    if cache.get().await.is_some() {
         debug!("favicon already present in the cache");
         return;
     }
-    let _ = refresh_favicon(config, Some(cache));
+    let _ = refresh_favicon(config, Some(cache)).await;
 }
 
 /// Build the locale handle the proxy uses to render kick screens for

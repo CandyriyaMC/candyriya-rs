@@ -65,9 +65,10 @@ pub struct ProxyState {
     /// semaphore the accept loop creates from `[advanced]
     /// max-connections`.
     pub limiter: ConnectionLimiter,
-    /// Optional binary favicon cache (cachegirl). `None` by default; the
-    /// composition root wires it when it owns a `CacheManager`. Without
-    /// one, favicons are read from disk per ping.
+    /// Optional binary favicon cache, backed by the `cache` unit in the
+    /// supervision tree. `None` by default; the composition root wires it
+    /// once it owns the cache unit's pid. Without one, favicons are read
+    /// from disk per ping.
     pub favicon_cache: Option<Arc<FaviconCache>>,
     /// Authentication endpoint configuration: the session-server URL and
     /// timeout used for the online-mode `hasJoined` verify. Ignored in

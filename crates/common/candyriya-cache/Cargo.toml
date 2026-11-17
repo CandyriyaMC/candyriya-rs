@@ -15,7 +15,13 @@ exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 
 [dependencies]
 cachegirl = { workspace = true }
+candyriya-init = { version = "0.1.0", path = "../../common/candyriya-init" }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+candyriya-scheduler = { version = "0.1.0", path = "../../common/candyriya-scheduler" }
+tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

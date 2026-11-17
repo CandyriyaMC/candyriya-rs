@@ -335,7 +335,11 @@ name = "candyriya-cache"
 version = "0.1.1"
 dependencies = [
  "cachegirl",
+ "candyriya-init",
+ "candyriya-scheduler",
+ "tempfile",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

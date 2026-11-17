@@ -605,18 +605,19 @@ async fn a_configured_favicon_is_served_from_the_cachegirl_cache() {
         .collect();
     std::fs::write(&icon_path, &icon_a).expect("icon write");
 
-    let cache_root = tempfile::tempdir().expect("cache root");
-    let manager = candyriya_cache::CacheManager::new(cache_root.path()).expect("cache manager");
-    let favicon_cache = Arc::new(
-        candyriya_proxy::FaviconCache::new(&manager, Duration::from_secs(60))
-            .expect("favicon cache"),
-    );
-
     let config = Config {
         motd_favicon: icon_path.to_str().expect("utf-8 path").to_owned(),
         ..Default::default()
     };
-    let mut state = common::state(config);
+    let cache_root = tempfile::tempdir().expect("cache root");
+    let (state, init, cache_pid, manager) = common::state_with_cache(config, cache_root.path());
+    let favicon_cache = Arc::new(candyriya_proxy::FaviconCache::new(
+        init,
+        cache_pid,
+        Duration::from_secs(60),
+    ));
+
+    let mut state = state;
     state.favicon_cache = Some(favicon_cache);
     let state = Arc::new(state);
     let service = test_service();
