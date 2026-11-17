@@ -22,10 +22,11 @@ The short version, before the details:
 
 - **Implemented and merged:** WASM loading, sandbox limits, dependency
   resolution, the typed event model, the event dispatcher, hot-reload
-  primitives, the service registry.
+  primitives, the service registry, and `/candyriya reload`.
 - **Not wired into the proxy yet:** events are not dispatched into plugins
-  during a real connection; plugins are loaded once at startup; no host
-  functions are registered; `/candyriya reload` does not exist.
+  during a real connection; plugins are loaded at startup and on demand via
+  `/candyriya reload` (no filesystem watcher is armed in the CLI today);
+  no host functions are registered.
 - **Not enforced:** the `permissions` list in `plugin.toml` is validated
   structurally but never checked against any action.
 
@@ -478,11 +479,11 @@ Start the proxy. At startup you will see:
   either.
 
 That is all. **`/candyriya` does not list plugins today** - the command
-set is `info|servers|switch|end`, and the plugin set is not surfaced
-through it. Restarting the proxy is the only way to (re)load a plugin
-today; see [Hot reload](#hot-reload). If a plugin fails to load, fix the
-files and restart - you will see either the issue line, or `loaded`
-increment.
+set is `info|servers|switch|end|reload`, and the plugin set is not surfaced
+through it. `/candyriya reload plugins` is the way to (re)load a plugin
+without a full restart; see [Hot reload](#hot-reload). If a plugin fails to
+load, fix the files (or, for a new plugin, place them) and reload - you will
+see either the issue line, or `loaded` increment.
 
 ## Events
 
@@ -739,20 +740,19 @@ Notes worth internalizing:
 
 ## Hot reload
 
-**Status, plainly: `/candyriya reload` does not exist yet.** The proxy
-loads plugins once at startup (`plugin startup load complete` in the
-logs); the composition root's own comment reads "plugins: startup load
-only; the reload path lands later". The command set is
-`info|servers|switch|end`, and there is no plugin reload wiring in the
-CLI. Until the reload command lands, the only way to (re)load a plugin is
-to restart the proxy.
+**Status, plainly: `/candyriya reload` exists and works.** It runs the
+config phase and the plugin phase (either alone: `/candyriya reload
+config`, `/candyriya reload plugins`; default is both, config first).
+The plugin phase re-reads every plugin from disk without a restart and
+reports a summary to the invoker: `N plugins reloaded, M failed` (green on
+full success, red otherwise), plus one line per problem. The command never
+crashes the host - a failed reload leaves the running plugin set in place.
 
-What *does* exist is the machinery the reload command will drive - the
-staging-first-then-swap design, implemented and tested in
-`candyriya-plugin`, not yet exposed:
+The reload command drives the staging-first-then-swap machinery from
+`candyriya-plugin`, in two passes:
 
-- **`PluginReloader::reload(id)`** re-reads one plugin from disk and swaps
-  it in, like this:
+- **Pass A — running plugins.** Every id already in the set is reloaded
+  from disk exactly as `PluginReloader::reload(id)` does for one plugin:
 
   1. Re-read and re-validate the manifest (the id must still match the
      directory); find `<id>.wasm` or `lib.wasm`. No staging of anything →
@@ -776,24 +776,36 @@ staging-first-then-swap design, implemented and tested in
 
   A plugin in `Failed` state whose files are fixed is resurrected the same
   way. Deleting a plugin's files does **not** unload the running plugin -
-  deleting only ever affects the next load, never unloads a live one.
+  deleting only ever affects the next load, never unloads a live one; on
+  reload such a plugin is reported as kept, not as failed.
+
+- **Pass B — newcomers.** The `plugins/` and `libraries/` roots are
+  re-scanned. Any discovered id that is not already in the set is carried
+  through the dependency resolver and registered, libraries first, in
+  resolved order; newcomers are appended after the existing set. A broken
+  new plugin lands in the report as failed (never replacing a running
+  instance — there was none) and its issues are logged. A discovery or
+  dependency-resolution failure registers *nothing* new; the running set
+  keeps whatever pass A produced. See `PluginReloader::reload_all` for the
+  exact report shape (`reloaded` / `loaded` / `failed` / `new_failed` /
+  `missing` / `issues`).
 
 - **`Watch`** is a recursive `notify` watcher over `plugins/`. Any
   create/modify/remove turns into one `plugin-reload-<id>` task on the
   scheduler per affected id (250 ms debounce per id; bursts are dropped).
   Each task calls `PluginReloader::reload` and logs the outcome - a failed
-  stage logs an error and the running plugin stays untouched.
+  stage logs an error and the running plugin stays untouched. Note the CLI
+  does not arm a `Watch` today; reload is operator-triggered.
 
 - Quotas and plugin data directories live outside the swap: the plugin's
   `config/<id>/` directory and its cache namespace survive a reload, as
   does its disabled state.
 
-Failure modes you can rely on once wired: a mid-edit save keeps the old
-instance; a broken wasm fails the stage and the old plugin serves on; the
-hot-reloaded plugin must re-register anything it exported (host functions
-notwithstanding - plugin-owned services are revoked and are not
-auto-restored; that is the plugin's job at startup, when the host-function
-milestone lands).
+Failure modes you can rely on: a mid-edit save keeps the old instance; a
+broken wasm fails the stage and the old plugin serves on; the hot-reloaded
+plugin must re-register anything it exported (host functions notwithstanding
+- plugin-owned services are revoked and are not auto-restored; that is the
+plugin's job at startup, when the host-function milestone lands).
 
 ## Authoring in Rust
 

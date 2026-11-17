@@ -29,7 +29,8 @@ landed crate by crate.
 - Velocity-style modern forwarding with HMAC-signed player info
 - Forced hosts and try/fallback routing with backend health checking
 - Asynchronous hot path built on Tokio, with no `unsafe` code
-- Extensible plugin system over WebAssembly, a permission engine, and a
+- Extensible plugin system over WebAssembly (loaded at startup and hot-reloadable
+  with `/candyriya reload`), a permission engine, and a
   cron-style task scheduler (rolling out incrementally)
 
 ## Documentation

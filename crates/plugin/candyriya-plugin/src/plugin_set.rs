@@ -68,6 +68,20 @@ impl PluginSet {
         self.inner.read().contains_key(id)
     }
 
+    /// Insert `plugin` at the end of the dispatch order.
+    ///
+    /// Used by hot reload to register brand-new plugins discovered on disk
+    /// after startup. Returns `false` (and overwrites nothing) when an
+    /// entry for the id is already present. Load order of the existing
+    /// entries is preserved; the newcomer is dispatched after them — a
+    /// brand-new plugin never runs before the set it was discovered for.
+    pub fn insert(&self, plugin: LibraryPlugin) -> bool {
+        self.inner
+            .write()
+            .insert(plugin.id().to_owned(), plugin)
+            .is_none()
+    }
+
     /// The lifecycle state of `id`, if present.
     pub fn state(&self, id: &str) -> Option<PluginState> {
         self.inner.read().get(id).map(|p| p.state().clone())

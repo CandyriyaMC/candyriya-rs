@@ -3,8 +3,9 @@
 //! The command layer never touches proxy internals directly, so it asks this
 //! directory for a consistent view at invocation time, computed from:
 //!
-//! - `[servers]` / `[forced-hosts]` in the configuration for the configured
-//!   backends and their `try`-chain priority,
+//! - the live [`ConfigStore`] (re-read per call, so `/candyriya reload`
+//!   is visible immediately) for the configured backends and their
+//!   `try`-chain priority,
 //! - the shared proxy state for live connection counters,
 //! - the routing registry (when wired) for per-backend health.
 //!
@@ -19,12 +20,12 @@ use candyriya_command::{
     BackendSnapshot, BackendState as CmdBackendState, ConnectionStats, NetworkDirectory,
     OnlinePlayer, ProxySnapshot, ServerInfo,
 };
-use candyriya_config::Config;
+use candyriya_config::ConfigStore;
 use candyriya_proxy::ProxyState;
 
 /// Read-only live view over the proxy for the command layer.
 pub struct CliDirectory {
-    config: Arc<Config>,
+    config: Arc<ConfigStore>,
     state: Arc<ProxyState>,
     config_name: String,
     log_level: String,
@@ -40,10 +41,10 @@ impl std::fmt::Debug for CliDirectory {
 }
 
 impl CliDirectory {
-    /// Build the view from the shared proxy state and configuration.
+    /// Build the view from the shared proxy state and the live config store.
     #[must_use]
     pub fn new(
-        config: Arc<Config>,
+        config: Arc<ConfigStore>,
         state: Arc<ProxyState>,
         config_name: String,
         log_level: String,
@@ -69,8 +70,10 @@ fn route_state(state: Option<candyriya_route::BackendState>) -> CmdBackendState 
 
 impl NetworkDirectory for CliDirectory {
     fn servers(&self) -> Vec<ServerInfo> {
-        let mut servers: Vec<ServerInfo> = self
-            .config
+        // the store hands out a point-in-time snapshot; reload swaps it
+        // atomically, so this always reflects the latest committed config
+        let config = self.config.get();
+        let mut servers: Vec<ServerInfo> = config
             .servers
             .try_servers
             .iter()
@@ -79,15 +82,14 @@ impl NetworkDirectory for CliDirectory {
             .collect();
         // servers configured but not present in `try`: listed after the chain,
         // alphabetically, so the output is deterministic
-        let mut rest: Vec<&String> = self
-            .config
+        let mut rest: Vec<&String> = config
             .servers
             .servers
             .keys()
-            .filter(|name| !self.config.servers.try_servers.contains(name))
+            .filter(|name| !config.servers.try_servers.contains(name))
             .collect();
         rest.sort();
-        let base = self.config.servers.try_servers.len();
+        let base = config.servers.try_servers.len();
         servers.extend(
             rest.into_iter()
                 .enumerate()
@@ -102,17 +104,13 @@ impl NetworkDirectory for CliDirectory {
     }
 
     fn snapshot(&self) -> ProxySnapshot {
-        let mut backends: Vec<BackendSnapshot> = self
-            .config
+        let config = self.config.get();
+        let mut backends: Vec<BackendSnapshot> = config
             .servers
             .servers
             .iter()
             .map(|(name, address)| {
-                let state = self
-                    .state
-                    .router
-                    .as_deref()
-                    .and_then(|router| router.state(name));
+                let state = self.state.router().and_then(|router| router.state(name));
                 BackendSnapshot {
                     name: name.clone(),
                     address: address.clone(),

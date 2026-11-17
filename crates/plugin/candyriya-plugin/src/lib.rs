@@ -26,7 +26,8 @@
 //!   into every loaded plugin, in load order, with a per-plugin timeout.
 //! - [`PluginReloader`] / [`Watch`] — hot reload primitives: swap a
 //!   plugin for its on-disk state, watch `plugins/` and trigger reloads
-//!   through the task service.
+//!   through the task service. [`PluginReloader::reload_all`] re-reads
+//!   every running plugin and picks up newcomers under the roots.
 //!
 //! Not implemented here yet (by design, they land next): host functions and
 //! the task API. No host functions are registered today. Sandbox limits for
@@ -57,7 +58,7 @@ pub use crate::dispatch::{
 };
 pub use crate::error::PluginError;
 pub use crate::host_state::HostState;
-pub use crate::hot_reload::{HotReloadError, PluginReloader, ReloadReport, Watch};
+pub use crate::hot_reload::{HotReloadError, PluginReloader, ReloadAllReport, ReloadReport, Watch};
 pub use crate::instance::PluginInstance;
 pub use crate::library_plugin::{LibraryPlugin, PluginOrigin, PluginState};
 pub use crate::limits::{

@@ -111,6 +111,57 @@ pub trait ProxyEffects: OutputSender {
     fn switch(&self, request: SwitchRequest) -> SwitchResult;
 }
 
+/// Which phases of a reload the invoker asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReloadScope {
+    /// Both phases, config first: `/candyriya reload`.
+    All,
+    /// The configuration phase only: `/candyriya reload config`.
+    Config,
+    /// The plugin phase only: `/candyriya reload plugins`.
+    Plugins,
+}
+
+/// What the plugin phase of a reload did, in one operator-facing record.
+///
+/// `reloaded` counts both in-place reloads of running plugins and
+/// newly discovered plugins that were registered — everything that ended
+/// up (re)loaded. `failed` counts everything that did not, including
+/// stage failures and dependency-resolution drops; `details` carries one
+/// plain-text line per problem (escaped at render time).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginPhaseReport {
+    /// Plugins that ended up (re)loaded by this reload.
+    pub reloaded: usize,
+    /// Plugins that failed to load or reload.
+    pub failed: usize,
+    /// One line per problem, plain text. Renderers must escape these.
+    pub details: Vec<String>,
+}
+
+/// The outcome of one `/candyriya reload` invocation, phase by phase.
+///
+/// A phase set to `None` was skipped by the requested scope. The config
+/// phase reports `Ok(note)` on success (the note is an operator-facing
+/// detail such as how many backends were re-registered — the command
+/// layer does not print it) and `Err(reason)` on failure; a failed
+/// config phase leaves the running configuration untouched. The plugin
+/// phase keeps its running set on failure by contract of the reloader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReloadReport {
+    /// Config phase outcome; `None` when skipped.
+    pub config: Option<Result<String, String>>,
+    /// Plugin phase outcome; `None` when skipped.
+    pub plugins: Option<PluginPhaseReport>,
+}
+
+/// The closure the composition root wires in to perform a reload.
+///
+/// Called synchronously from the command handler with the requested
+/// scope; must be total — never panic, and report every failure through
+/// the returned [`ReloadReport`] instead of aborting the process.
+pub type ReloadFn = Arc<dyn Fn(ReloadScope) -> ReloadReport + Send + Sync>;
+
 /// Shared one-way shutdown flag.
 ///
 /// `/candyriya end` flips it exactly once; the composition root (cli)

@@ -15,8 +15,9 @@ use uuid::Uuid;
 
 use candyriya_command::{
     BackendSnapshot, BackendState, CommandError, CommandRegistry, CommandSource, CommandState,
-    ConnectionStats, Dispatcher, Locales, NetworkDirectory, OnlinePlayer, PlayerRef, ProxyEffects,
-    ProxySnapshot, ServerInfo, ShutdownHandle, SwitchRequest, SwitchResult,
+    ConnectionStats, Dispatcher, Locales, NetworkDirectory, OnlinePlayer, PlayerRef,
+    PluginPhaseReport, ProxyEffects, ProxySnapshot, ReloadReport, ReloadScope, ServerInfo,
+    ShutdownHandle, SwitchRequest, SwitchResult,
 };
 use candyriya_i18n::I18n;
 use candyriya_permissions::{Grant, PermissionNode};
@@ -193,6 +194,14 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with(directory: TestDirectory, capture: Capture) -> Fixture {
+    fixture_with_reload_fn(directory, capture, None)
+}
+
+fn fixture_with_reload_fn(
+    directory: TestDirectory,
+    capture: Capture,
+    reload: Option<candyriya_command::ReloadFn>,
+) -> Fixture {
     let capture = Arc::new(capture);
     let shutdown = ShutdownHandle::new();
     let locales = Locales::new(
@@ -206,6 +215,10 @@ fn fixture_with(directory: TestDirectory, capture: Capture) -> Fixture {
         effects,
     };
     let registry = CommandRegistry::new(state, shutdown.clone());
+    let registry = match reload {
+        Some(reload) => registry.with_reload(reload),
+        None => registry,
+    };
     let dispatcher = registry.dispatcher().expect("built-in commands build");
     Fixture {
         dispatcher,
@@ -925,4 +938,204 @@ fn ex_girl_locale_renders_russian() {
         "russian shutdown line, got {:?}",
         fixture.lines()
     );
+}
+
+// --- /candyriya reload ---
+
+fn ok_report() -> ReloadReport {
+    ReloadReport {
+        config: Some(Ok("2 backends re-registered".to_owned())),
+        plugins: Some(PluginPhaseReport {
+            reloaded: 1,
+            failed: 0,
+            details: vec![],
+        }),
+    }
+}
+
+fn reload_fixture(report: ReloadReport, scopes: Arc<Mutex<Vec<ReloadScope>>>) -> Fixture {
+    let directory = fixture_directory();
+    let reload: candyriya_command::ReloadFn = Arc::new(move |scope| {
+        scopes.lock().expect("scopes lock").push(scope);
+        report.clone()
+    });
+    fixture_with_reload_fn(directory, Capture::switched(), Some(reload))
+}
+
+#[test]
+fn reload_denied_for_deny_all_player_and_does_not_call_the_hook() {
+    let scopes = Arc::new(Mutex::new(Vec::new()));
+    let fixture = reload_fixture(ok_report(), Arc::clone(&scopes));
+
+    let err = fixture
+        .dispatcher
+        .execute("/candyriya reload", deny_all_player())
+        .expect_err("deny-all player cannot reload");
+    let CommandError::Brigadier(syntax) = err else {
+        panic!("expected a brigadier error, got {err:?}");
+    };
+    // brigadier renders a permission-gated node as an argument failure,
+    // not as "unknown command" — to the invoker the subtree is simply
+    // not there (the same contract as every gated `/candyriya` node)
+    assert_eq!(syntax.kind(), &BuiltInError::DispatcherUnknownArgument);
+
+    // the scoped forms sit behind the same gate
+    for input in ["/candyriya reload config", "/candyriya reload plugins"] {
+        let err = fixture
+            .dispatcher
+            .execute(input, deny_all_player())
+            .expect_err("deny-all player cannot reload");
+        assert!(matches!(err, CommandError::Brigadier(_)));
+    }
+    assert!(scopes.lock().expect("scopes lock").is_empty());
+    assert!(fixture.lines().is_empty());
+}
+
+#[test]
+fn reload_prints_both_phase_summaries_and_returns_one() {
+    let scopes = Arc::new(Mutex::new(Vec::new()));
+    let fixture = reload_fixture(ok_report(), Arc::clone(&scopes));
+
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya reload", CommandSource::console())
+        .expect("reload executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(
+        joined.contains("config reloaded"),
+        "config line in {joined}"
+    );
+    assert!(
+        joined.contains("1 plugins reloaded, 0 failed"),
+        "plugins line in {joined}"
+    );
+    assert_eq!(
+        scopes.lock().expect("scopes lock").as_slice(),
+        [ReloadScope::All]
+    );
+}
+
+#[test]
+fn reload_config_only_and_plugins_only() {
+    let scopes = Arc::new(Mutex::new(Vec::new()));
+    let fixture = reload_fixture(ok_report(), Arc::clone(&scopes));
+
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya reload config", CommandSource::console())
+        .expect("reload config executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("config reloaded"));
+    assert!(!joined.contains("plugins reloaded"));
+
+    let before = fixture.lines().len();
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya reload plugins", CommandSource::console())
+        .expect("reload plugins executes");
+    assert_eq!(code, 1);
+    // the capture accumulates from the previous call, so only the fresh
+    // lines decide what this invocation printed
+    let joined = fixture.lines()[before..].join("\n");
+    assert!(joined.contains("1 plugins reloaded, 0 failed"));
+    assert!(!joined.contains("config reloaded"));
+
+    assert_eq!(
+        scopes.lock().expect("scopes lock").as_slice(),
+        [ReloadScope::Config, ReloadScope::Plugins]
+    );
+}
+
+#[test]
+fn reload_config_failure_is_reported_and_plugins_still_run() {
+    let report = ReloadReport {
+        config: Some(Err("expected `[servers]`".to_owned())),
+        plugins: Some(PluginPhaseReport {
+            reloaded: 2,
+            failed: 1,
+            details: vec!["broken: wasm stage failed".to_owned()],
+        }),
+    };
+    let fixture = reload_fixture(report, Arc::new(Mutex::new(Vec::new())));
+
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya reload", CommandSource::console())
+        .expect("reload executes");
+    assert_eq!(code, 0);
+    let joined = fixture.lines().join("\n");
+    assert!(
+        joined.contains("Configuration reload failed"),
+        "config failure line in {joined}"
+    );
+    assert!(
+        joined.contains("expected `[servers]`"),
+        "failure reason in {joined}"
+    );
+    assert!(
+        joined.contains("2 plugins reloaded, 1 failed"),
+        "plugins summary in {joined}"
+    );
+    assert!(
+        joined.contains("broken: wasm stage failed"),
+        "failure detail in {joined}"
+    );
+}
+
+#[test]
+fn reload_without_wiring_reports_unavailable() {
+    let fixture = fixture();
+
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya reload", CommandSource::console())
+        .expect("reload answers");
+    assert_eq!(code, 0);
+    assert!(
+        fixture
+            .lines()
+            .join("\n")
+            .contains("Reload is not wired in this build.")
+    );
+}
+
+#[test]
+fn reload_swaps_the_config_store_atomically() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("candyriya.toml");
+    std::fs::write(
+        &path,
+        "config-version = \"0.1\"\nbind = \"127.0.0.1:25565\"\nmotd = \"<green>before\"\nonline-mode = false\n[protocol]\nauto-update = false\n",
+    )
+    .expect("write v1");
+    let store = Arc::new(candyriya_config::ConfigStore::from_path(&path).expect("v1 loads"));
+    assert_eq!(store.get().motd, "<green>before");
+
+    // the file changes underneath; the store must observe it after reload
+    std::fs::write(
+        &path,
+        "config-version = \"0.1\"\nbind = \"127.0.0.1:25565\"\nmotd = \"<aqua>after\"\nonline-mode = false\n[protocol]\nauto-update = false\n",
+    )
+    .expect("write v2");
+
+    let store_for_closure = Arc::clone(&store);
+    let path_for_closure = path.clone();
+    let reload: candyriya_command::ReloadFn = Arc::new(move |_scope| ReloadReport {
+        config: Some(
+            store_for_closure
+                .reload(&path_for_closure)
+                .map(|_| "1 backends re-registered".to_owned())
+                .map_err(|error| error.to_string()),
+        ),
+        plugins: None,
+    });
+    let fixture = fixture_with_reload_fn(fixture_directory(), Capture::switched(), Some(reload));
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya reload config", CommandSource::console())
+        .expect("reload config executes");
+    assert_eq!(code, 1);
+    assert_eq!(store.get().motd, "<aqua>after");
 }

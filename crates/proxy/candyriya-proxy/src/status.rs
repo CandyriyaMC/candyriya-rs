@@ -369,7 +369,8 @@ fn read_favicon_file(path: &str) -> Result<Vec<u8>, &'static str> {
 /// transparent 64x64. Any failure degrades to the embedded icon; the
 /// exchange is never failed over a favicon.
 fn resolve_favicon(state: &ProxyState) -> String {
-    let path = state.config.motd_favicon.trim();
+    let config = state.config();
+    let path = config.motd_favicon.trim();
     if path.is_empty() {
         return embedded_favicon_uri().to_owned();
     }
@@ -503,9 +504,10 @@ where
     let registry = embedded_registry().ok_or_else(|| {
         ProxyError::Registry("embedded protocol snapshot failed to load".to_owned())
     })?;
+    let config = state.config();
     let protocol = handshake.protocol;
     let ids = status_ids(registry, protocol);
-    let deadline = read_deadline(&state.config);
+    let deadline = read_deadline(&config);
 
     // 1. the next frame must be a status request with an empty payload
     let request = read_frame(conn, deadline).await?;
@@ -522,12 +524,12 @@ where
     }
 
     // 2. answer immediately from configuration; no backend is contacted
-    let description = motd_component(&state.config.motd)?;
+    let description = motd_component(&config.motd)?;
     let favicon = resolve_favicon(state);
     let online = state.limiter.current_connections();
     let body = build_status_json(
         protocol,
-        state.config.show_max_players,
+        config.show_max_players,
         online,
         &description,
         &favicon,

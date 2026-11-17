@@ -5,6 +5,9 @@
 //! - [`CommandRegistry`] holds the shared [`CommandState`] (locales,
 //!   directory, effects) and the one-way [`ShutdownHandle`] `/candyriya end`
 //!   flips; the cli watches the same flag and initiates the real shutdown.
+//!   A [`ReloadFn`](crate::ReloadFn) can be wired in with
+//!   [`CommandRegistry::with_reload`] — the cli hands over the real reload;
+//!   without one `/candyriya reload` reports that reload is not wired.
 //! - [`CommandRegistry::register`] validates and attaches every built-in
 //!   command to a [`Dispatcher`] as one atomic batch, then attaches the
 //!   internal pre-dispatch hook. A failure leaves the dispatcher tree
@@ -17,6 +20,7 @@ use std::sync::Arc;
 use crate::command::CandyCommand;
 use crate::commands::{CandyriyaCommand, GlistCommand, SendCommand, StaticHidden};
 use crate::dispatcher::Dispatcher;
+use crate::effects::ReloadFn;
 use crate::error::CommandError;
 use crate::state::CommandState;
 
@@ -28,6 +32,7 @@ use crate::state::CommandState;
 pub struct CommandRegistry {
     state: CommandState,
     shutdown: crate::ShutdownHandle,
+    reload: Option<ReloadFn>,
 }
 
 impl CommandRegistry {
@@ -36,7 +41,22 @@ impl CommandRegistry {
     /// `shutdown` is the flag the cli hands to its drain path; the same flag
     /// drives `/candyriya end`.
     pub fn new(state: CommandState, shutdown: crate::ShutdownHandle) -> Self {
-        Self { state, shutdown }
+        Self {
+            state,
+            shutdown,
+            reload: None,
+        }
+    }
+
+    /// Wires the reload closure `/candyriya reload` runs through.
+    ///
+    /// The closure is called synchronously with the requested scope and
+    /// must never panic; see [`ReloadFn`]. Without one, the command
+    /// answers that reload is not wired in this build.
+    #[must_use]
+    pub fn with_reload(mut self, reload: ReloadFn) -> Self {
+        self.reload = Some(reload);
+        self
     }
 
     /// The shared shutdown flag, cloned for the drain path to watch.
@@ -53,6 +73,7 @@ impl CommandRegistry {
             Box::new(CandyriyaCommand::new(
                 self.state.clone(),
                 self.shutdown.clone(),
+                self.reload.clone(),
             )),
         ]
     }

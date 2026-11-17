@@ -550,6 +550,19 @@ returned and the previously running configuration stays fully intact. The
 forwarding secret is read from the secret file when present; it is never
 rotated implicitly by a reload (rotate by deleting the file and restarting).
 
+`/candyriya reload` is the operator entry point. The `config` phase
+re-reads the file the process was started with, swaps it atomically,
+rebuilds the routing registry (backends and `forced-hosts` apply to new
+connections immediately), refreshes the MOTD favicon from disk and re-reads
+the locale overrides under `locales/`. The `plugins` phase reloads the
+plugin set under `plugins/` and `libraries/` (see [Plugins](plugins)).
+Either phase can be skipped (`/candyriya reload config`, `/candyriya reload
+plugins`); `/candyriya reload` runs both, config first. What a reload never
+moves: the listener socket (bind address and port are process-lifetime),
+live sessions, and the forwarding secret. Note the global
+`[advanced] max-connections` semaphore is created when the accept loop
+starts and is likewise restart-only.
+
 ## Troubleshooting configuration errors
 
 **Port already in use.** Another process (often a previous candyriya or a

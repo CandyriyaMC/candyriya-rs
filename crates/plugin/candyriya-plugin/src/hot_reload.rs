@@ -64,7 +64,7 @@ use crate::instance::PluginInstance;
 use crate::library_plugin::{LibraryPlugin, PluginState};
 use crate::limits::Limits;
 use crate::manifest::PluginManifest;
-use crate::plugin_loader::select_wasm;
+use crate::plugin_loader::{LoadIssue, PluginLoader, select_wasm};
 use crate::plugin_set::PluginSet;
 use crate::service_registry::ServiceRegistry;
 
@@ -90,6 +90,36 @@ pub struct ReloadReport {
     pub state: PluginState,
     /// How many plugin-owned services were revoked from the registry.
     pub revoked_services: usize,
+}
+
+/// What a [`PluginReloader::reload_all`] pass did, across both the
+/// existing set and whatever the directories had to add.
+///
+/// Phase A reloads every running plugin from disk in place; phase B
+/// re-scans the roots and registers plugins that were not running before.
+/// Failures never tear down the running set: a plugin that cannot stage
+/// keeps its current instance (or stays absent, for newcomers).
+#[derive(Debug)]
+pub struct ReloadAllReport {
+    /// Existing plugins that were reloaded successfully, in load order.
+    pub reloaded: Vec<ReloadReport>,
+    /// Plugins that were discovered on disk and registered by this
+    /// reload pass, in (dependency-resolved) registration order.
+    pub loaded: Vec<String>,
+    /// Existing plugins whose reload failed. The running instance (if
+    /// any) is untouched either way.
+    pub failed: Vec<(String, PluginError)>,
+    /// Newly discovered plugins that failed to make it into the set —
+    /// stage errors land in the discovery issues, anything else here
+    /// gets a one-line reason. The running set is unaffected.
+    pub new_failed: Vec<(String, String)>,
+    /// Running plugins whose directory vanished (or is not a directory)
+    /// since startup. They are kept running on purpose — deleting files
+    /// is not an unload — and listed here so callers can warn.
+    pub missing: Vec<String>,
+    /// Everything discovery or dependency resolution had to complain
+    /// about while looking for *new* plugins. Informational only.
+    pub issues: Vec<LoadIssue>,
 }
 
 /// Errors produced while setting up the filesystem watcher.
@@ -260,6 +290,130 @@ impl PluginReloader {
             },
             revoked_services,
         })
+    }
+
+    /// Reload every running plugin **and** pick up newcomers.
+    ///
+    /// Two phases, in order:
+    ///
+    /// - **Phase A (existing).** Every id currently in the set is
+    ///   reloaded exactly like [`PluginReloader::reload`] does for one
+    ///   plugin — staged replacement, swap, `Loaded`/`Disabled`
+    ///   preserved, plugin-owned services revoked. A plugin whose
+    ///   directory vanished from disk is left alone (deleting files is
+    ///   not an unload) and reported under [`ReloadAllReport::missing`].
+    /// - **Phase B (new).** The roots are re-scanned with `loader`.
+    ///   Any discovered id that is not already in the set is run
+    ///   through the dependency resolver and registered; survivors are
+    ///   reported under [`ReloadAllReport::loaded`] in registration
+    ///   order. Discovery/resolution problems land in
+    ///   [`ReloadAllReport::issues`], and ids that drop out of the
+    ///   resolution land in [`ReloadAllReport::new_failed`].
+    ///
+    /// A dependency-resolution failure of the whole discovered set means
+    /// no new plugin is registered; the running set keeps whatever phase
+    /// A produced. New plugins are appended after the existing ones —
+    /// a brand-new library never jumps ahead of already-running plugins,
+    /// and already-running plugins keep their instances (a plugin that
+    /// failed its missing hard dependency at startup is absent and can
+    /// only come back as a reloaded record, which phase A handles once
+    /// the dependency exists on disk).
+    pub fn reload_all(&self, loader: &PluginLoader<'_>) -> ReloadAllReport {
+        let mut report = ReloadAllReport {
+            reloaded: Vec::new(),
+            loaded: Vec::new(),
+            failed: Vec::new(),
+            new_failed: Vec::new(),
+            missing: Vec::new(),
+            issues: Vec::new(),
+        };
+
+        // phase A: swap every running record in place, in load order
+        let running: Vec<String> = self.plugins.ids();
+        for id in &running {
+            let dir_gone = {
+                let guard = self.plugins.read();
+                guard.get(id).is_some_and(|record| !record.dir().is_dir())
+            };
+            if dir_gone {
+                // warn-worthy, never fatal: the running instance keeps
+                // serving; an operator removed the files on purpose or
+                // by accident, either way the proxy is not the disk
+                report.missing.push(id.clone());
+                continue;
+            }
+            match self.reload(id) {
+                Ok(one) => report.reloaded.push(one),
+                Err(error) => report.failed.push((id.clone(), error)),
+            }
+        }
+
+        // phase B: discover and register newcomers
+        let discovered = loader.load();
+        report.issues.extend(discovered.issues);
+        let running_set: std::collections::HashSet<&str> =
+            running.iter().map(String::as_str).collect();
+        let discovered_ids: Vec<String> = discovered
+            .plugins
+            .iter()
+            .map(|plugin| plugin.id().to_owned())
+            .collect();
+
+        match crate::dep_resolution::resolve_plugins(discovered.plugins) {
+            Ok(resolution) => {
+                report.issues.extend(resolution.report.issues);
+                let mut surviving: Vec<String> = Vec::new();
+                for plugin in resolution.report.plugins {
+                    let id = plugin.id().to_owned();
+                    if running_set.contains(id.as_str()) {
+                        // rebuilt during discovery, but phase A already
+                        // swapped the running record in — drop the
+                        // duplicate instance
+                        continue;
+                    }
+                    surviving.push(id.clone());
+                    // a newcomer recorded as Failed still gets inserted —
+                    // that is how startup surfaces broken plugins too —
+                    // but it is announced as a failure, never as loaded
+                    let staged_ok = plugin.state().is_loaded();
+                    if self.plugins.insert(plugin) {
+                        if staged_ok {
+                            report.loaded.push(id);
+                        } else {
+                            report
+                                .new_failed
+                                .push((id, "failed to load; see the discovery issues".to_owned()));
+                        }
+                    } else {
+                        report
+                            .new_failed
+                            .push((id, "already registered during this reload".to_owned()));
+                    }
+                }
+                for id in discovered_ids
+                    .iter()
+                    .filter(|id| !running_set.contains(id.as_str()))
+                {
+                    if !surviving.contains(id) {
+                        report.new_failed.push((
+                            id.clone(),
+                            "dropped during dependency resolution; see the issues list".to_owned(),
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                // the discovered set itself cannot be ordered (cycle or
+                // duplicates); no new plugin is registered, full stop.
+                // running plugins already went through phase A.
+                report.new_failed.push((
+                    "<resolution>".to_owned(),
+                    format!("{error}; no new plugins were registered"),
+                ));
+            }
+        }
+
+        report
     }
 }
 

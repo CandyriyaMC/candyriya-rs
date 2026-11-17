@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tracing::{debug, info, warn};
@@ -40,8 +41,11 @@ const ACCEPT_FAILURE_BACKOFF: Duration = Duration::from_millis(50);
 /// is registered as its own task on the service — shared state stays
 /// small on purpose.
 pub struct ProxyState {
-    /// The loaded proxy configuration.
-    pub config: Arc<Config>,
+    /// The loaded proxy configuration. Live: a `/candyriya reload` swap
+    /// is visible to freshly accepted connections and status/login
+    /// handling without a restart. In-flight connections keep the
+    /// snapshot they started with.
+    pub config: ArcSwap<Config>,
     /// Monotonic connection-id counter. Starts at 0; handed out ids
     /// start at 1.
     pub conn_counter: AtomicU64,
@@ -60,8 +64,9 @@ pub struct ProxyState {
     pub auth: AuthConfig,
     /// Backend routing registry (try chain + forced hosts); `None` until
     /// the composition root (or tests) wires one in. Without it, login
-    /// connections get a clean "no backend available" disconnect.
-    pub router: Option<Arc<BackendRegistry>>,
+    /// connections get a clean "no backend available" disconnect. Swapped
+    /// atomically on reload; readers hold an `Arc` to one registry.
+    pub router: ArcSwap<Option<Arc<BackendRegistry>>>,
     /// Connections refused before they were served (per-IP cap or the
     /// global `max-connections` semaphore). Read by the composition root
     /// for the status snapshot and metrics.
@@ -70,8 +75,9 @@ pub struct ProxyState {
 
 impl core::fmt::Debug for ProxyState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let max_connections = self.config.load().advanced.max_connections;
         f.debug_struct("ProxyState")
-            .field("max_connections", &self.config.advanced.max_connections)
+            .field("max_connections", &max_connections)
             .field("conn_counter", &self.conn_counter.load(Ordering::Relaxed))
             .field(
                 "connection_rejections",
@@ -101,21 +107,47 @@ impl ProxyState {
         // global cap (see the `limit` module docs).
         let limiter = ConnectionLimiter::with_per_ip_max(u64::MAX, per_ip_max);
         Self {
-            config,
+            config: ArcSwap::new(config),
             conn_counter: AtomicU64::new(0),
             limiter,
             favicon_cache: None,
             auth: AuthConfig::default(),
-            router: None,
+            router: ArcSwap::from_pointee(None),
             connection_rejections: AtomicU64::new(0),
         }
     }
 
     /// State with a backend router pre-wired (the composition root's job;
     /// tests wire their own fixtures).
-    pub fn with_router(mut self, router: Arc<BackendRegistry>) -> Self {
-        self.router = Some(router);
+    pub fn with_router(self, router: Arc<BackendRegistry>) -> Self {
+        self.set_router(Some(router));
         self
+    }
+
+    /// The current routing registry, when one is wired in.
+    ///
+    /// The returned `Arc` keeps that exact registry alive even if a reload
+    /// swaps in a rebuilt one concurrently.
+    pub fn router(&self) -> Option<Arc<BackendRegistry>> {
+        self.router.load_full().as_ref().clone()
+    }
+
+    /// Atomically replace the routing registry.
+    ///
+    /// Called by the reload path after the backend set is rebuilt from the
+    /// new configuration. `None` disables routing entirely (no `[servers]`
+    /// configured); readers that grabbed the old registry keep using it
+    /// until they drop it — never a half-swapped route table.
+    pub fn set_router(&self, router: Option<Arc<BackendRegistry>>) {
+        self.router.store(Arc::new(router));
+    }
+
+    /// The current configuration snapshot.
+    ///
+    /// Cheap (an atomic load plus a refcount bump). In-flight connections
+    /// keep the snapshot they started with; fresh readers observe a reload.
+    pub fn config(&self) -> Arc<Config> {
+        self.config.load_full()
     }
 
     /// State with a custom auth endpoint configuration (tests pointing the
@@ -156,7 +188,7 @@ pub async fn accept_loop(
     service: TaskService,
 ) {
     let semaphore = Arc::new(Semaphore::new(
-        usize::try_from(state.config.advanced.max_connections).unwrap_or(usize::MAX),
+        usize::try_from(state.config().advanced.max_connections).unwrap_or(usize::MAX),
     ));
     let mut shutdown = shutdown;
 
@@ -206,7 +238,7 @@ pub async fn accept_loop(
                     }
                     Err(SlotAcquireError::Semaphore) => {
                         state.connection_rejections.fetch_add(1, Ordering::Relaxed);
-                        warn!(conn = conn_id, %peer, max_connections = state.config.advanced.max_connections, "global connection limit reached; closing the connection");
+                        warn!(conn = conn_id, %peer, max_connections = state.config().advanced.max_connections, "global connection limit reached; closing the connection");
                         continue; // stream drops -> close
                     }
                 };
@@ -277,7 +309,7 @@ pub async fn handle_connection(
         warn!(conn = conn_id, %peer, %error, "failed to set TCP_NODELAY; continuing");
     }
 
-    let limits = HandshakeLimits::from_config(&state.config);
+    let limits = HandshakeLimits::from_config(&state.config());
     match read_handshake(&mut stream, &limits).await {
         Ok(handshake) => {
             debug!(

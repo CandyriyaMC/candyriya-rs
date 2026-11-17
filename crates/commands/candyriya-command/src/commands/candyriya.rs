@@ -1,13 +1,16 @@
 //! `/candyriya` — the proxy admin root.
 //!
-//! Subcommands: `info`, `servers`, `switch`, `end`. The root itself carries
-//! no permission; each subcommand carries its own gate, so an unauthorized
-//! source cannot even parse the subtree it may not use.
+//! Subcommands: `info`, `servers`, `switch`, `end`, `reload`. The root
+//! itself carries no permission; each subcommand carries its own gate,
+//! so an unauthorized source cannot even parse the subtree it may not use.
 //!
 //! Output goes through the shared effects sink as i18n'd MiniMessage lines;
 //! `/candyriya end` flips the shared
 //! [`ShutdownHandle`](crate::ShutdownHandle) instead of touching the
 //! scheduler itself — the cli watches the same flag and owns the shutdown.
+//! `/candyriya reload` runs through the [`ReloadFn`](crate::ReloadFn) the
+//! composition root wires in; the command layer only parses, gates and
+//! renders — never the mechanism itself.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,7 +29,9 @@ use crate::state::CommandState;
 use crate::text::escape_minimessage;
 
 use super::common::{out, switch_to};
+use super::reload::handle_reload;
 use super::suggest::{PlayerNames, ServerNames};
+use crate::effects::{ReloadFn, ReloadScope};
 use crate::snapshot::{BackendSnapshot, BackendState};
 
 fn permission_check(node: &'static str) -> impl Fn(&CommandSource) -> bool + Send + Sync + 'static {
@@ -169,11 +174,20 @@ fn handle_end(
 pub(crate) struct CandyriyaCommand {
     state: CommandState,
     shutdown: crate::ShutdownHandle,
+    reload: Option<ReloadFn>,
 }
 
 impl CandyriyaCommand {
-    pub(crate) fn new(state: CommandState, shutdown: crate::ShutdownHandle) -> Self {
-        Self { state, shutdown }
+    pub(crate) fn new(
+        state: CommandState,
+        shutdown: crate::ShutdownHandle,
+        reload: Option<ReloadFn>,
+    ) -> Self {
+        Self {
+            state,
+            shutdown,
+            reload,
+        }
     }
 }
 
@@ -188,7 +202,13 @@ impl CandyCommand for CandyriyaCommand {
         let servers_parts = parts.clone();
         let switch_parts = parts.clone();
         let end_parts = parts.clone();
+        let reload_parts = parts.clone();
+        let reload_config_parts = parts.clone();
+        let reload_plugins_parts = parts.clone();
         let end_shutdown = self.shutdown.clone();
+        let reload_all = self.reload.clone();
+        let reload_config = self.reload.clone();
+        let reload_plugins = self.reload.clone();
         let directory = Arc::clone(&parts.directory);
 
         lit.then(
@@ -241,6 +261,33 @@ impl CandyCommand for CandyriyaCommand {
                 .executes(move |ctx: &BrigadierContext<CommandSource>| {
                     handle_end(&end_parts, &ctx.source, &end_shutdown)
                 }),
+        )
+        .then(
+            literal::<CommandSource>("reload")
+                .requires(permission_check("candyriya.command.reload"))
+                .executes(move |ctx: &BrigadierContext<CommandSource>| {
+                    handle_reload(&reload_parts, &ctx.source, &reload_all, ReloadScope::All)
+                })
+                .then(literal::<CommandSource>("config").executes(
+                    move |ctx: &BrigadierContext<CommandSource>| {
+                        handle_reload(
+                            &reload_config_parts,
+                            &ctx.source,
+                            &reload_config,
+                            ReloadScope::Config,
+                        )
+                    },
+                ))
+                .then(literal::<CommandSource>("plugins").executes(
+                    move |ctx: &BrigadierContext<CommandSource>| {
+                        handle_reload(
+                            &reload_plugins_parts,
+                            &ctx.source,
+                            &reload_plugins,
+                            ReloadScope::Plugins,
+                        )
+                    },
+                )),
         )
     }
 }

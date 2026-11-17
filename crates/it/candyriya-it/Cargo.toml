@@ -51,6 +51,7 @@ base64 = { workspace = true }
  sha2 = { workspace = true }
  # the proxy's interactive console only engages on a TTY; the smoke drives it
  # through a pseudo-terminal
+ portable-pty = { workspace = true }
 
 [lints]
 workspace = true

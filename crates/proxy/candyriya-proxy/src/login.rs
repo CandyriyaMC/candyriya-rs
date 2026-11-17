@@ -219,7 +219,7 @@ async fn login_flow(
 
     // ---- 1. Login Start (the client link is plain at this point)
     let mut client = Wire::new();
-    let per_attempt = attempt_budget(&state.config);
+    let per_attempt = attempt_budget(&state.config());
     let login_start = match timeout(per_attempt, wire::read_packet(stream, &mut client)).await {
         Ok(Ok(packet)) => packet,
         Ok(Err(error)) => return Err(error),
@@ -290,7 +290,7 @@ async fn login_flow(
     // overall budget: the encryption window plus one window per backend,
     // with slack; each attempt is additionally capped by its own window,
     // so a hung backend yields to the next one instead of eating the flow
-    let per_attempt = attempt_budget(&state.config);
+    let per_attempt = attempt_budget(&state.config());
     let overall = per_attempt.saturating_mul(backends.len() as u32) + Duration::from_secs(1);
     let deadline = Instant::now() + overall;
     let mut last_reason: Option<String> = None;
@@ -327,7 +327,7 @@ async fn login_flow(
                 slot.mark_play();
                 let mut backend = backend;
                 let write_stall =
-                    Duration::from_millis(u64::from(state.config.advanced.read_timeout));
+                    Duration::from_millis(u64::from(state.config().advanced.read_timeout));
                 crate::play::run_play_state(
                     stream,
                     &mut backend,
@@ -394,7 +394,7 @@ async fn resolve_profile(
     handshake: &HandshakeResult,
     name: &str,
 ) -> Result<GameProfile, ProfileError> {
-    if !state.config.online_mode {
+    if !state.config().online_mode {
         let validator = OfflineSessionValidator;
         return validator
             .verify_client(name, "")
@@ -518,7 +518,7 @@ async fn attempt_backend(
     login_start: &Packet,
     client_ip: &str,
 ) -> Attempt {
-    let config = &state.config;
+    let config = state.config();
     let protocol = handshake.protocol;
 
     // ---- 5. connect with [advanced] connection-timeout
@@ -810,7 +810,7 @@ fn extract_disconnect_reason(payload: &[u8]) -> String {
 /// order. Unknown names are skipped (the registry validated them at
 /// construction time).
 fn route_backends(state: &ProxyState, host: &str) -> Vec<Backend> {
-    let Some(router) = &state.router else {
+    let Some(router) = state.router() else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -930,7 +930,7 @@ fn read_byte_array(src: &mut &[u8], max: usize) -> Option<Vec<u8>> {
 /// Mark a backend offline after a connect failure, so health-aware paths
 /// observe reality. Best effort: an unregistered name is ignored.
 fn mark_offline(state: &ProxyState, name: &str) {
-    if let Some(router) = &state.router {
+    if let Some(router) = state.router() {
         let _ = router.set_state(name, BackendState::Offline);
     }
 }

@@ -18,9 +18,15 @@ exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
 azalea-brigadier = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+tracing = { workspace = true }
 candyriya-permissions = { version = "0.1.0", path = "../../permissions/candyriya-permissions" }
 candyriya-i18n = { version = "0.1.0", path = "../../common/candyriya-i18n" }
 candyriya-utils = { version = "0.1.0", path = "../../common/candyriya-utils" }
+
+[dev-dependencies]
+# the config-swap test drives a real ConfigStore over a temp file
+candyriya-config = { version = "0.1.0", path = "../../config/candyriya-config" }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

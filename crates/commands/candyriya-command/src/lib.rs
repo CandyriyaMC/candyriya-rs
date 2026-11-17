@@ -19,13 +19,14 @@
 //!   permission node get a `requires` clause on their node, backed by the
 //!   `candyriya-permissions` engine — no per-handler after-the-fact checking.
 //! - **The built-in commands.** [`CommandRegistry`] assembles the whole set:
-//!   `/candyriya` (`info`, `servers`, `switch`, `end`), `/glist`, `/send` and
-//!   its `/server` and `/goto` aliases. Output goes through the
+//!   `/candyriya` (`info`, `servers`, `switch`, `end`, `reload`), `/glist`,
+//!   `/send` and its `/server` and `/goto` aliases. Output goes through the
 //!   [`OutputSender`] seam as MiniMessage lines built from the embedded
 //!   locales ([`Locales`]); live effects (switching a player) go through
 //!   [`ProxyEffects`]; the shutdown flag (`/candyriya end`) is a shared
-//!   [`ShutdownHandle`]. See the `registry` module docs for the wiring
-//!   model.
+//!   [`ShutdownHandle`]; `/candyriya reload` runs through a [`ReloadFn`]
+//!   wired with [`CommandRegistry::with_reload`]. See the `registry`
+//!   module docs for the wiring model.
 //!
 //! ## What this crate is not
 //!
@@ -80,7 +81,10 @@ pub use command::{CandyCommand, argument_with_suggestions};
 pub use commands::{GlistCommand, GlistReport, GlistServerEntry, SendCommand, SendMode};
 pub use context::CommandContext;
 pub use dispatcher::{Dispatcher, build};
-pub use effects::{OutputSender, ProxyEffects, ShutdownHandle, SwitchRequest, SwitchResult};
+pub use effects::{
+    OutputSender, PluginPhaseReport, ProxyEffects, ReloadFn, ReloadReport, ReloadScope,
+    ShutdownHandle, SwitchRequest, SwitchResult,
+};
 pub use error::CommandError;
 pub use locales::Locales;
 pub use registry::CommandRegistry;

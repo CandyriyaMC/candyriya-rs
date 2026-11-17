@@ -91,11 +91,13 @@ is not a valid command. The nodes are:
 - `candyriya.command.servers` - `/candyriya servers`
 - `candyriya.command.switch` - `/candyriya switch <player> <server>`
 - `candyriya.command.end` - `/candyriya end`
+- `candyriya.command.reload` - `/candyriya reload [config|plugins]`
 
 Because the check lives on the tree nodes themselves, a source without the
-grant cannot even parse the subtree: to an unauthorized player the command
-looks exactly like an unknown command. The gated commands are deliberately
-invisible rather than refused with an error message.
+grant cannot even parse the subtree: to an unauthorized player the gated
+commands are invisible - the reply is indistinguishable from an unknown
+command. The gated commands are deliberately unavailable rather than
+refused with an error message.
 
 Grants come from the configured permission provider - for the built-in
 config provider, the `[permissions]` table in `candyriya.toml` (see
@@ -169,6 +171,54 @@ Requires `candyriya.command.end`.
 ```shell
 candyriya > /candyriya end
 Shutting down. See you on the other side.
+```
+
+### `/candyriya reload [config|plugins]`
+
+Hot-reloads what can be reloaded without a restart, in two phases:
+
+- `config` - re-reads the configuration file the proxy was started with
+  (the `--config` path, default `./candyriya.toml`) and swaps it in
+  atomically. On success the backend routing registry is rebuilt from the
+  new configuration and swapped atomically as well; a failure here leaves
+  both the running configuration and the previous routing untouched. The
+  MOTD favicon is re-read from disk, locale overrides under `locales/` are
+  reloaded, and `forced-hosts` apply to new connections immediately.
+- `plugins` - reloads every plugin from `plugins/` and `libraries/`:
+  running plugins are staged and swapped in place, newly discovered plugins
+  are resolved through the dependency order and registered, and plugins
+  whose files vanished are kept running (deleting files is not an
+  unload) and reported as kept. Running plugins survive any failure; the
+  new configuration's `[plugins]` limits apply to the staged replacements.
+- no argument - both phases, config first. `/candyriya reload` and
+  `/candyriya reload config` differ only in whether the plugin phase runs;
+  `/candyriya reload plugins` runs only the plugin phase.
+
+What the reload does **not** touch: the listener socket (the bind address
+and port are process-lifetime), live sessions, and the forwarding secret -
+the secret is read once per process and never rotated implicitly. If you
+need a different port, a re-keyed forwarding secret or a different session
+model, restart the proxy.
+
+On success the invoker sees one line per phase, for example:
+
+```shell
+candyriya > /candyriya reload
+config reloaded
+1 plugins reloaded, 0 failed
+```
+
+A failing phase prints a red line with the reason, the other phase still
+runs, and the command exits 0 either way - the reload never crashes the
+proxy. Exit code is 1 only when both requested phases succeed.
+
+Requires `candyriya.command.reload`. The console's built-in `*` grant
+covers it, so the command works from the console out of the box; player and
+backend sources need the grant explicitly.
+
+```shell
+candyriya > /candyriya reload config
+config reloaded
 ```
 
 ### `/server <server>`
@@ -283,7 +333,8 @@ registered (or, today, that the chat dispatch is not wired yet - see
 **"missing permission" - players who should be admin cannot run `/candyriya`.**
 Players start with no grants; the console's `*` is its own. Grant the
 relevant node - `candyriya.command.info`, `candyriya.command.servers`,
-`candyriya.command.switch`, `candyriya.command.end`, or the wildcard
+`candyriya.command.switch`, `candyriya.command.end`, `candyriya.command.reload`,
+or the wildcard
 `candyriya.command.*` (or `*`) - in the `[permissions]` table of
 `candyriya.toml` and reload. A source without the grant cannot even parse
 the subtree, so there is no error message to help you: it behaves exactly

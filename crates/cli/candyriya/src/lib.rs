@@ -9,8 +9,10 @@
 //!    when stdout is a TTY) plus a daily-rotating file log at
 //!    `./logs/candyriya.log`. Installed before anything else happens.
 //! 3. **Configuration** — [`ConfigStore`] owns the live config behind an
-//!    `ArcSwap`; the snapshot flows to every subsystem. (Hot reload is wired
-//!    for the future `/candyriya reload` command.)
+//!    `ArcSwap`; the snapshot flows to every subsystem. Hot reload is
+//!    wired end to end: `/candyriya reload` re-reads the file the proxy
+//!    was started with, swaps atomically and refreshes what it safely
+//!    can (routes, favicon, locales, plugins).
 //! 4. **Runtime** — tokio multi-thread pool sized from `[runtime] worker-threads`,
 //!    and the central [`TaskService`] with a fixed rayon blocking pool from
 //!    `[runtime] blocking-threads`. Every task in the process is registered
@@ -23,9 +25,10 @@
 //!    signal; the accept loop stops, the task service drains, the subsystems
 //!    shut down in reverse order of wiring, and the process exits with code 0.
 //!
-//! Plugins under `plugins/` and `libraries/` are scanned and loaded once at
-//! startup. The reload path is deliberately not wired yet; the `/candyriya`
-//! command only carries the built-in set for now.
+//! Plugins under `plugins/` and `libraries/` are loaded at startup; the
+//! same machinery is exposed through `/candyriya reload` for a restart-free
+//! refresh. What never moves on a reload: the listener socket, live
+//! sessions, and the forwarding secret — those are restart-only.
 
 #![forbid(unsafe_code)]
 
@@ -45,7 +48,9 @@ use candyriya_cache::CacheManager;
 use candyriya_command::{CommandRegistry, CommandState, ShutdownHandle};
 use candyriya_config::{Config, ConfigStore, DEFAULT_CONFIG_TOML};
 use candyriya_i18n::I18n;
-use candyriya_plugin::{LimitBuilder, PluginLoader, PluginSet, ServiceRegistry, resolve_plugins};
+use candyriya_plugin::{
+    LimitBuilder, PluginLoader, PluginReloader, PluginSet, ServiceRegistry, resolve_plugins,
+};
 use candyriya_proxy::{FaviconCache, ProxySocket, ProxyState, SocketConfig, serve};
 use candyriya_route::BackendRegistry;
 use candyriya_scheduler::TaskService;
@@ -203,10 +208,13 @@ fn run_proxy(data_dir: &Path, log_level: &str, use_ansi: bool, args: Args) -> Re
         }
     }
     let config_name = config_path.display().to_string();
-    let store = ConfigStore::from_path(&config_path).map_err(|error| CliError::Config {
-        path: config_path.clone(),
-        message: error.to_string(),
-    })?;
+    let store =
+        Arc::new(
+            ConfigStore::from_path(&config_path).map_err(|error| CliError::Config {
+                path: config_path.clone(),
+                message: error.to_string(),
+            })?,
+        );
     let config = store.get();
     info!(
         config = %config_name,
@@ -246,6 +254,7 @@ fn run_proxy(data_dir: &Path, log_level: &str, use_ansi: bool, args: Args) -> Re
         log_level,
         use_ansi,
         &config_name,
+        &config_path,
         config,
         store,
         router,
@@ -261,8 +270,9 @@ async fn run_async(
     log_level: &str,
     use_ansi: bool,
     config_name: &str,
+    config_path: &Path,
     config: Arc<Config>,
-    store: ConfigStore,
+    store: Arc<ConfigStore>,
     router: Option<Arc<BackendRegistry>>,
 ) -> Result<(), CliError> {
     let service = TaskService::builder()
@@ -329,7 +339,7 @@ async fn run_async(
     );
     registry.register_service(
         "config.store".to_string(),
-        Arc::new(store) as Arc<dyn std::any::Any + Send + Sync>,
+        Arc::clone(&store) as Arc<dyn std::any::Any + Send + Sync>,
     );
     if let Some(router) = &router {
         registry.register_service(
@@ -342,15 +352,16 @@ async fn run_async(
     let started = Instant::now();
     let mut proxy_state = ProxyState::new(Arc::clone(&config));
     proxy_state.auth = auth;
-    proxy_state.router = router.clone();
+    proxy_state.set_router(router.clone());
     proxy_state.favicon_cache = favicon_cache.clone();
     let proxy_state = Arc::new(proxy_state);
 
-    // ---- command tree (built-in commands only)
+    // ---- command tree: the registry itself is built after the plugin set
+    // exists, so `/candyriya reload` can run both phases
     let locales = build_locales(data_dir)?;
     let shutdown = ShutdownHandle::new();
     let directory = Arc::new(CliDirectory::new(
-        Arc::clone(&config),
+        Arc::clone(&store),
         Arc::clone(&proxy_state),
         config_name.to_string(),
         log_level.to_string(),
@@ -358,24 +369,38 @@ async fn run_async(
     ));
     let effects = Arc::new(CliEffects::new(use_ansi));
     let command_state = CommandState {
-        locales,
+        locales: locales.clone(),
         directory: directory as Arc<dyn candyriya_command::NetworkDirectory>,
         effects: effects.clone() as Arc<dyn candyriya_command::ProxyEffects>,
     };
-    let command_registry = CommandRegistry::new(command_state, shutdown.clone());
+
+    // ---- plugins: startup load
+    let plugin_set = load_plugins(data_dir, &config, &cache);
+    registry.register_service(
+        "plugins.set".to_string(),
+        Arc::clone(&plugin_set) as Arc<dyn std::any::Any + Send + Sync>,
+    );
+
+    // ---- hot reload: the same machinery, on demand
+    let reload_fn = build_reload_fn(
+        Arc::clone(&store),
+        config_path.to_path_buf(),
+        Arc::clone(&proxy_state),
+        favicon_cache.clone(),
+        locales,
+        Arc::clone(&plugin_set),
+        Arc::clone(&cache),
+        registry.clone(),
+        data_dir,
+    );
+    let command_registry =
+        CommandRegistry::new(command_state, shutdown.clone()).with_reload(reload_fn);
     let dispatcher = Arc::new(command_registry.dispatcher().map_err(|error| {
         CliError::Runtime(format!("failed to assemble the built-in commands: {error}"))
     })?);
     registry.register_service(
         "commands.dispatcher".to_string(),
         dispatcher.clone() as Arc<dyn std::any::Any + Send + Sync>,
-    );
-
-    // ---- plugins: startup load only; the reload path lands later
-    let plugin_set = load_plugins(data_dir, &config, &cache);
-    registry.register_service(
-        "plugins.set".to_string(),
-        Arc::clone(&plugin_set) as Arc<dyn std::any::Any + Send + Sync>,
     );
 
     // ---- one shutdown signal for Ctrl-C and /candyriya end; the accept
@@ -464,16 +489,16 @@ fn log_stats(state: &ProxyState, router: Option<&BackendRegistry>) {
     );
 }
 
-/// Cache the configured favicon on first use; fall back to the embedded icon.
-fn warm_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) {
+/// Load the configured favicon into the cache unconditionally.
+///
+/// Used by `/candyriya reload` to drop a stale cached icon. Returns
+/// `true` when the cache now holds the configured icon; `false` keeps
+/// whatever the cache held before (or the embedded fallback).
+fn refresh_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) -> bool {
     const MAX_FAVICON_BYTES: u64 = 1024 * 1024;
     let Some(cache) = favicon_cache else {
-        return; // no cache: the status handler reads from disk per request
+        return false;
     };
-    if cache.get().is_some() {
-        debug!("favicon already present in the cache");
-        return;
-    }
     let path = Path::new(&config.motd_favicon);
     match std::fs::read(path) {
         Ok(bytes) => {
@@ -481,12 +506,14 @@ fn warm_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) {
             if magic_ok && (bytes.len() as u64) <= MAX_FAVICON_BYTES {
                 cache.put(&bytes);
                 info!(path = %path.display(), bytes = bytes.len(), "favicon loaded and cached");
+                true
             } else {
                 warn!(
                     path = %path.display(),
                     bytes = bytes.len(),
                     "favicon is not a PNG within the size cap; the embedded fallback icon will be served"
                 );
+                false
             }
         }
         Err(error) => {
@@ -495,8 +522,185 @@ fn warm_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) {
                 %error,
                 "favicon unreadable; the embedded fallback icon will be served"
             );
+            false
         }
     }
+}
+
+/// Reload the configuration phase: re-read the file, swap atomically,
+/// rebuild what was derived from it. The forwarding secret is deliberately
+/// **not** re-read or rotated — it is a once-per-process credential. The
+/// listener socket and live sessions are likewise untouched.
+///
+/// On any failure the running configuration is left untouched (the
+/// [`ConfigStore::reload`] contract); the routing registry and favicon are
+/// only swapped when their own rebuild succeeds, so a half-applied reload
+/// cannot leak out. Returns an operator-facing note on success.
+fn reload_config_phase(
+    store: &ConfigStore,
+    config_path: &Path,
+    proxy_state: &ProxyState,
+    favicon_cache: Option<&FaviconCache>,
+    locales: &candyriya_command::Locales,
+) -> Result<String, String> {
+    let config = store
+        .reload(config_path)
+        .map_err(|error| error.to_string())?;
+    let mut notes = Vec::new();
+
+    // backends: rebuild the registry from the new configuration and swap
+    // it atomically; on failure the previous routing stays in place
+    if config.servers.servers.is_empty() {
+        proxy_state.set_router(None);
+        notes.push("routing disabled (no [servers] configured)".to_owned());
+    } else {
+        match candyriya_proxy::registry_from_config(&config) {
+            Ok(registry) => {
+                let count = registry.iter().count();
+                proxy_state.set_router(Some(Arc::new(registry)));
+                notes.push(format!("{count} backends re-registered"));
+            }
+            Err(message) => {
+                tracing::error!(
+                    %message,
+                    "backend registry rebuild failed; keeping the previous routing"
+                );
+                notes.push(format!("backends kept from before the reload ({message})"));
+            }
+        }
+    }
+
+    if refresh_favicon(&config, favicon_cache) {
+        notes.push("favicon refreshed".to_owned());
+    }
+
+    match locales.reload() {
+        Ok(()) => notes.push("locales reloaded".to_owned()),
+        Err(error) => {
+            tracing::warn!(%error, "locale reload failed; keeping the previous tables");
+            notes.push(format!("locales kept from before the reload ({error})"));
+        }
+    }
+
+    Ok(notes.join("; "))
+}
+
+/// Reload the plugin phase: re-stage every running plugin from disk and
+/// register newcomers found under the roots. The running set survives
+/// any failure — broken replacements never evict a working instance.
+fn reload_plugins_phase(
+    store: &ConfigStore,
+    data_dir: &Path,
+    plugin_set: &PluginSet,
+    cache: &CacheManager,
+    services: &ServiceRegistry,
+) -> candyriya_command::PluginPhaseReport {
+    // limits come from the current configuration, i.e. the post-config-reload
+    // one when both phases run — a raised [plugins] cap applies immediately
+    let config = store.get();
+    let limits = LimitBuilder::from_config(&config).build();
+    let reloader = PluginReloader::with_limits(
+        plugin_set.clone(),
+        data_dir.to_path_buf(),
+        services.clone(),
+        limits.clone(),
+    );
+    let loader = PluginLoader::with_limits(
+        data_dir.join("plugins"),
+        data_dir.join("libraries"),
+        cache,
+        limits.clone(),
+    );
+    let report = reloader.reload_all(&loader);
+
+    let mut details = Vec::new();
+    for missing in &report.missing {
+        warn!(
+            plugin = %missing,
+            "plugin directory is gone; the running plugin was kept"
+        );
+        details.push(format!(
+            "{missing}: files are gone; the running plugin was kept"
+        ));
+    }
+    for (where_, why) in &report.issues {
+        warn!(path = %where_.display(), "plugin reload: {why}");
+    }
+    for id in &report.loaded {
+        info!(plugin = %id, "new plugin registered by reload");
+    }
+    for (id, error) in &report.failed {
+        error!(
+            plugin = %id,
+            %error,
+            "plugin reload failed; the running instance (if any) was kept"
+        );
+        details.push(format!("{id}: {error}"));
+    }
+    for (id, reason) in &report.new_failed {
+        error!(plugin = %id, %reason, "new plugin failed to load");
+        details.push(format!("{id}: {reason}"));
+    }
+
+    let reloaded = report.reloaded.len() + report.loaded.len();
+    let failed = report.failed.len() + report.new_failed.len();
+    candyriya_command::PluginPhaseReport {
+        reloaded,
+        failed,
+        details,
+    }
+}
+
+/// Assemble the reload closure the `/candyriya reload` command runs.
+///
+/// The closure is synchronous and total: every failure is reported through
+/// the returned report, never panicked. Scope selects the phases; the
+/// default scope is both, config first.
+#[allow(clippy::too_many_arguments)]
+fn build_reload_fn(
+    store: Arc<ConfigStore>,
+    config_path: PathBuf,
+    proxy_state: Arc<ProxyState>,
+    favicon_cache: Option<Arc<FaviconCache>>,
+    locales: candyriya_command::Locales,
+    plugin_set: Arc<PluginSet>,
+    cache: Arc<CacheManager>,
+    services: ServiceRegistry,
+    data_dir: &Path,
+) -> candyriya_command::ReloadFn {
+    use candyriya_command::{ReloadReport, ReloadScope};
+
+    let data_dir = data_dir.to_path_buf();
+    Arc::new(move |scope: ReloadScope| -> ReloadReport {
+        let config_phase = matches!(scope, ReloadScope::All | ReloadScope::Config);
+        let plugin_phase = matches!(scope, ReloadScope::All | ReloadScope::Plugins);
+
+        let config = config_phase.then(|| {
+            reload_config_phase(
+                &store,
+                &config_path,
+                &proxy_state,
+                favicon_cache.as_deref(),
+                &locales,
+            )
+        });
+        let plugins = plugin_phase
+            .then(|| reload_plugins_phase(&store, &data_dir, &plugin_set, &cache, &services));
+
+        ReloadReport { config, plugins }
+    })
+}
+
+/// Cache the configured favicon on first use; fall back to the embedded icon.
+fn warm_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) {
+    let Some(cache) = favicon_cache else {
+        return; // no cache: the status handler reads from disk per request
+    };
+    if cache.get().is_some() {
+        debug!("favicon already present in the cache");
+        return;
+    }
+    let _ = refresh_favicon(config, Some(cache));
 }
 
 /// Build the command locales.

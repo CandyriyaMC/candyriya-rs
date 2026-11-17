@@ -47,4 +47,23 @@ impl Locales {
             _ => &self.en,
         }
     }
+
+    /// Re-read both locale handles from disk atomically.
+    ///
+    /// `/candyriya reload` calls this so locale overrides added or edited
+    /// under `<data_dir>/locales/` apply without a restart. `Ok` when both
+    /// handles reloaded; the first error is reported and the second handle
+    /// is still attempted.
+    ///
+    /// # Errors
+    ///
+    /// [`candyriya_i18n::LoadError`] when an override directory that was
+    /// passed at construction no longer exists as a readable directory.
+    /// Content problems inside override files never fail the reload (the
+    /// affected file degrades to its embedded defaults with a warning).
+    pub fn reload(&self) -> Result<(), LoadError> {
+        let en = self.en.reload();
+        let ex_girl = self.ex_girl.reload();
+        en.and(ex_girl)
+    }
 }
