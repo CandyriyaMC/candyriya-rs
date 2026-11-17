@@ -16,6 +16,9 @@ target
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
 
+# runtime data-dir artifacts (the proxy writes logs/candyriya.log.* here)
+logs/
+
 # personal working notes for the coding agents, must never be committed
 notes.md
 **/notes.md

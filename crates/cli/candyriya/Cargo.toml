@@ -1,0 +1,44 @@
+[package]
+name = "candyriya"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
+description = "The candyriya binary — composition root, live console and process lifecycle"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+candyriya-auth = { path = "../../auth/candyriya-auth" }
+candyriya-cache = { path = "../../common/candyriya-cache" }
+candyriya-command = { path = "../../commands/candyriya-command" }
+candyriya-config = { path = "../../config/candyriya-config" }
+candyriya-i18n = { path = "../../common/candyriya-i18n" }
+candyriya-metrics = { path = "../../common/candyriya-metrics" }
+candyriya-plugin = { path = "../../plugin/candyriya-plugin" }
+candyriya-plugin-api = { path = "../../plugin/candyriya-plugin-api" }
+candyriya-proxy = { path = "../../proxy/candyriya-proxy" }
+candyriya-route = { path = "../../network/candyriya-route" }
+candyriya-scheduler = { path = "../../common/candyriya-scheduler" }
+candyriya-telemetry = { path = "../../common/candyriya-telemetry" }
+tokio.workspace = true
+tracing.workspace = true
+clap.workspace = true
+lobsterchat.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+name = "candyriya"
+path = "src/lib.rs"
+
+[[bin]]
+name = "candyriya"
+path = "src/main.rs"

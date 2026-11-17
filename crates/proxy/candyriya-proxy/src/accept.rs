@@ -62,6 +62,10 @@ pub struct ProxyState {
     /// the composition root (or tests) wires one in. Without it, login
     /// connections get a clean "no backend available" disconnect.
     pub router: Option<Arc<BackendRegistry>>,
+    /// Connections refused before they were served (per-IP cap or the
+    /// global `max-connections` semaphore). Read by the composition root
+    /// for the status snapshot and metrics.
+    pub connection_rejections: AtomicU64,
 }
 
 impl core::fmt::Debug for ProxyState {
@@ -69,6 +73,10 @@ impl core::fmt::Debug for ProxyState {
         f.debug_struct("ProxyState")
             .field("max_connections", &self.config.advanced.max_connections)
             .field("conn_counter", &self.conn_counter.load(Ordering::Relaxed))
+            .field(
+                "connection_rejections",
+                &self.connection_rejections.load(Ordering::Relaxed),
+            )
             .field("current_connections", &self.limiter.current_connections())
             .finish_non_exhaustive()
     }
@@ -99,6 +107,7 @@ impl ProxyState {
             favicon_cache: None,
             auth: AuthConfig::default(),
             router: None,
+            connection_rejections: AtomicU64::new(0),
         }
     }
 
@@ -191,10 +200,12 @@ pub async fn accept_loop(
                 let slot = match try_acquire_slot(&state.limiter, &semaphore, peer.ip()) {
                     Ok(slot) => slot,
                     Err(SlotAcquireError::Limiter(kind)) => {
+                        state.connection_rejections.fetch_add(1, Ordering::Relaxed);
                         warn!(conn = conn_id, %peer, reason = %kind, "per-IP connection cap reached; closing the connection");
                         continue; // stream drops -> close
                     }
                     Err(SlotAcquireError::Semaphore) => {
+                        state.connection_rejections.fetch_add(1, Ordering::Relaxed);
                         warn!(conn = conn_id, %peer, max_connections = state.config.advanced.max_connections, "global connection limit reached; closing the connection");
                         continue; // stream drops -> close
                     }
