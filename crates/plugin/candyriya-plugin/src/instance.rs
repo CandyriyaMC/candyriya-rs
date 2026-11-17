@@ -8,9 +8,17 @@
 //! blocked thread: a full mailbox is [`PluginError::Busy`], a silent plugin
 //! is [`PluginError::Timeout`], a dead one is [`PluginError::PluginGone`].
 //!
-//! This module implements loading, calling and unloading only. Host
-//! functions and resource limits (fuel, memory, WASI) are deliberately out of
-//! scope here; they land with the task layer.
+//! # Sandbox limits
+//!
+//! Construction enforces the static caps on the module (memory, tables,
+//! functions) before anything is compiled, acquires one slot of the
+//! `max-instances` budget, and configures extism with the memory page cap,
+//! the manifest timeout and, when [`Limits::max_fuel`] is non-zero, the
+//! per-call fuel limit. The per-call input/output byte caps and the
+//! per-window call rate limit ([`Limits::max_calls`]) are enforced on the
+//! host-side call path; handles and per-invocation log bytes are accounted
+//! through [`HandleTable`] and [`LogBudget`] — the host-function layer
+//! consumes both.
 //!
 //! # Panics and drops
 //!
@@ -18,24 +26,29 @@
 //! while a plugin runs is reported as a normal error instead of killing the
 //! thread silently. Dropping a [`PluginInstance`] closes the mailbox; the
 //! worker finishes its current command (if any) and terminates. A plugin
-//! stuck in an infinite wasm loop keeps its thread — fuel/epoch limits are
-//! tracked separately — but no other plugin and no caller are ever blocked
-//! by it, and [`PluginInstance::unload`] documents that joining may wait on
-//! the stuck call.
+//! stuck in an infinite wasm loop is stopped by the fuel limit or the
+//! manifest timeout, losing at most one in-flight call; no other plugin and
+//! no caller are ever blocked by it, and [`PluginInstance::unload`]
+//! documents that joining may wait on a stuck call.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::error::PluginError;
 use crate::host_state::HostState;
+use crate::limits::{
+    CALL_WINDOW, CallRateLimiter, HandleTable, InstanceSlots, Limits, LogBudget, check_module,
+};
 
 /// Number of pending commands the mailbox holds before callers get `Busy`.
 const MAILBOX_CAPACITY: usize = 16;
 
-/// How long a caller waits for the plugin to answer a command.
-const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a caller waits for the control-plane commands (thread name,
+/// export existence); plugin calls use the configured timeout instead.
+const MAILBOX_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Commands the worker thread understands.
 enum PluginCommand {
@@ -69,25 +82,36 @@ enum PluginCommand {
 
 /// A wasm plugin running on its dedicated thread.
 ///
-/// Construct with [`PluginInstance::new`]. Constructing compiles and
-/// instantiates the module on the calling thread (so syntax/instantiation
-/// errors are reported synchronously) and then moves it onto a dedicated,
-/// named `candyriya-plugin-<id>` thread.
+/// Construct with [`PluginInstance::new`]. Constructing validates the module
+/// against the sandbox [`Limits`], compiles and instantiates it on the
+/// calling thread (so syntax/instantiation errors are reported
+/// synchronously) and then moves it onto a dedicated, named
+/// `candyriya-plugin-<id>` thread which serves all subsequent calls.
 pub struct PluginInstance {
     plugin_id: String,
     command_tx: Option<SyncSender<PluginCommand>>,
     thread: Option<JoinHandle<()>>,
     data_dir: PathBuf,
+    limits: Limits,
+    slots: Option<Arc<InstanceSlots>>,
+    rate_limiter: CallRateLimiter,
+    handles: Arc<HandleTable>,
 }
 
 impl PluginInstance {
-    /// Compile and instantiate `wasm_path` and spawn its dedicated thread.
+    /// Compile and instantiate `wasm_path` under the given sandbox limits
+    /// and spawn its dedicated thread.
     ///
     /// The module bytes are read and passed to extism inline; the extism
-    /// plugin is created with no host functions and WASI disabled.
-    /// Compilation happens on the calling thread; on success the
-    /// plugin moves onto a freshly spawned `candyriya-plugin-<plugin_id>`
-    /// thread which serves all subsequent calls.
+    /// plugin is created with no host functions and WASI disabled. The
+    /// module is first checked against the static [`Limits`] caps (memory,
+    /// tables, functions) — a module over the caps is rejected before any
+    /// compilation happens. The manifest carries the configured memory page
+    /// cap and, when set, the call timeout and per-call fuel limit.
+    ///
+    /// Compilation happens on the calling thread; on success the plugin
+    /// moves onto a freshly spawned `candyriya-plugin-<plugin_id>` thread
+    /// which serves all subsequent calls.
     ///
     /// `plugin_id` must be a validated plugin id (the loader guarantees this
     /// for manifest-derived ids; tests pass their own ids). It is used for
@@ -95,6 +119,7 @@ impl PluginInstance {
     ///
     /// # Errors
     ///
+    /// [`PluginError::LimitExceeded`] when the module breaks a sandbox cap,
     /// [`PluginError::WasmLoad`] when the file cannot be read or is not a
     /// valid wasm module extism accepts, [`PluginError::PluginThread`] when
     /// the worker cannot be spawned.
@@ -102,6 +127,7 @@ impl PluginInstance {
         wasm_path: &Path,
         host_state: HostState,
         plugin_id: &str,
+        limits: &Limits,
     ) -> Result<Self, PluginError> {
         if !wasm_path.is_file() {
             return Err(PluginError::Io {
@@ -114,12 +140,52 @@ impl PluginInstance {
             source: e,
         })?;
 
-        let manifest = extism::Manifest::new([extism::Wasm::data(wasm_bytes)]);
-        let plugin =
-            extism::Plugin::new(&manifest, [], false).map_err(|e| PluginError::WasmLoad {
-                path: wasm_path.to_path_buf(),
-                message: format!("{e:#}"),
-            })?;
+        // parse-time caps: an oversized module never reaches the compiler
+        check_module(wasm_path, plugin_id, &wasm_bytes, limits)?;
+
+        // one live-instance slot per plugin, shared across the scope the
+        // host state belongs to (the loader shares one registry per run)
+        let slots = host_state.instance_slots();
+        slots.try_acquire(plugin_id, limits.max_instances)?;
+
+        match Self::spawn(
+            wasm_path,
+            wasm_bytes,
+            host_state,
+            plugin_id,
+            limits,
+            Arc::clone(&slots),
+        ) {
+            Ok(instance) => Ok(instance),
+            Err(error) => {
+                slots.release(plugin_id);
+                Err(error)
+            }
+        }
+    }
+
+    fn spawn(
+        wasm_path: &Path,
+        wasm_bytes: Vec<u8>,
+        host_state: HostState,
+        plugin_id: &str,
+        limits: &Limits,
+        slots: Arc<InstanceSlots>,
+    ) -> Result<Self, PluginError> {
+        let manifest = extism::Manifest::new([extism::Wasm::data(wasm_bytes)])
+            .with_memory_max(limits.max_memory_pages)
+            .with_timeout(limits.max_timeout);
+
+        // 0 = unlimited: no fuel metering at all
+        let builder = extism::PluginBuilder::new(&manifest);
+        let builder = match limits.fuel_per_call() {
+            Some(fuel) => builder.with_fuel_limit(fuel),
+            None => builder,
+        };
+        let plugin = builder.build().map_err(|e| PluginError::WasmLoad {
+            path: wasm_path.to_path_buf(),
+            message: format!("{e:#}"),
+        })?;
 
         let (command_tx, command_rx) = sync_channel::<PluginCommand>(MAILBOX_CAPACITY);
         let thread_name = format!("candyriya-plugin-{plugin_id}");
@@ -140,6 +206,13 @@ impl PluginInstance {
             command_tx: Some(command_tx),
             thread: Some(worker),
             data_dir,
+            limits: limits.clone(),
+            slots: Some(slots),
+            rate_limiter: CallRateLimiter::new(limits.max_calls),
+            handles: Arc::new(HandleTable::new(
+                limits.max_open_handles,
+                plugin_id.to_owned(),
+            )),
         })
     }
 
@@ -148,16 +221,38 @@ impl PluginInstance {
         &self.plugin_id
     }
 
+    /// The sandbox limits this instance was created under.
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
     /// The plugin's data directory (owned by this plugin alone).
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// The host handle accounting for this plugin. Host functions use it to
+    /// bound what they open on the plugin's behalf; dropping the returned
+    /// [`HandleTable`] does not reset the counters — cloned tables share
+    /// them.
+    pub fn handle_table(&self) -> Arc<HandleTable> {
+        Arc::clone(&self.handles)
+    }
+
+    /// A fresh log byte budget for one invocation, capped by
+    /// [`Limits::max_log_bytes`]. Callers that emit plugin log lines create
+    /// one per plugin call and spend from it; when it runs out, lines are
+    /// dropped (the host may log that once, host-side).
+    pub fn log_budget(&self) -> LogBudget {
+        LogBudget::new(self.limits.max_log_bytes)
     }
 
     /// The name of the dedicated thread this plugin runs on.
     pub fn worker_thread_name(&self) -> Result<String, PluginError> {
         let (tx, rx) = sync_channel(1);
         self.send(PluginCommand::WorkerThreadName { respond: tx })?;
-        rx.recv_timeout(CALL_TIMEOUT).map_err(|_| self.gone())
+        rx.recv_timeout(MAILBOX_REPLY_TIMEOUT)
+            .map_err(|_| self.gone())
     }
 
     /// Does the wasm module export `name`?
@@ -170,33 +265,54 @@ impl PluginInstance {
             name: name.to_owned(),
             respond: tx,
         })?;
-        rx.recv_timeout(CALL_TIMEOUT).map_err(|_| self.gone())
+        rx.recv_timeout(MAILBOX_REPLY_TIMEOUT)
+            .map_err(|_| self.gone())
     }
 
     /// Call an export with raw bytes.
     ///
     /// The extism ABI passes input and output as bytes; typed
     /// (de)serialization is the caller's job (JSON via extism-convert on the
-    /// guest side). This waits at most five seconds and never blocks the
-    /// calling thread beyond that.
+    /// guest side). Waits at most `max_timeout` from the instance's
+    /// [`Limits`] and never blocks the calling thread beyond that.
     pub fn call(&self, export: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
-        self.call_with_timeout(export, input, CALL_TIMEOUT)
+        self.call_with_timeout(export, input, self.limits.max_timeout)
     }
 
     /// Call an export with a caller-chosen timeout.
     ///
     /// Same semantics as [`PluginInstance::call`] but with an explicit
-    /// deadline. The event dispatcher uses this to enforce its own
-    /// per-plugin timeout instead of the default five-second one. Exceeding
-    /// the deadline is reported as [`PluginError::Timeout`]; the plugin
-    /// keeps whatever state it had (the call is not cancelled, it just
-    /// stops being awaited).
+    /// deadline. The input is checked against `max-input-bytes` and the
+    /// per-window `max-calls` quota before anything touches the plugin
+    /// thread; the output is checked against `max-output-bytes` before it is
+    /// handed back. The event dispatcher uses this to enforce its own
+    /// per-plugin timeout instead of the configured one. Exceeding the
+    /// deadline is reported as [`PluginError::Timeout`]; the plugin keeps
+    /// whatever state it had (the call is not cancelled, it just stops
+    /// being awaited).
     pub fn call_with_timeout(
         &self,
         export: &str,
         input: &[u8],
         timeout: Duration,
     ) -> Result<Vec<u8>, PluginError> {
+        // byte caps first, before anything is copied into the mailbox
+        if input.len() > self.limits.max_input_bytes {
+            return Err(PluginError::LimitExceeded {
+                plugin_id: self.plugin_id.clone(),
+                kind: "max-input-bytes",
+                limit: self.limits.max_input_bytes as u64,
+                requested: input.len() as u64,
+            });
+        }
+        if !self.rate_limiter.check(std::time::Instant::now()) {
+            return Err(PluginError::RateLimited {
+                plugin_id: self.plugin_id.clone(),
+                max_calls: self.limits.max_calls,
+                window_secs: CALL_WINDOW.as_secs(),
+            });
+        }
+
         let (tx, rx) = sync_channel(1);
         self.send(PluginCommand::Call {
             export: export.to_owned(),
@@ -204,7 +320,19 @@ impl PluginInstance {
             respond: tx,
         })?;
         match rx.recv_timeout(timeout) {
-            Ok(result) => result,
+            Ok(Ok(bytes)) => {
+                if bytes.len() > self.limits.max_output_bytes {
+                    Err(PluginError::LimitExceeded {
+                        plugin_id: self.plugin_id.clone(),
+                        kind: "max-output-bytes",
+                        limit: self.limits.max_output_bytes as u64,
+                        requested: bytes.len() as u64,
+                    })
+                } else {
+                    Ok(bytes)
+                }
+            }
+            Ok(Err(error)) => Err(error),
             Err(RecvTimeoutError::Timeout) => Err(PluginError::Timeout {
                 plugin_id: self.plugin_id.clone(),
                 timeout_ms: timeout.as_millis() as u64,
@@ -217,9 +345,9 @@ impl PluginInstance {
     ///
     /// Closing the mailbox drains any commands already queued; the worker
     /// exits once it sees the closed channel (or a pending `Shutdown`). Joining
-    /// waits for the plugin's current call (if any) to return — a plugin
-    /// stuck in an infinite wasm loop keeps this call pending; fuel limits
-    /// are tracked separately. Closing never blocks the caller.
+    /// waits for the plugin's current call (if any) to return; a caller that
+    /// cannot wait that long should simply drop the instance instead of
+    /// calling this. Dropping never blocks the caller.
     pub fn unload(mut self) -> Result<(), PluginError> {
         close_mailbox(self.command_tx.take());
         let Some(thread) = self.thread.take() else {
@@ -250,6 +378,11 @@ impl PluginInstance {
 
 impl Drop for PluginInstance {
     fn drop(&mut self) {
+        // release the live-instance slot for this plugin (the registry this
+        // state was created against — the loader's shared one)
+        if let Some(slots) = self.slots.take() {
+            slots.release(&self.plugin_id);
+        }
         // Close the mailbox so the worker terminates after its current
         // command. The join is deliberately *not* done here: dropping must
         // never wait on a stuck wasm call. The worker thread is detached
@@ -291,11 +424,24 @@ fn worker_loop(
                 }));
                 let result = match result {
                     Ok(Ok(bytes)) => Ok(bytes),
-                    Ok(Err(message)) => Err(PluginError::CallFailed {
-                        plugin_id: plugin_id.clone(),
-                        export,
-                        message,
-                    }),
+                    Ok(Err(message)) => {
+                        // extism surfaces a drained fuel store as an error
+                        // whose message contains this string (via
+                        // catch_out_of_fuel! and raw_call); the epoch timer
+                        // surfaces timeouts the same way with "timeout"
+                        if message.contains("ran out of fuel") {
+                            Err(PluginError::FuelExhausted {
+                                plugin_id: plugin_id.clone(),
+                                export,
+                            })
+                        } else {
+                            Err(PluginError::CallFailed {
+                                plugin_id: plugin_id.clone(),
+                                export,
+                                message,
+                            })
+                        }
+                    }
                     Err(_) => Err(PluginError::CallFailed {
                         plugin_id: plugin_id.clone(),
                         export,

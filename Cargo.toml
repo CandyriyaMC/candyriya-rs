@@ -100,6 +100,7 @@ tempfile = "3"
 # plugins/ hot-reload watcher
 dashmap = "6"
 notify = "8"
+wasmparser = "0.258"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

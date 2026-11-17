@@ -28,9 +28,10 @@
 //!   plugin for its on-disk state, watch `plugins/` and trigger reloads
 //!   through the task service.
 //!
-//! Not implemented here yet (by design, they land next): host functions
-//! and the task API, fuel/memory limits and WASI.
-//! No host functions are registered today.
+//! Not implemented here yet (by design, they land next): host functions and
+//! the task API. No host functions are registered today. Sandbox limits for
+//! modules (memory/fuel/time/byte/handle accounting and the per-window call
+//! rate limit) live in [`Limits`] and are applied by [`PluginInstance::new`].
 
 #![forbid(unsafe_code)]
 
@@ -41,6 +42,7 @@ mod host_state;
 mod hot_reload;
 mod instance;
 mod library_plugin;
+mod limits;
 mod manifest;
 mod plugin_loader;
 mod plugin_set;
@@ -58,6 +60,9 @@ pub use crate::host_state::HostState;
 pub use crate::hot_reload::{HotReloadError, PluginReloader, ReloadReport, Watch};
 pub use crate::instance::PluginInstance;
 pub use crate::library_plugin::{LibraryPlugin, PluginOrigin, PluginState};
+pub use crate::limits::{
+    CALL_WINDOW, HandleTable, HostHandle, InstanceSlots, LimitBuilder, Limits, LogBudget,
+};
 pub use crate::manifest::{DuplicateId, DuplicatePluginIds, PluginManifest, validate_unique};
 pub use crate::plugin_loader::{LoadIssue, LoadReport, PluginLoader};
 pub use crate::plugin_set::PluginSet;

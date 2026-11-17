@@ -4,11 +4,12 @@
 //! with files written locally.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use base64::Engine as _;
 use candyriya_config::{
     AdvancedConfig, Config, ConfigError, ConfigStore, DEFAULT_CONFIG_TOML, ForwardingMode,
-    SUPPORTED_CONFIG_VERSION,
+    PluginsConfig, SUPPORTED_CONFIG_VERSION,
 };
 
 fn temp_config(dir: &Path, contents: &str) -> PathBuf {
@@ -579,4 +580,73 @@ fn multiple_problems_are_collected_into_one_error() {
         problems.len() >= 3,
         "expected at least 3 collected problems, got: {problems:?}"
     );
+}
+
+#[test]
+fn plugins_section_parses_and_defaults_apply() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp_config(
+        temp.path(),
+        "[plugins]\nmax-memory-pages = 32\nmax-fuel = 1000000\nmax-calls = 100\nmax-call-timeout = \"7s\"\nmax-output-bytes = 2048\nmax-input-bytes = 4096\nmax-log-bytes = 128\n",
+    );
+    let config = Config::load(&path).expect("plugins section loads");
+    assert_eq!(config.plugins.max_memory_pages, 32);
+    assert_eq!(config.plugins.max_fuel, 1_000_000);
+    assert_eq!(config.plugins.max_calls, 100);
+    assert_eq!(config.plugins.max_call_timeout, Duration::from_secs(7));
+    assert_eq!(config.plugins.max_output_bytes, 2048);
+    assert_eq!(config.plugins.max_input_bytes, 4096);
+    assert_eq!(config.plugins.max_log_bytes, 128);
+
+    // a millisecond duration unit must decode too
+    let path = temp_config(temp.path(), "[plugins]\nmax-call-timeout = \"250ms\"\n");
+    let config = Config::load(&path).expect("millisecond durations parse");
+    assert_eq!(config.plugins.max_call_timeout, Duration::from_millis(250));
+
+    // missing section falls back to the documented defaults
+    let path = temp_config(temp.path(), "");
+    let config = Config::load(&path).expect("empty config loads");
+    assert_eq!(config.plugins, PluginsConfig::default());
+}
+
+#[test]
+fn plugins_rejects_bad_duration_and_zero_values() {
+    // a duration that does not match the grammar is a decode error
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp_config(temp.path(), "[plugins]\nmax-call-timeout = \"whenever\"\n");
+    let error = Config::load(&path).unwrap_err();
+    assert!(
+        matches!(error, ConfigError::Decode(_)),
+        "expected a decode error, got: {error:?}"
+    );
+    assert!(
+        error.to_string().contains("ms"),
+        "error must name the expected units: {error}"
+    );
+
+    // zero memory pages cannot run a plugin at all
+    let path = temp_config(temp.path(), "[plugins]\nmax-memory-pages = 0\n");
+    let error = Config::load(&path).unwrap_err();
+    assert!(
+        error
+            .problems()
+            .iter()
+            .any(|p| p.field == "plugins.max-memory-pages"),
+        "expected a plugins.max-memory-pages problem, got: {error:?}"
+    );
+
+    // a zero timeout traps every call instantly
+    let path = temp_config(temp.path(), "[plugins]\nmax-call-timeout = \"0s\"\n");
+    let error = Config::load(&path).unwrap_err();
+    assert!(
+        error
+            .problems()
+            .iter()
+            .any(|p| p.field == "plugins.max-call-timeout"),
+        "expected a plugins.max-call-timeout problem, got: {error:?}"
+    );
+
+    // zero fuel and zero calls mean unlimited and must load
+    let path = temp_config(temp.path(), "[plugins]\nmax-fuel = 0\nmax-calls = 0\n");
+    Config::load(&path).expect("0 means unlimited and must load");
 }

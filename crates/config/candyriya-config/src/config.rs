@@ -6,9 +6,11 @@
 //! [`crate::validate`], not here; this module only describes the shape.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::duration::deserialize_duration;
 use crate::secret::ForwardingSecret;
 
 /// The only configuration version this build understands.
@@ -221,6 +223,53 @@ impl Default for PermissionsConfig {
     }
 }
 
+/// `[plugins]`: WASM plugin sandbox limits.
+///
+/// Everything here is operator-facing; the plugin runtime maps this section
+/// onto its own `Limits` knobs (see `LimitBuilder::from_config`). `0` means
+/// "unlimited" for `max-fuel` and `max-calls`; byte/page caps must be at
+/// least 1 when set, which validation enforces where a zero is unusable.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct PluginsConfig {
+    /// Maximum linear-memory pages (64 KiB each) a plugin may use.
+    /// `64` is 4 MiB. Must be at least `1`. Defaults to `64`.
+    pub max_memory_pages: u32,
+    /// Fuel per plugin call; `0` means unlimited. Defaults to `0`.
+    pub max_fuel: u64,
+    /// Maximum plugin calls per plugin per 5-second window; `0` means
+    /// unlimited. Defaults to `2000`.
+    pub max_calls: u32,
+    /// Maximum wall-clock time for a single plugin call, as a string like
+    /// `"250ms"`, `"5s"`, `"2m"` or `"1h"`. Must be at least 1 ms.
+    /// Defaults to `"5s"`.
+    #[serde(deserialize_with = "deserialize_duration")]
+    pub max_call_timeout: Duration,
+    /// Maximum bytes of output one plugin call may return. Defaults to
+    /// `1048576` (1 MiB).
+    pub max_output_bytes: usize,
+    /// Maximum bytes the host may send into one plugin call. Defaults to
+    /// `16777216` (16 MiB).
+    pub max_input_bytes: usize,
+    /// Maximum bytes of plugin log output per invocation. Defaults to
+    /// `1048576` (1 MiB).
+    pub max_log_bytes: usize,
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            max_memory_pages: 64,
+            max_fuel: 0,
+            max_calls: 2000,
+            max_call_timeout: Duration::from_secs(5),
+            max_output_bytes: 1_048_576,
+            max_input_bytes: 16_777_216,
+            max_log_bytes: 1_048_576,
+        }
+    }
+}
+
 /// `[metrics]`: metrics export.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -348,6 +397,9 @@ pub struct Config {
     /// `[metrics]` section.
     #[serde(default)]
     pub metrics: MetricsConfig,
+    /// `[plugins]` section.
+    #[serde(default)]
+    pub plugins: PluginsConfig,
     /// `[runtime]` section.
     #[serde(default)]
     pub runtime: RuntimeConfig,
@@ -381,6 +433,7 @@ impl Default for Config {
             query: QueryConfig::default(),
             permissions: PermissionsConfig::default(),
             metrics: MetricsConfig::default(),
+            plugins: PluginsConfig::default(),
             runtime: RuntimeConfig::default(),
             forwarding_secret: ForwardingSecret::default(),
         }

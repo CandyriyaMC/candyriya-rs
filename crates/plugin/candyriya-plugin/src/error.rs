@@ -68,6 +68,49 @@ pub enum PluginError {
         source: std::io::Error,
     },
 
+    /// The plugin exceeded one of the configured sandbox limits. `kind`
+    /// names the cap (`max-memory-pages`, `max-table-elements`,
+    /// `max-functions`, `max-instances`, `max-open-handles`,
+    /// `max-input-bytes`, `max-output-bytes`, `max-log-bytes`); `limit` is
+    /// the configured cap and `requested` the amount the plugin attempted.
+    #[error(
+        "plugin `{plugin_id}` exceeded the `{kind}` limit (limit: {limit}, requested: {requested})"
+    )]
+    LimitExceeded {
+        /// The plugin that exceeded the cap.
+        plugin_id: String,
+        /// Which cap was hit (kebab-case name of the `[plugins]` key).
+        kind: &'static str,
+        /// The configured cap.
+        limit: u64,
+        /// What the plugin attempted (or has open).
+        requested: u64,
+    },
+
+    /// The plugin hit its call rate limit: `max_calls` per
+    /// [`crate::CALL_WINDOW`] window. The denied calls consumed no quota.
+    #[error(
+        "plugin `{plugin_id}` exceeded its call rate limit ({max_calls} calls per {window_secs}s)"
+    )]
+    RateLimited {
+        /// The plugin that was rate-limited.
+        plugin_id: String,
+        /// The configured cap per window.
+        max_calls: u32,
+        /// The window the cap applies to, in seconds.
+        window_secs: u64,
+    },
+
+    /// A call into the plugin exhausted its fuel budget. Re-arming happens
+    /// per call, so the plugin may be called again.
+    #[error("plugin `{plugin_id}` exhausted its fuel budget calling `{export}`")]
+    FuelExhausted {
+        /// The plugin that ran out of fuel.
+        plugin_id: String,
+        /// The export being called when the fuel ran out.
+        export: String,
+    },
+
     /// The wasm module failed to compile or instantiate.
     #[error("failed to instantiate wasm module {}: {0}", .path.display())]
     WasmLoad {

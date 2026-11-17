@@ -195,6 +195,7 @@ pub(crate) fn validate(config: &Config) -> Vec<ValidationProblem> {
     validate_query(config, &mut problems);
     validate_permissions(config, &mut problems);
     validate_metrics(config, &mut problems);
+    validate_plugins(config, &mut problems);
     validate_runtime(config, &mut problems);
 
     problems
@@ -324,6 +325,25 @@ fn validate_metrics(config: &Config, problems: &mut Vec<ValidationProblem>) {
     ) {
         problems.push(problem);
     }
+}
+
+fn validate_plugins(config: &Config, problems: &mut Vec<ValidationProblem>) {
+    let plugins = &config.plugins;
+    if plugins.max_memory_pages == 0 {
+        problems.push(ValidationProblem::new(
+            "plugins.max-memory-pages",
+            "must be at least 1 (a plugin with zero pages of linear memory cannot run)",
+        ));
+    }
+    if plugins.max_call_timeout.is_zero() {
+        problems.push(ValidationProblem::new(
+            "plugins.max-call-timeout",
+            "must be at least 1ms — a zero timeout traps every call instantly",
+        ));
+    }
+    // `max-fuel` and `max-calls` use `0` as the unlimited sentinel; the byte
+    // caps treat `0` as a hard zero cap (deny all), which is meaningful and
+    // deliberately allowed.
 }
 
 fn validate_runtime(config: &Config, problems: &mut Vec<ValidationProblem>) {

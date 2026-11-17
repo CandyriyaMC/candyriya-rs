@@ -36,12 +36,14 @@
 //! its reason is also listed in `issues`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use candyriya_cache::CacheManager;
 
 use crate::host_state::HostState;
 use crate::instance::PluginInstance;
 use crate::library_plugin::{LibraryPlugin, PluginOrigin};
+use crate::limits::{InstanceSlots, Limits};
 use crate::manifest::{PluginManifest, validate_unique};
 
 /// One discovery problem, as a `(where, why)` tuple.
@@ -71,21 +73,40 @@ pub struct LoadReport {
 /// The `cache` handle is used to locate the proxy's data directory (plugins
 /// own `<data_dir>/config/<plugin-id>/`) and to apply the cache quotas a
 /// plugin declares in its manifest. The proxy builds one loader for startup
-/// and re-uses it for reload passes.
+/// and re-uses it for reload passes. Sandbox limits default to
+/// [`Limits::default`]; use [`PluginLoader::with_limits`] to apply the
+/// `[plugins]` section of `candyriya-config` (see `LimitBuilder::from_config`).
 pub struct PluginLoader<'a> {
     plugins_dir: PathBuf,
     libraries_dir: PathBuf,
     cache: &'a CacheManager,
+    limits: Limits,
 }
 
 impl<'a> PluginLoader<'a> {
     /// Store the roots. Directories are not touched until [`PluginLoader::load`].
     pub fn new(plugins_dir: PathBuf, libraries_dir: PathBuf, cache: &'a CacheManager) -> Self {
+        Self::with_limits(plugins_dir, libraries_dir, cache, Limits::default())
+    }
+
+    /// Same as [`PluginLoader::new`] with explicit sandbox limits.
+    pub fn with_limits(
+        plugins_dir: PathBuf,
+        libraries_dir: PathBuf,
+        cache: &'a CacheManager,
+        limits: Limits,
+    ) -> Self {
         Self {
             plugins_dir,
             libraries_dir,
             cache,
+            limits,
         }
+    }
+
+    /// The sandbox limits this loader applies to every plugin.
+    pub fn limits(&self) -> &Limits {
+        &self.limits
     }
 
     /// The plugins root this loader was built with.
@@ -123,9 +144,12 @@ impl<'a> PluginLoader<'a> {
 
         self.drop_duplicate_ids(&mut candidates, &mut issues);
 
+        // one live-instance registry per discovery run, so the max-instances
+        // cap is enforced collectively across every plugin loaded together
+        let instance_slots = Arc::new(InstanceSlots::new());
         let plugins = candidates
             .into_iter()
-            .map(|c| self.instantiate(c, &mut issues))
+            .map(|c| self.instantiate(c, &instance_slots, &mut issues))
             .collect();
 
         LoadReport { plugins, issues }
@@ -275,7 +299,12 @@ impl<'a> PluginLoader<'a> {
     /// Prepare one discovered plugin for execution. Every failure becomes a
     /// `Failed` record (or an issue if the failure happens before the record
     /// can be built); the other plugins are unaffected either way.
-    fn instantiate(&self, candidate: Candidate, issues: &mut Vec<LoadIssue>) -> LibraryPlugin {
+    fn instantiate(
+        &self,
+        candidate: Candidate,
+        instance_slots: &Arc<InstanceSlots>,
+        issues: &mut Vec<LoadIssue>,
+    ) -> LibraryPlugin {
         let Candidate {
             dir,
             manifest,
@@ -301,8 +330,8 @@ impl<'a> PluginLoader<'a> {
             return LibraryPlugin::failed(dir, manifest, origin, why);
         }
 
-        let host_state = HostState::new(data_dir);
-        let instance = match PluginInstance::new(&wasm_path, host_state, &id) {
+        let host_state = HostState::with_instance_slots(data_dir, Arc::clone(instance_slots));
+        let instance = match PluginInstance::new(&wasm_path, host_state, &id, &self.limits) {
             Ok(instance) => instance,
             Err(e) => {
                 let reason = e.to_string();

@@ -469,6 +469,7 @@ name = "candyriya-plugin"
 version = "0.1.0"
 dependencies = [
  "candyriya-cache",
+ "candyriya-config",
  "candyriya-plugin-api",
  "candyriya-scheduler",
  "dashmap",
@@ -483,6 +484,7 @@ dependencies = [
  "tokio",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
+ "wasmparser",
  "wat",
 ]
 

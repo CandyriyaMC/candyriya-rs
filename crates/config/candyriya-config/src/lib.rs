@@ -39,6 +39,7 @@
 
 mod config;
 mod default;
+mod duration;
 mod error;
 mod load;
 mod secret;
@@ -47,7 +48,8 @@ mod validate;
 
 pub use config::{
     AdvancedConfig, Config, ForcedHosts, ForwardingMode, MetricsConfig, PermissionsConfig,
-    ProtocolConfig, QueryConfig, RuntimeConfig, SUPPORTED_CONFIG_VERSION, ServersConfig,
+    PluginsConfig, ProtocolConfig, QueryConfig, RuntimeConfig, SUPPORTED_CONFIG_VERSION,
+    ServersConfig,
 };
 pub use default::DEFAULT_CONFIG_TOML;
 pub use error::{ConfigError, ValidationProblem, ValidationProblems};

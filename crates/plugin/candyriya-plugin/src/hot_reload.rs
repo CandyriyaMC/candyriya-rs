@@ -42,6 +42,11 @@
 //! Deleting a plugin's files does **not** unload the running plugin —
 //! once loaded, a plugin stays loaded until it is unloaded explicitly or
 //! the proxy shuts down. Watch mode only reloads.
+//!
+//! The staged replacement gets a fresh, private instance registry: the
+//! outgoing and staged instance are briefly both alive, and `max-instances`
+//! (default 1) must not reject a legitimate stage. The running instance's
+//! own registry is unaffected either way.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
@@ -57,6 +62,7 @@ use crate::error::PluginError;
 use crate::host_state::HostState;
 use crate::instance::PluginInstance;
 use crate::library_plugin::{LibraryPlugin, PluginState};
+use crate::limits::Limits;
 use crate::manifest::PluginManifest;
 use crate::plugin_loader::select_wasm;
 use crate::plugin_set::PluginSet;
@@ -117,6 +123,7 @@ pub struct PluginReloader {
     plugins: PluginSet,
     config_root: PathBuf,
     services: ServiceRegistry,
+    limits: Limits,
 }
 
 impl PluginReloader {
@@ -125,11 +132,26 @@ impl PluginReloader {
     /// `config_root` is the proxy's data directory; plugin data
     /// directories live at `<config_root>/config/<id>/`. It must match
     /// what the loader used so the reloaded plugin finds its own files.
+    /// Sandbox limits default to [`Limits::default`]; use
+    /// [`PluginReloader::with_limits`] to apply the `[plugins]` section of
+    /// `candyriya-config` to reloaded plugins too.
     pub fn new(plugins: PluginSet, config_root: PathBuf, services: ServiceRegistry) -> Self {
+        Self::with_limits(plugins, config_root, services, Limits::default())
+    }
+
+    /// Same as [`PluginReloader::new`] with explicit sandbox limits for the
+    /// staged replacement (see `LimitBuilder::from_config`).
+    pub fn with_limits(
+        plugins: PluginSet,
+        config_root: PathBuf,
+        services: ServiceRegistry,
+        limits: Limits,
+    ) -> Self {
         Self {
             plugins,
             config_root,
             services,
+            limits,
         }
     }
 
@@ -182,7 +204,7 @@ impl PluginReloader {
             source,
         })?;
 
-        let instance = PluginInstance::new(&wasm_path, HostState::new(data_dir), id)?;
+        let instance = PluginInstance::new(&wasm_path, HostState::new(data_dir), id, &self.limits)?;
         match instance.function_exists(manifest.plugin_main()) {
             Ok(true) => {}
             Ok(false) => {

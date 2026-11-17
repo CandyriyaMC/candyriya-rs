@@ -39,6 +39,8 @@ const ROOT_KEYS: &[&str] = &[
     "query",
     "permissions",
     "metrics",
+    "motd-favicon",
+    "plugins",
     "runtime",
 ];
 
@@ -76,6 +78,18 @@ const FIXED_SECTIONS: &[(&str, &[&str])] = &[
     ("query", &["enabled", "port", "map", "show-plugins"]),
     ("permissions", &["provider", "default", "grants"]),
     ("metrics", &["prometheus", "prometheus-address"]),
+    (
+        "plugins",
+        &[
+            "max-memory-pages",
+            "max-fuel",
+            "max-calls",
+            "max-call-timeout",
+            "max-output-bytes",
+            "max-input-bytes",
+            "max-log-bytes",
+        ],
+    ),
     ("runtime", &["worker-threads", "blocking-threads"]),
 ];
 
@@ -223,6 +237,7 @@ config-version = "0.1"
 bind = "0.0.0.0:25565"
 motd = "<aqua>x"
 show-max-players = 100
+motd-favicon = "assets/favicon.png"
 online-mode = true
 force-key-authentication = true
 player-info-forwarding-mode = "modern"
@@ -277,6 +292,15 @@ default = "default"
 [metrics]
 prometheus = false
 prometheus-address = "0.0.0.0:9124"
+
+[plugins]
+max-memory-pages = 64
+max-fuel = 0
+max-calls = 2000
+max-call-timeout = "5s"
+max-output-bytes = 1048576
+max-input-bytes = 16777216
+max-log-bytes = 1048576
 
 [runtime]
 worker-threads = 4

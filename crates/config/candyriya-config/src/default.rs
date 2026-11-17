@@ -190,6 +190,25 @@ grants = {}
 prometheus = false
 prometheus-address = "0.0.0.0:9124"
 
+[plugins]
+# Sandbox limits for WASM plugins. These are the knobs operators are most
+# likely to touch; the rest of the limits live in the plugin runtime's
+# defaults. `0` means unlimited where documented.
+# Max linear-memory pages (64 KiB each) a plugin may use. 64 = 4 MiB.
+max-memory-pages = 64
+# Fuel per plugin call; 0 = unlimited (the default).
+max-fuel = 0
+# Max plugin calls per plugin per 5-second window; 0 = unlimited.
+max-calls = 2000
+# Maximum wall-clock time for a single plugin call: "250ms", "5s", "2m", "1h".
+max-call-timeout = "5s"
+# Max bytes of output one plugin call may return.
+max-output-bytes = 1048576
+# Max bytes the host may send into one plugin call.
+max-input-bytes = 16777216
+# Max bytes of plugin log output per invocation.
+max-log-bytes = 1048576
+
 [runtime]
 # Thread pool sizes. Both default to the number of logical CPUs, which is
 # the right answer for almost everyone — that's why these are not in the
