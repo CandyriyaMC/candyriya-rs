@@ -11,8 +11,10 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(name: &str) -> Self {
-        let path = std::env::temp_dir()
-            .join(format!("candyriya-i18n-warnings-{name}-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "candyriya-i18n-warnings-{name}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("temp dir must be created");
         Self(path)
@@ -42,7 +44,10 @@ struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for CaptureWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(buf);
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -92,4 +97,3 @@ fn broken_override_file_falls_back_with_warning() {
         "warning must say we fall back, got: {logs}"
     );
 }
-
