@@ -287,9 +287,17 @@ dependencies = [
 name = "candyriya-bench"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "candyriya-cache",
  "candyriya-compression",
+ "candyriya-forwarding",
+ "candyriya-player",
  "candyriya-protocol",
+ "candyriya-protocol-registry",
  "criterion",
+ "tempfile",
+ "tokio-util",
+ "uuid",
 ]
 
 [[package]]
