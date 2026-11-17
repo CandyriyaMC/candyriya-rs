@@ -9,7 +9,82 @@ GitHub Releases are attached to tags automatically when they are pushed; each
 release carries the prebuilt binaries as assets. See the
 [Releases](https://github.com/CandyriyaMC/candyriya-rs/releases) page.
 
+## [0.1.1] - 2026-11-17
+
+The plugin runtime release: plugins now actually receive lifecycle events,
+the host services behind the `candyriya:*` host functions are registered at
+startup, plugins can localize their own strings, and per-plugin metrics are
+exported. No protocol or configuration changes; the binary is a drop-in
+replacement for 0.1.0.
+
+### Added
+
+**Plugin lifecycle events**
+
+- The proxy now fires the typed `ProxyEvent`s into the plugin system at the
+  lifecycle points: `connection_allowed` (after profile resolution, before
+  routing — a veto still prevents any backend contact), `connection_kicked`
+  on every kick the proxy sends, `login` (after the backend answers Login
+  Success but before the client is told — a veto means the success frame is
+  never forwarded), `switch_server` on a kick-fallback hop (a veto skips the
+  candidate and keeps the fallback chain alive; when the chain exhausts, the
+  first cancelling plugin's reason is the kick message), and `disconnect` on
+  connection close. `connection_kicked` and `disconnect` are observation-only;
+  the action events honor aggregate cancellation. See docs/plugins.md for the
+  wiring and the veto semantics.
+- The dispatcher is registered once at boot and shared between the service
+  registry and the proxy state, so `/candyriya reload` swaps the plugin set
+  under a single fan-out.
+
+**Plugin host services at startup**
+
+- `plugin.dispatcher`, `players.roster` (rebuilt every second from the live
+  play-state roster; the registered snapshot is re-swapped only when it
+  changed) and `servers.names` (the backend names from the registry, tracked
+  across `/candyriya reload`) are now registered at boot. `candyriya:callApi`
+  roundtrips reach the target plugin's `[api].exports`; `candyriya:listServers`
+  answers with the real configured names instead of `["local"]`.
+- `players.ping_sink` is deliberately left unregistered: there is no honest
+  client-bound delivery path yet, so `candyriya:pingPlayer` keeps its
+  documented error instead of pretending to deliver.
+
+**Plugin localization**
+
+- New host functions `candyriya:i18nT` and `candyriya:i18nLocale`. `i18nT`
+  resolves `plugin.<own-id>.*` and `common.*` keys through the same fallback
+  chain as the core (the plugin's own file — active then en — then the
+  active/en common tables, then the key itself; it never panics and never
+  resolves core or other plugins' keys). Interpolation of `{name}`-style
+  placeholders happens host-side from the provided args object.
+- `plugin.toml` gains `[locales]`: an opt-in with the fixed layout
+  `locales/<lang>/<plugin-id>.toml`. Declared locale directories are
+  registered into the same i18n machines at plugin load and re-registered on
+  reload; `/candyriya reload` hot-reloads the files.
+
+**Plugin metrics**
+
+- Per-plugin metrics are exported through the existing Prometheus exporter
+  when `[metrics] prometheus = true`:
+  `candyriya_plugin_calls_total{plugin, outcome}` (`ok` | `timeout` | `failed`
+  | `fuel_exhausted` | `cancelled`), `candyriya_plugin_call_duration_seconds`,
+  `candyriya_plugin_active_calls`, `candyriya_plugin_thread_time_seconds_total`,
+  `candyriya_plugin_busy_total` (mailbox-full rejections) and
+  `candyriya_plugin_loaded` (inc/dec per live instance; briefly 2 during a
+  hot-reload swap). Series persist across unload; the `loaded` gauge tracks
+  liveness.
+
+### Fixed
+
+- `callApi` no longer answers `"host dispatcher is not registered"` at a
+  default boot, `getPlayerRoster` no longer returns an empty list, and
+  `listServers` no longer falls back to `["local"]` when backends are
+  configured (see above).
+- Clippy `question_mark` lint and a rustdoc private-link in
+  `candyriya-plugin` that broke the `-D warnings` gates.
+
 ## [0.1.0] - 2026-11-17
+
+
 
 The first tagged release of Candyriya: a from-scratch Minecraft Java Edition
 proxy written in Rust — Tokio everywhere, no `unsafe`, and no JVM on the proxy

@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "candyriya-auth",
  "candyriya-cache",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-auth"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "candyriya-player",
  "reqwest",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-bench"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "candyriya-cache",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-cache"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cachegirl",
  "thiserror 2.0.21",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-command"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "azalea-brigadier",
  "candyriya-config",
@@ -354,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-compression"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flate2",
  "thiserror 2.0.21",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-encryption"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "cfb8",
@@ -393,11 +393,11 @@ dependencies = [
 
 [[package]]
 name = "candyriya-eventbus"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "candyriya-forwarding"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "candyriya-player",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-fuzz"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "candyriya-forwarding",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-i18n"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "lobsterchat",
@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-it"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-messaging"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "thiserror 2.0.21",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-messaging-bungeecord"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "candyriya-messaging",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-messaging-candyriya"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "candyriya-messaging",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-messaging-velocity"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "candyriya-messaging",
@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-metrics"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-permissions"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parking_lot",
  "thiserror 2.0.21",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-permissions-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "candyriya-permissions",
  "thiserror 2.0.21",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-player"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "candyriya-protocol-registry",
  "chrono",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-player-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "candyriya-player",
  "chrono",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "candyriya-cache",
  "candyriya-config",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-plugin-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "candyriya-i18n",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "thiserror 2.0.21",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-protocol-registry"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "minreq",
  "serde",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-proxy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-ratelimit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parking_lot",
  "thiserror 2.0.21",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-route"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "candyriya-protocol",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-scheduler"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "num_cpus",
  "parking_lot",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-telemetry"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "candyriya-utils"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rand 0.9.5",
  "tempfile",
