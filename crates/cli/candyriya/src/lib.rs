@@ -21,6 +21,9 @@
 //!    Prometheus exporter (only when `[metrics] prometheus = true`), the
 //!    Mojang/offline session validators selected from `online-mode`, the
 //!    routing registry, the command tree and the interactive console REPL.
+//!    The plugin-facing host services the `candyriya:*` functions resolve
+//!    through — the plugin dispatcher, the play-state roster snapshot and
+//!    the backend name list — are registered right after the plugin load.
 //! 6. **Lifecycle** — Ctrl-C or `/candyriya end` flips the shared shutdown
 //!    signal; the accept loop stops, the task service drains, the subsystems
 //!    shut down in reverse order of wiring, and the process exits with code 0.
@@ -49,8 +52,10 @@ use candyriya_command::{CommandRegistry, CommandState, ShutdownHandle};
 use candyriya_config::{Config, ConfigStore, DEFAULT_CONFIG_TOML};
 use candyriya_i18n::I18n;
 use candyriya_plugin::{
-    LimitBuilder, PluginLoader, PluginReloader, PluginSet, ServiceRegistry, resolve_plugins,
+    DISPATCHER_SERVICE_KEY, LimitBuilder, PLAYERS_ROSTER_KEY, PluginLoader, PluginReloader,
+    PluginSet, ProxyEventDispatcher, SERVERS_NAMES_KEY, ServiceRegistry, resolve_plugins,
 };
+use candyriya_plugin_api::PlayerRef;
 use candyriya_proxy::{FaviconCache, ProxySocket, ProxyState, SocketConfig, serve};
 use candyriya_route::BackendRegistry;
 use candyriya_scheduler::TaskService;
@@ -380,6 +385,16 @@ async fn run_async(
         "plugins.set".to_string(),
         Arc::clone(&plugin_set) as Arc<dyn std::any::Any + Send + Sync>,
     );
+    // ---- plugin host services: without these, the candyriya:* host
+    // functions fall back to their built-in answers (callApi errors out,
+    // the roster reads empty, listServers answers ["local"])
+    register_plugin_host_services(
+        &registry,
+        &service,
+        &plugin_set,
+        &proxy_state,
+        router.as_deref(),
+    );
 
     // ---- hot reload: the same machinery, on demand
     let reload_fn = build_reload_fn(
@@ -467,6 +482,109 @@ async fn run_async(
     Ok(())
 }
 
+/// How often the `players.roster` snapshot is rebuilt from the live
+/// play-state roster. Plugin-facing `getPlayerRoster` answers from that
+/// snapshot, so a join or a disconnect may lag by at most this interval
+/// (plus task-scheduling jitter).
+const ROSTER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Snapshot the live play-state roster into the `Vec<PlayerRef>` shape the
+/// `players.roster` service key carries.
+fn roster_snapshot(state: &ProxyState) -> Vec<PlayerRef> {
+    state
+        .roster
+        .snapshot()
+        .into_iter()
+        .map(|entry| PlayerRef {
+            uuid: entry.uuid.to_string(),
+            name: entry.name,
+        })
+        .collect()
+}
+
+/// Register the host services the `candyriya:*` plugin host functions
+/// resolve through the registry.
+///
+/// - `plugin.dispatcher` — built from the very [`PluginSet`] hot reload
+///   mutates in place (a cheap `Arc`-shared clone), so the dispatcher
+///   always fans out into the current plugin records with no refresh of
+///   its own. Reusing the same `plugin.dispatcher` key another component
+///   may register under keeps the two registrations interchangeable; the
+///   registry just replaces on re-register.
+/// - `players.roster` — an initial snapshot is registered here, then a
+///   named task rebuilds it every [`ROSTER_REFRESH_INTERVAL`] from
+///   `proxy_state.roster` (the accept/login pipeline owns that roster;
+///   it is authoritative for the live play-state population). The host
+///   function reads the registered snapshot, so this interval is the
+///   staleness bound a plugin can observe. The swap happens only when the
+///   snapshot changed, via remove+register: a registration over an
+///   existing key logs a warning in the registry, and a player join/part
+///   is not one.
+/// - `players.ping_sink` — deliberately **not** registered. The play
+///   state is a byte pump with no packet-injection path to a client, so
+///   there is no honest way to deliver a chat ping today; leaving the key
+///   absent keeps `pingPlayer` answering with its documented
+///   "player messaging is not implemented yet" error instead of a sink
+///   that pretends to deliver. Wire one in here once the proxy grows a
+///   client-bound chat path.
+/// - `servers.names` — the backend names from [`BackendRegistry`], in
+///   registration order. With no `[servers]` configured the key stays
+///   absent and the host function falls back to `["local"]`; the reload
+///   path re-registers (or removes) the names next to the router swap.
+fn register_plugin_host_services(
+    registry: &ServiceRegistry,
+    service: &TaskService,
+    plugin_set: &Arc<PluginSet>,
+    proxy_state: &Arc<ProxyState>,
+    router: Option<&BackendRegistry>,
+) {
+    let dispatcher = Arc::new(ProxyEventDispatcher::new(plugin_set.as_ref().clone()));
+    registry.register_service(
+        DISPATCHER_SERVICE_KEY.to_owned(),
+        dispatcher as Arc<dyn std::any::Any + Send + Sync>,
+    );
+
+    let roster = roster_snapshot(proxy_state);
+    registry.register_service(
+        PLAYERS_ROSTER_KEY.to_owned(),
+        Arc::new(roster.clone()) as Arc<dyn std::any::Any + Send + Sync>,
+    );
+    let mut last_registered = roster;
+    let roster_state = Arc::clone(proxy_state);
+    let roster_registry = registry.clone();
+    service.every(
+        "players.roster-refresh",
+        ROSTER_REFRESH_INTERVAL,
+        move || {
+            // the comparison is cheap (a few small strings), so it happens
+            // synchronously in the factory and the returned future is empty
+            let current = roster_snapshot(&roster_state);
+            if current != last_registered {
+                // swap without the registry's replace warning: a join/part
+                // is normal traffic, not an operator-actionable event
+                roster_registry.remove_service::<Vec<PlayerRef>>(PLAYERS_ROSTER_KEY);
+                roster_registry.register_service(
+                    PLAYERS_ROSTER_KEY.to_owned(),
+                    Arc::new(current.clone()) as Arc<dyn std::any::Any + Send + Sync>,
+                );
+                last_registered = current;
+            }
+            async {}
+        },
+    );
+
+    if let Some(router) = router {
+        let names: Vec<String> = router
+            .iter()
+            .map(|backend| backend.name().to_owned())
+            .collect();
+        registry.register_service(
+            SERVERS_NAMES_KEY.to_owned(),
+            Arc::new(names) as Arc<dyn std::any::Any + Send + Sync>,
+        );
+    }
+}
+
 /// Log one compact stats line for the periodic task.
 fn log_stats(state: &ProxyState, router: Option<&BackendRegistry>) {
     let (backends_online, backends_total) = match router {
@@ -533,15 +651,17 @@ fn refresh_favicon(config: &Config, favicon_cache: Option<&FaviconCache>) -> boo
 /// listener socket and live sessions are likewise untouched.
 ///
 /// On any failure the running configuration is left untouched (the
-/// [`ConfigStore::reload`] contract); the routing registry and favicon are
-/// only swapped when their own rebuild succeeds, so a half-applied reload
-/// cannot leak out. Returns an operator-facing note on success.
+/// [`ConfigStore::reload`] contract); the routing registry, the
+/// `servers.names` host service and the favicon are only swapped when
+/// their own rebuild succeeds, so a half-applied reload cannot leak out.
+/// Returns an operator-facing note on success.
 fn reload_config_phase(
     store: &ConfigStore,
     config_path: &Path,
     proxy_state: &ProxyState,
     favicon_cache: Option<&FaviconCache>,
     locales: &candyriya_command::Locales,
+    services: &ServiceRegistry,
 ) -> Result<String, String> {
     let config = store
         .reload(config_path)
@@ -552,12 +672,27 @@ fn reload_config_phase(
     // it atomically; on failure the previous routing stays in place
     if config.servers.servers.is_empty() {
         proxy_state.set_router(None);
+        // mirror a fresh start with no [servers]: the key goes away and
+        // listServers keeps its documented ["local"] fallback
+        services.remove_service::<Vec<String>>(SERVERS_NAMES_KEY);
         notes.push("routing disabled (no [servers] configured)".to_owned());
     } else {
         match candyriya_proxy::registry_from_config(&config) {
             Ok(registry) => {
-                let count = registry.iter().count();
+                let names: Vec<String> = registry
+                    .iter()
+                    .map(|backend| backend.name().to_owned())
+                    .collect();
+                let count = names.len();
                 proxy_state.set_router(Some(Arc::new(registry)));
+                // keep the plugin-facing name list on the same swap, so a
+                // plugin never sees names that no longer route; remove+register
+                // to skip the registry's replace warning
+                services.remove_service::<Vec<String>>(SERVERS_NAMES_KEY);
+                services.register_service(
+                    SERVERS_NAMES_KEY.to_owned(),
+                    Arc::new(names) as Arc<dyn std::any::Any + Send + Sync>,
+                );
                 notes.push(format!("{count} backends re-registered"));
             }
             Err(message) => {
@@ -682,6 +817,7 @@ fn build_reload_fn(
                 &proxy_state,
                 favicon_cache.as_deref(),
                 &locales,
+                &services,
             )
         });
         let plugins = plugin_phase
