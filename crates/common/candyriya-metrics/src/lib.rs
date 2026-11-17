@@ -69,15 +69,16 @@
 //!   [`names`]; recommended naming is deliberately NOT enabled, so the
 //!   exported name is exactly the constant's value.
 //! - Histograms are rendered as true Prometheus histograms (not summaries)
-//!   with [`DEFAULT_HISTOGRAM_BUCKETS`] as bounds. There is intentionally
-//!   exactly one histogram — login duration — everything hot-path is a
-//!   counter or a gauge.
+//!   with [`DEFAULT_HISTOGRAM_BUCKETS`] as bounds. There are exactly two
+//!   histograms — login duration and per-plugin call duration — everything
+//!   else hot-path is a counter or a gauge.
 //!
 //! # Metric selection
 //!
-//! Hot paths (per packet, per byte) get counters and gauges only. The single
-//! histogram exists for login duration, and even that could be swapped for a
-//! pair of counters later if the buckets prove contentious.
+//! Hot paths (per packet, per byte) get counters and gauges only. The two
+//! histograms exist for login duration and per-plugin call duration; even
+//! those could be swapped for a pair of counters later if the buckets prove
+//! contentious.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

@@ -555,11 +555,13 @@ version = "0.1.0"
 dependencies = [
  "candyriya-cache",
  "candyriya-config",
+ "candyriya-metrics",
  "candyriya-plugin-api",
  "candyriya-scheduler",
  "dashmap",
  "extism",
  "indexmap 2.14.2",
+ "metrics",
  "notify",
  "parking_lot",
  "semver",

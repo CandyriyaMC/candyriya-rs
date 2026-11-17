@@ -251,6 +251,8 @@ fn call_target(
     // a cancellation left over from a previous call must not leak in
     let _ = instance.take_pending_outcome();
     let result = instance.call_with_timeout(fn_name, args, timeout);
+    // mechanical outcome accounting; callApi has no dispatch-level merge
+    crate::metrics::record_result(target, &result);
     // cancelEvent only makes sense for event dispatches; inside a callApi
     // the recorded cancellation is discarded
     let _ = instance.take_pending_outcome();
@@ -287,6 +289,11 @@ fn dispatch_one(
     let pending = instance.take_pending_outcome();
     instance.set_caller_plugin_id(previous);
 
+    // keep one bit of the raw result: fuel exhaustion is its own outcome
+    // label even though the dispatcher folds it into `failed`. a busy
+    // rejection must not land in calls_total at all (busy_total owns it).
+    let fuel_exhausted = matches!(&result, Err(PluginError::FuelExhausted { .. }));
+    let busy = matches!(&result, Err(PluginError::Busy { .. }));
     let base = match result {
         Ok(bytes) => match serde_json::from_slice::<OutcomeReport>(&bytes) {
             Ok(report) => {
@@ -314,7 +321,26 @@ fn dispatch_one(
             error: error.to_string(),
         },
     };
-    merge_pending_cancellation(base, pending)
+    let outcome = merge_pending_cancellation(base, pending);
+    // the merged outcome is the truthful one for on_event: a cancellation
+    // recorded through cancelEvent (or in the export's own report) wins
+    // over the mechanical result, so `cancelled` — and nothing else —
+    // lands here for those calls. busy rejections counted nothing:
+    // busy_total owns mailbox-full, calls_total stays silent.
+    let metric_outcome = match &outcome {
+        Outcome::Allowed => Some(crate::metrics::CallOutcome::Ok),
+        Outcome::Cancelled { .. } => Some(crate::metrics::CallOutcome::Cancelled),
+        Outcome::Timeout => Some(crate::metrics::CallOutcome::Timeout),
+        Outcome::Failed { .. } if fuel_exhausted => {
+            Some(crate::metrics::CallOutcome::FuelExhausted)
+        }
+        Outcome::Failed { .. } if busy => None,
+        Outcome::Failed { .. } => Some(crate::metrics::CallOutcome::Failed),
+    };
+    if let Some(metric_outcome) = metric_outcome {
+        crate::metrics::record_call(id, metric_outcome);
+    }
+    outcome
 }
 
 /// Fold a cancellation recorded through the `candyriya:cancelEvent` host

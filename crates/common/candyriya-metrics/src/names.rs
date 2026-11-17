@@ -108,6 +108,86 @@ pub const NAME_BACKEND_PING_SECONDS: &str = "candyriya_backend_ping_seconds";
 ///   peers.
 pub const NAME_DISCONNECTS_TOTAL: &str = "candyriya_disconnects_total";
 
+/// Counter. Plugin calls, counted once per call attempt, labelled by the
+/// outcome the call settled on.
+///
+/// Labels:
+///
+/// - `plugin` (required): the plugin id from the manifest. Bounded by the
+///   number of plugins the operator loads.
+/// - `outcome` (required): one of `ok`, `timeout`, `failed`,
+///   `fuel_exhausted` or `cancelled`. `cancelled` is only produced by the
+///   event dispatcher, which knows the plugin cancelled the event; the
+///   instance call path knows only the mechanical result (`ok`, `timeout`,
+///   `failed`, `fuel_exhausted`). Calls rejected before the plugin ever ran
+///   (input too large, rate limited) are recorded as `failed`; mailbox-full
+///   rejections are NOT counted here — see [`NAME_PLUGIN_BUSY_TOTAL`].
+pub const NAME_PLUGIN_CALLS_TOTAL: &str = "candyriya_plugin_calls_total";
+
+/// Histogram. Wall-clock time for one plugin call, from the moment the
+/// caller starts waiting for the plugin until the answer (or the timeout)
+/// comes back, in seconds.
+///
+/// Labels:
+///
+/// - `plugin` (required): the plugin id from the manifest.
+///
+/// Rendered as a true Prometheus histogram with
+/// [`crate::DEFAULT_HISTOGRAM_BUCKETS`] as the bucket bounds. A shared
+/// bucket ladder is fine here: an `on_event` call that takes seconds is the
+/// signal, and the existing bounds bracket it. Calls rejected before the
+/// plugin ran are not observed (there is no call to time).
+pub const NAME_PLUGIN_CALL_DURATION_SECONDS: &str = "candyriya_plugin_call_duration_seconds";
+
+/// Gauge. Cumulative seconds the plugin's dedicated worker thread spent
+/// inside wasm calls. Monotonically increasing while the plugin lives.
+///
+/// Labels:
+///
+/// - `plugin` (required): the plugin id from the manifest.
+///
+/// The `metrics` facade has no float counters (`Counter::increment` is
+/// integer-only), so the cumulative seconds ride on a gauge; it only ever
+/// goes up. It measures the wall-clock span of the wasm call on the worker
+/// thread, not CPU time — true per-thread CPU time is not obtainable in
+/// safe Rust. A call that never returns (infinite wasm loop) is not
+/// accounted until the runtime interrupts it (fuel exhaustion or the
+/// manifest timeout).
+pub const NAME_PLUGIN_THREAD_TIME_SECONDS_TOTAL: &str =
+    "candyriya_plugin_thread_time_seconds_total";
+
+/// Gauge. Plugin calls currently being executed or awaited: incremented
+/// when a call is sent into the plugin's mailbox and decremented when the
+/// answer (or the timeout) comes back. A hung plugin whose callers all gave
+/// up keeps this at zero; a plugin mid-wasm shows the in-flight count.
+///
+/// Labels:
+///
+/// - `plugin` (required): the plugin id from the manifest.
+pub const NAME_PLUGIN_ACTIVE_CALLS: &str = "candyriya_plugin_active_calls";
+
+/// Counter. Calls rejected because the plugin's mailbox was full — the
+/// plugin is busy with earlier work and there is nowhere to queue. This is
+/// the `PluginError::Busy` path; anything else that rejects a call is a
+/// plain call failure, not busyness.
+///
+/// Labels:
+///
+/// - `plugin` (required): the plugin id from the manifest.
+pub const NAME_PLUGIN_BUSY_TOTAL: &str = "candyriya_plugin_busy_total";
+
+/// Gauge. Number of live wasm instances for this plugin — `1` while the
+/// plugin is loaded, `0` once the instance is gone (unload, reload swap,
+/// failed `plugin_main` check or a broken worker), briefly `2` while a
+/// hot-reload replacement and the outgoing instance coexist. Kept with the
+/// instance rather than removed on unload: series persist, which keeps
+/// dashboards and alert rules stable across unload/reload cycles.
+///
+/// Labels:
+///
+/// - `plugin` (required): the plugin id from the manifest.
+pub const NAME_PLUGIN_LOADED: &str = "candyriya_plugin_loaded";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +203,12 @@ mod tests {
         NAME_BACKENDS_ONLINE,
         NAME_BACKEND_PING_SECONDS,
         NAME_DISCONNECTS_TOTAL,
+        NAME_PLUGIN_CALLS_TOTAL,
+        NAME_PLUGIN_CALL_DURATION_SECONDS,
+        NAME_PLUGIN_THREAD_TIME_SECONDS_TOTAL,
+        NAME_PLUGIN_ACTIVE_CALLS,
+        NAME_PLUGIN_BUSY_TOTAL,
+        NAME_PLUGIN_LOADED,
     ];
 
     // prometheus data model: metric names must match [a-zA-Z_:][a-zA-Z0-9_:]*

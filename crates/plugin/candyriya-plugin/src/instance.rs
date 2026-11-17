@@ -165,7 +165,10 @@ impl PluginInstance {
             limits,
             Arc::clone(&slots),
         ) {
-            Ok(instance) => Ok(instance),
+            Ok(instance) => {
+                crate::metrics::plugin_loaded(plugin_id);
+                Ok(instance)
+            }
             Err(error) => {
                 slots.release(plugin_id);
                 Err(error)
@@ -329,8 +332,16 @@ impl PluginInstance {
     /// (de)serialization is the caller's job (JSON via extism-convert on the
     /// guest side). Waits at most `max_timeout` from the instance's
     /// [`Limits`] and never blocks the calling thread beyond that.
+    ///
+    /// `candyriya_plugin_calls_total` is recorded exactly once per call, at
+    /// the call site: this method maps the result mechanically (`ok`,
+    /// `timeout`, `failed`, `fuel_exhausted`). The event dispatcher uses
+    /// [`PluginInstance::call_with_timeout`] directly and records its own,
+    /// cancellation-aware outcome instead.
     pub fn call(&self, export: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
-        self.call_with_timeout(export, input, self.limits.max_timeout)
+        let result = self.call_with_timeout(export, input, self.limits.max_timeout);
+        crate::metrics::record_result(&self.plugin_id, &result);
+        result
     }
 
     /// Call an export with a caller-chosen timeout.
@@ -344,6 +355,12 @@ impl PluginInstance {
     /// deadline is reported as [`PluginError::Timeout`]; the plugin keeps
     /// whatever state it had (the call is not cancelled, it just stops
     /// being awaited).
+    ///
+    /// Metrics: this is the instrumented boundary — the duration histogram,
+    /// the active-call gauge and (on the plugin thread) the wasm thread
+    /// time are recorded here. `candyriya_plugin_calls_total` is NOT
+    /// recorded here; the caller that owns the outcome label records it
+    /// (see [`crate::metrics`]).
     pub fn call_with_timeout(
         &self,
         export: &str,
@@ -367,13 +384,21 @@ impl PluginInstance {
             });
         }
 
+        let started = std::time::Instant::now();
+        // decrements the active-call gauge on drop, whatever happens below
+        let _active = crate::metrics::active_call(&self.plugin_id);
         let (tx, rx) = sync_channel(1);
-        self.send(PluginCommand::Call {
+        if let Err(error) = self.send(PluginCommand::Call {
             export: export.to_owned(),
             input: input.to_vec(),
             respond: tx,
-        })?;
-        match rx.recv_timeout(timeout) {
+        }) {
+            // a full mailbox already bumped busy_total inside send(); any
+            // other failure (dead mailbox) is the call sites' business, so
+            // they can label it properly
+            return Err(error);
+        }
+        let result = match rx.recv_timeout(timeout) {
             Ok(Ok(bytes)) => {
                 if bytes.len() > self.limits.max_output_bytes {
                     Err(PluginError::LimitExceeded {
@@ -392,7 +417,10 @@ impl PluginInstance {
                 timeout_ms: timeout.as_millis() as u64,
             }),
             Err(RecvTimeoutError::Disconnected) => Err(self.gone()),
-        }
+        };
+        // only calls that actually reached the plugin get a duration sample
+        crate::metrics::observe_call_duration(&self.plugin_id, started.elapsed());
+        result
     }
 
     /// Ask the worker to shut down and wait for it to terminate.
@@ -416,9 +444,12 @@ impl PluginInstance {
     fn send(&self, command: PluginCommand) -> Result<(), PluginError> {
         let tx = self.command_tx.as_ref().ok_or_else(|| self.gone())?;
         tx.try_send(command).map_err(|e| match e {
-            TrySendError::Full(_) => PluginError::Busy {
-                plugin_id: self.plugin_id.clone(),
-            },
+            TrySendError::Full(_) => {
+                crate::metrics::record_busy(&self.plugin_id);
+                PluginError::Busy {
+                    plugin_id: self.plugin_id.clone(),
+                }
+            }
             TrySendError::Disconnected(_) => self.gone(),
         })
     }
@@ -437,6 +468,7 @@ impl Drop for PluginInstance {
         if let Some(slots) = self.slots.take() {
             slots.release(&self.plugin_id);
         }
+        crate::metrics::plugin_unloaded(&self.plugin_id);
         // Close the mailbox so the worker terminates after its current
         // command. The join is deliberately *not* done here: dropping must
         // never wait on a stuck wasm call. The worker thread is detached
@@ -471,11 +503,15 @@ fn worker_loop(
                 input,
                 respond,
             } => {
+                let wasm_started = std::time::Instant::now();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     plugin
                         .call::<&[u8], Vec<u8>>(&export, &input)
                         .map_err(|e| e.to_string())
                 }));
+                // wasm thread time, not caller-observed wall time: a hung
+                // run only lands here once the runtime interrupts it
+                crate::metrics::record_thread_time(&plugin_id, wasm_started.elapsed());
                 let result = match result {
                     Ok(Ok(bytes)) => Ok(bytes),
                     Ok(Err(message)) => {
