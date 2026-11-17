@@ -1,0 +1,24 @@
+[package]
+name = "candyriya-it"
+description = "Integration test harness for candyriya crates: a real loopback Minecraft server-side backend and client built on candyriya-protocol and candyriya-protocol-registry."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+candyriya-protocol = { version = "0.1.0", path = "../../protocol/candyriya-protocol" }
+candyriya-protocol-registry = { version = "0.1.0", path = "../../protocol/candyriya-protocol-registry" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+base64 = { workspace = true }
+
+[lints]
+workspace = true

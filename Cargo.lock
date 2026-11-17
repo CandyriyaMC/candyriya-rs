@@ -385,6 +385,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "candyriya-it"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "candyriya-protocol",
+ "candyriya-protocol-registry",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "candyriya-messaging"
 version = "0.1.0"
 dependencies = [
