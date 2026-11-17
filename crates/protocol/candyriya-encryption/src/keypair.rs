@@ -135,9 +135,8 @@ mod tests {
         // apply implicit rejection: invalid padding can return a deterministic
         // synthetic plaintext OR an error outright. The stable guarantee is
         // that the original bytes do NOT come back — however the decrypt failed.
-        match keypair.decrypt_with_private(&ciphertext) {
-            Ok(synthetic) => assert_ne!(synthetic, b"verify-token-verify-token!"),
-            Err(_) => {} // acceptable: rejected outright
+        if let Ok(synthetic) = keypair.decrypt_with_private(&ciphertext) {
+            assert_ne!(synthetic, b"verify-token-verify-token!");
         }
     }
 
@@ -151,9 +150,8 @@ mod tests {
         // rsa 0.10 PKCS#1 v1.5 implicit rejection is not universally guaranteed:
         // a wrong key may yield an error OR a synthetic plaintext. The stable
         // guarantee is that the wrong key never yields Alice's actual plaintext.
-        match bob.decrypt_with_private(&ciphertext) {
-            Ok(plaintext) => assert_ne!(plaintext, b"for alice only"),
-            Err(_) => {} // acceptable: rejected outright
+        if let Ok(plaintext) = bob.decrypt_with_private(&ciphertext) {
+            assert_ne!(plaintext, b"for alice only");
         }
     }
 
