@@ -52,6 +52,8 @@ landed crate by crate.
   feature requests (please use the templates)
 - [Discussions](https://github.com/CandyriyaMC/candyriya-rs/discussions) —
   questions and ideas
+- [Discord](https://discord.gg/fXwN4wETF9) — the CandyriyaMC community server;
+  chat, questions and announcements
 - [Contributing](https://github.com/CandyriyaMC/candyriya-rs/blob/main/CONTRIBUTING.md) —
   how to build, test and submit changes
 - [Security policy](https://github.com/CandyriyaMC/candyriya-rs/blob/main/SECURITY.md) —

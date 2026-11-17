@@ -172,6 +172,8 @@ Bug reports and feature requests go through
 templates; questions and ideas go to
 [GitHub Discussions](https://github.com/CandyriyaMC/candyriya-rs/discussions).
 Those pages are where network operators and plugin authors should start.
+For live chat, the community gathers on the
+[CandyriyaMC Discord server](https://discord.gg/fXwN4wETF9).
 
 - [CONTRIBUTING.md](https://github.com/CandyriyaMC/candyriya-rs/blob/main/CONTRIBUTING.md)
   — how to build, test and submit changes; the repository squash-merges and
