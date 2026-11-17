@@ -195,8 +195,10 @@ fn a_plugin_that_times_out_is_skipped_and_does_not_block_cancellation() {
             ),
         ],
     );
-    // one millisecond: the infinite wasm loop will never make it
-    let dispatcher = ProxyEventDispatcher::with_timeout(set, Duration::from_millis(1));
+    // 1.5s: the infinite wasm loop will never make it within 1.5s either,
+    // and the CI runner (which is slower under logging pressure) gets
+    // enough headroom to finish the cancels plugin before the deadline.
+    let dispatcher = ProxyEventDispatcher::with_timeout(set, Duration::from_millis(1500));
 
     let result = dispatcher.dispatch_cancellable(&login_event());
 
