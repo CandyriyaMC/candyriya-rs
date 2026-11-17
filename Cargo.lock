@@ -317,9 +317,6 @@ dependencies = [
 [[package]]
 name = "candyriya-eventbus"
 version = "0.1.0"
-dependencies = [
- "parking_lot",
-]
 
 [[package]]
 name = "candyriya-forwarding"
@@ -355,8 +352,6 @@ name = "candyriya-i18n"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "lobsterchat",
- "thiserror 2.0.21",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
  "tracing-subscriber",

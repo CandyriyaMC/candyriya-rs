@@ -59,7 +59,6 @@ opentelemetry_sdk = { version = "0.33", default-features = false, features = ["t
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 thiserror = "2"
-clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 figment = { version = "0.10", features = ["toml"] }
@@ -80,7 +79,6 @@ azalea-brigadier = "0.16"
 extism = { version = "1", default-features = false, features = ["wasmtime-default-features"] }
 cachegirl = { version = "1", features = ["memory", "cache", "async", "tokio", "tracing"] }
 tokio-cron-scheduler = "0.15"
-anyhow = "1"
 zeroize = "1"
 aes = "0.9"
 cfb8 = "0.9"
