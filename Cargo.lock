@@ -432,10 +432,13 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "candyriya-config",
  "candyriya-forwarding",
  "candyriya-player",
  "candyriya-protocol",
  "candyriya-protocol-registry",
+ "candyriya-proxy",
+ "candyriya-scheduler",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
