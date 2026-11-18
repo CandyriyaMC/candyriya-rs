@@ -1,0 +1,28 @@
+[package]
+name = "greeting"
+description = "Reference native plugin for the candyriya native ABI: exports candyriya_plugin_init and says hello on enable. Builds as a cdylib on every CI target."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+keywords = ["plugin", "candyriya", "example"]
+categories = ["ffi"]
+
+[lib]
+# cdylib for the proxy to dlopen, rlib so the unit tests can call the
+# exports in-process without a loader
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+candyriya-native-abi = { version = "0.1.1", path = "../../common/candyriya-native-abi" }
+
+[lints.rust]
+# the exports are the FFI boundary; unsafe stays inside it
+unsafe_code = "allow"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"

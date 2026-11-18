@@ -355,7 +355,10 @@ are ungated, Velocity-style), and dispatches to pure command
 implementations that read the world through the `NetworkDirectory` trait
 and mutate it through `ProxyEffects`. Output
 is MiniMessage lines through an `OutputSender` seam; the crate has no
-network, no async and no I/O.
+network, no async and no I/O. The upcoming `/candyriya plugin` surface
+(phase 2 of the native-plugins epic) is specified in
+[Commands](commands#candyriya-plugin) and gated by the
+`candyriya.command.plugin.*` nodes; the running tree does not carry it yet.
 
 ### Composition root
 
@@ -538,6 +541,28 @@ carry no escape bytes. The watch is console-only — other sources see
 the ordinary one-shot table. All user-facing strings in the commands go
 through the embedded locales, en and ex_girl; the rendering itself is
 MiniMessage and honors the console's color mode.
+
+## The native plugin ABI (phase 1)
+
+Phase 1 of the native plugin epic lands the contract, nothing else: the
+**candyriya-native-abi** crate (`crates/common/candyriya-native-abi`) —
+the `extern "C"` boundary every native plugin is built against. It carries
+versioned `#[repr(C)]` structs, an opaque instance handle, `(ptr, len)` byte
+buffers and the `CandyriyaPluginApiV1` table the proxy hands out with every
+entry point; V1 deliberately carries no host functions, so every proxy→plugin
+call travels through the plugin's own exports and every plugin→proxy call is
+defined by a later ABI version. `crates/plugins/greeting` is the reference
+plugin: a platform-agnostic `cdylib` (`.so`/`.dll`/`.dylib`) that exports
+`candyriya_plugin_init` / `candyriya_plugin_on_load` /
+`candyriya_plugin_on_enable` and prints one line on enable. The crate
+README is the normative document: the call flow, the buffer rules, the
+versioning rules (V1 is frozen; extensions arrive as new table types with
+`abi_version` at offset 0, never as edits to V1) and how to write a new
+plugin. Nothing in the tree calls the ABI yet — the Plugin Controller that
+dlopens plugins and drives the state machine through the supervision tree
+is phase 2, ABI API expansion is phase 3, and WASM plugins run in parallel
+and stay until phase 4. Unsafe code in the workspace remains forbidden
+outside the two ABI crates, where the opt-out is explicit and scoped.
 
 ## A login end to end
 

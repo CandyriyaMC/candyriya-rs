@@ -20,7 +20,8 @@
 //!   `candyriya-permissions` engine — no per-handler after-the-fact checking.
 //! - **The built-in commands.** [`CommandRegistry`] assembles the whole set:
 //!   `/candyriya` (`info`, `servers`, `switch`, `end`, `reload`, `ps`,
-//!   `tree`), `/glist`, `/send` and its `/server` and `/goto` aliases.
+//!   `tree`, `plugin`), `/glist`, `/send` and its `/server` and `/goto`
+//!   aliases.
 //!   Output goes through the [`OutputSender`] seam as MiniMessage lines
 //!   built from the embedded locales ([`Locales`]); live effects (switching
 //!   a player) go through [`ProxyEffects`]; the shutdown flag (`/candyriya
@@ -69,6 +70,7 @@ mod dispatcher;
 mod effects;
 mod error;
 mod locales;
+mod plugin;
 mod ps;
 mod registry;
 mod snapshot;
@@ -95,6 +97,11 @@ pub use effects::{
 };
 pub use error::CommandError;
 pub use locales::Locales;
+pub use plugin::{
+    PluginActionReceipt, PluginInfo, PluginListEntry, PluginOutcome, PluginTreeNodeState,
+    PluginTreeRow, PluginView, PluginViewPrefix, PluginViewResult, PluginWireStateView,
+    UnloadReceipt,
+};
 pub use ps::{PsConn, PsExitStatus, PsSnapshot, PsUnit, PsUnitKind, PsUnitState};
 pub use registry::CommandRegistry;
 pub use snapshot::{BackendSnapshot, BackendState, ConnectionStats, ProxySnapshot};

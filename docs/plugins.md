@@ -5,6 +5,26 @@ title: Plugins
 
 # Plugins
 
+## Native plugins (epic, phase 1)
+
+Candyriya plans to move its plugin system from WebAssembly modules to native
+Rust plugins, loaded as dynamic libraries (`.dll` / `.so` / `.dylib`) inside
+the proxy address space. The work is a staged epic tracked in
+[issue #310](https://github.com/CandyriyaMC/candyriya-rs/issues/310). Phase 1
+(merged) covers the `candyriya-native-abi` crate — the `extern "C"` contract
+the proxy and plugins share — plus a reference demo plugin. Phase 2 (in
+flight on `experiment/native-plugins`) adds the Plugin Controller crate, the
+dlopen boundary crate, and the `/candyriya plugin` command surface (see
+[Plugin commands](plugin-commands)); nothing there is usable or supported
+yet in a release.
+
+- WASM stays supported for now; native plugins will be the only plugin model eventually
+
+Everything below describes the WASM runtime as it exists today, which remains
+the only supported way to write a plugin. Issue #310 keeps Extism and wasmtime
+in place through phases 1–3; they are removed only in phase 4, once the native
+replacement is ready.
+
 Candyriya runs plugins as [Extism](https://extism.org) WebAssembly modules.
 This page is the guide for plugin authors: where plugins live, what
 `plugin.toml` declares, what the host expects from your module, and what
@@ -44,10 +64,11 @@ hand it explicitly. That choice is deliberate:
 
 - **Sandbox.** A plugin is linear-memory-sandboxed WebAssembly. It cannot
   read or write the proxy's memory, open files, sockets or network
-  connections unless the host exposes them, and there is no way for it to
-  escape into the process. There is no "native plugin mode", and never will
-  be: plugins are never loaded as native `.so`/`.dll`, and the host does
-  not care what language produced the wasm.
+  connections unless the host exposes them, and there is no other way for it
+  to escape into the process. The host does not care what language produced
+  the wasm. (Native dynamic libraries are the phase-2 track of the native
+  plugins epic — see [Native plugins](#native-plugins-epic-phase-1); they are
+  not part of the WASM runtime described on this page.)
 - **One dedicated OS thread per plugin** (`candyriya-plugin-<id>`). A plugin
   never runs on a Tokio worker thread. All calls into the plugin happen on
   that thread, served from a bounded mailbox.
@@ -935,3 +956,5 @@ Two things to not expect:
   host-function milestone. Write the plugin so it does useful,
   self-contained work (answer events, read its own data directory) and the
   rest will plug in.
+
+For the upcoming native plugin work, see [Native plugins (epic, phase 1)](#native-plugins-epic-phase-1) at the top of this page.

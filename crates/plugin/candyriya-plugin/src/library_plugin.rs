@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::error::PluginError;
-use crate::instance::PluginInstance;
+use crate::instance::{PluginFormat, PluginInstance};
 use crate::manifest::PluginManifest;
 
 /// Where a plugin was discovered.
@@ -49,12 +49,20 @@ impl PluginState {
 /// Records in `Failed` state carry no instance; [`LibraryPlugin::instance`]
 /// returns `None` for them. Records are cheap to keep around regardless of
 /// state, so discovery problems never take a plugin silently off the map.
+///
+/// The `flavor` records which format won discovery. When the loader was
+/// built with a plugin-controller registry, the native flavor is brought
+/// up for real at load time (the record then carries a live instance and
+/// reports [`PluginState::Loaded`]); without one, a native-flavor record
+/// is a `Failed` record whose reason says bring-up is not wired into the
+/// loader. The wasm lifecycle does not consult the field.
 pub struct LibraryPlugin {
     dir: PathBuf,
     manifest: PluginManifest,
     origin: PluginOrigin,
     instance: Option<PluginInstance>,
     state: PluginState,
+    flavor: PluginFormat,
 }
 
 // Manual Debug: LibraryPlugin carries a live wasm instance whose internals
@@ -66,6 +74,7 @@ impl std::fmt::Debug for LibraryPlugin {
             .field("dir", &self.dir)
             .field("origin", &self.origin)
             .field("state", &self.state)
+            .field("flavor", &self.flavor)
             .finish_non_exhaustive()
     }
 }
@@ -77,6 +86,7 @@ impl LibraryPlugin {
         manifest: PluginManifest,
         origin: PluginOrigin,
         instance: PluginInstance,
+        flavor: PluginFormat,
     ) -> Self {
         Self {
             dir,
@@ -84,6 +94,7 @@ impl LibraryPlugin {
             origin,
             instance: Some(instance),
             state: PluginState::Loaded,
+            flavor,
         }
     }
 
@@ -93,6 +104,7 @@ impl LibraryPlugin {
         manifest: PluginManifest,
         origin: PluginOrigin,
         reason: String,
+        flavor: PluginFormat,
     ) -> Self {
         Self {
             dir,
@@ -100,6 +112,7 @@ impl LibraryPlugin {
             origin,
             instance: None,
             state: PluginState::Failed(reason),
+            flavor,
         }
     }
 
@@ -123,12 +136,29 @@ impl LibraryPlugin {
         self.origin
     }
 
+    /// Which format won discovery for this record.
+    ///
+    /// [`PluginFormat::Wasm`] is instantiated through the wasm path.
+    /// [`PluginFormat::Native`] is brought up at load time when the
+    /// loader carries a plugin-controller registry (see
+    /// [`crate::PluginLoader::with_plugin_controller`]) — a live instance
+    /// reporting [`PluginState::Loaded`] on success, or a `Failed` record
+    /// naming the native step that refused on failure. Without a
+    /// controller the native flavor is detection-only: a `Failed` record
+    /// whose reason says bring-up is not wired into the loader. When both
+    /// a wasm module and a native library sit next to `plugin.toml`, the
+    /// native flavor wins (OQ13).
+    pub fn flavor(&self) -> PluginFormat {
+        self.flavor
+    }
+
     /// Current lifecycle state.
     pub fn state(&self) -> &PluginState {
         &self.state
     }
 
-    /// The underlying wasm instance, if this plugin is running.
+    /// The underlying instance, if this plugin is running (wasm or
+    /// native — consult [`LibraryPlugin::flavor`] to tell which).
     pub fn instance(&self) -> Option<&PluginInstance> {
         self.instance.as_ref()
     }

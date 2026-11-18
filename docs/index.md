@@ -44,6 +44,8 @@ landed crate by crate.
   inheritance and wildcards
 - [Plugins](plugins) — writing plugins against the WebAssembly API
 - [Commands](commands) — built-in commands and how to invoke them
+- [Plugin commands](plugin-commands) — the upcoming `/candyriya plugin` surface
+  (phase 2 of the native-plugins epic)
 - [Architecture](architecture) — workspace layout and design notes
 
 ## Community

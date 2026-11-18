@@ -75,3 +75,16 @@ where
 {
     ArgumentBuilder::new(Argument::new(name, Arc::new(parser), Some(Arc::new(provider))).into())
 }
+
+/// Builds a required-argument node without a suggestion provider.
+///
+/// For arguments whose candidate set is only known to the backing
+/// service (e.g. `/candyriya plugin`'s `<plugin>`), offering stale or
+/// synchronous-IPC-bound suggestions on every keypress is worse than
+/// offering none.
+pub(crate) fn argument_without_suggestions(
+    name: &str,
+    parser: impl ArgumentType + Send + Sync + 'static,
+) -> ArgumentBuilder<CommandSource> {
+    ArgumentBuilder::new(Argument::new(name, Arc::new(parser), None).into())
+}

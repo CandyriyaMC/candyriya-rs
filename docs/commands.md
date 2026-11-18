@@ -10,10 +10,11 @@ in Minecraft chat (a leading `/`), and the operator typing into the proxy's
 console (the terminal the proxy was started from). Both go through the same
 command tree, built on a Brigadier-style model: literal nodes (`/candyriya`,
 `info`, `servers`, ...), argument nodes (`<player>`, `<server>`), and per-node
-requirements. This page is the reference for every built-in command the
-proxy ships. There are no other commands today; anything else you type is
-either rejected or forwarded to your backend, depending on the source (see
-below).
+requirements. This page is the reference for the built-in commands the
+proxy ships. The `/candyriya plugin` subcommands are not in the tree yet -
+they land with phase 2 of the native-plugins epic, see [Plugin commands](plugin-commands). There are no other commands;
+anything else you type is either rejected or forwarded to your backend,
+depending on the source (see below).
 
 ## Console (proxy-side)
 
@@ -94,6 +95,11 @@ is not a valid command. The nodes are:
 - `candyriya.command.reload` - `/candyriya reload [config|plugins]`
 - `candyriya.command.ps` - `/candyriya ps [--full] [--watch]`
 - `candyriya.command.tree` - `/candyriya tree`
+
+The upcoming `/candyriya plugin` subcommands add their own nodes in the
+`candyriya.command.plugin.*` namespace - see
+[Plugin commands](plugin-commands). None of them exist in the tree
+yet.
 
 Because the check lives on the tree nodes themselves, a source without the
 grant cannot even parse the subtree: to an unauthorized player the gated
@@ -273,6 +279,20 @@ table's rows are not the question.
 
 Requires `candyriya.command.tree`.
 
+### `/candyriya plugin`
+
+> **Upcoming - not yet implemented.** The `/candyriya plugin` subcommands
+> land with phase 2 of the native-plugins epic (tracked in
+> [issue #310](https://github.com/CandyriyaMC/candyriya-rs/issues/310));
+> until then, typing `/candyriya plugin` is an unknown command.
+>
+> The contract phase 2 implements is not duplicated here; see
+> [Plugin commands](plugin-commands) for the full surface, the permission
+> nodes, the output formats and the failure behavior. The short version:
+> `list`, `info`, `enable`, `disable`, `reload`, `unload` and `tree`, one
+> node per subcommand in the `candyriya.command.plugin.*` namespace,
+> default-deny, console `*` covers.
+
 ### `/server <server>`
 
 Switches the invoking player to `<server>`. The backend must be configured;
@@ -374,8 +394,9 @@ an empty roster, not placeholder output.
 
 **"command not registered" / unknown command.** Only the commands on this
 page exist. Check the spelling; `/candyriya` requires a subcommand
-(`info`, `servers`, `switch`, `end`, `reload`, `ps`, `tree`) - a bare
-`/candyriya` does not parse.
+(`info`, `servers`, `switch`, `end`, `reload`, `ps`, `tree`; the `plugin`
+subcommands land in phase 2, see [Plugin commands](plugin-commands)) - a
+bare `/candyriya` does not parse.
 In the console you get one red `command failed: ...` line. In chat the
 message is forwarded to the backend, which answers with its own
 unknown-command response - so an "unknown command" from the backend that
@@ -387,7 +408,8 @@ registered (or, today, that the chat dispatch is not wired yet - see
 Players start with no grants; the console's `*` is its own. Grant the
 relevant node - `candyriya.command.info`, `candyriya.command.servers`,
 `candyriya.command.switch`, `candyriya.command.end`, `candyriya.command.reload`,
-`candyriya.command.ps`, `candyriya.command.tree`,
+`candyriya.command.ps`, `candyriya.command.tree`, or
+`candyriya.command.plugin.*` for the upcoming plugin set,
 or the wildcard
 `candyriya.command.*` (or `*`) - in the `[permissions]` table of
 `candyriya.toml` and reload. A source without the grant cannot even parse
@@ -416,8 +438,11 @@ you need from the config and logs today).
 ## Extending
 
 There is no plugin command framework yet. Plugins cannot register commands,
-slash or otherwise; the built-in set on this page is complete, and adding
+slash or otherwise; the built-in set is complete, and adding
 a command today means building from source against `candyriya-command`.
+The upcoming [`/candyriya plugin`](plugin-commands) surface manages native
+plugins - it is not a plugin command framework either, and plugins still
+cannot register their own proxy commands.
 The tree is assembled by a registry that validates literals, rejects
 duplicates and attaches per-node gates, so a fork that adds a command gets
 the same permission and suggestion machinery for free - but that is a

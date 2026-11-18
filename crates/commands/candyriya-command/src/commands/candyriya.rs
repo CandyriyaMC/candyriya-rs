@@ -1,6 +1,6 @@
 //! `/candyriya` — the proxy admin root.
 //!
-//! Subcommands: `info`, `servers`, `switch`, `end`, `reload`, `ps`, `tree`.
+//! Subcommands: `info`, `servers`, `switch`, `end`, `reload`, `ps`, `tree`, `plugin`.
 //! The watch variant of `ps` is console-only; the REPL runs it after
 //! dispatch through the shared `PsWatchHandle` latch.
 //! The root itself carries no permission; each subcommand carries its own
@@ -12,7 +12,10 @@
 //! scheduler itself — the cli watches the same flag and owns the shutdown.
 //! `/candyriya reload` runs through the [`ReloadFn`](crate::ReloadFn) the
 //! composition root wires in; the command layer only parses, gates and
-//! renders — never the mechanism itself.
+//! renders — never the mechanism itself. `/candyriya plugin` runs
+//! through the [`PluginViewPrefix`](crate::PluginViewPrefix) the
+//! composition root wires the same way; without one it answers with a
+//! localized notice.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +28,11 @@ use azalea_brigadier::context::CommandContext as BrigadierContext;
 use candyriya_i18n::I18n;
 use candyriya_utils::format_uptime;
 
-use crate::command::{CandyCommand, argument_with_suggestions};
+use crate::command::{CandyCommand, argument_with_suggestions, argument_without_suggestions};
+use crate::plugin::{
+    PluginViewPrefix, ReceiptVerb, handle_plugin_info, handle_plugin_list, handle_plugin_receipt,
+    handle_plugin_tree, handle_plugin_unload,
+};
 use crate::source::{CommandSource, SourceKind};
 use crate::state::CommandState;
 use crate::text::escape_minimessage;
@@ -212,6 +219,7 @@ pub(crate) struct CandyriyaCommand {
     state: CommandState,
     shutdown: crate::ShutdownHandle,
     reload: Option<ReloadFn>,
+    plugin_view: Option<PluginViewPrefix>,
 }
 
 impl CandyriyaCommand {
@@ -219,11 +227,13 @@ impl CandyriyaCommand {
         state: CommandState,
         shutdown: crate::ShutdownHandle,
         reload: Option<ReloadFn>,
+        plugin_view: Option<PluginViewPrefix>,
     ) -> Self {
         Self {
             state,
             shutdown,
             reload,
+            plugin_view,
         }
     }
 }
@@ -248,6 +258,22 @@ impl CandyCommand for CandyriyaCommand {
         let ps_watch_full_parts = parts.clone();
         let ps_full_watch_parts = parts.clone();
         let tree_parts = parts.clone();
+        let plugin_parts = parts.clone();
+        let plugin_list_parts = parts.clone();
+        let plugin_info_parts = parts.clone();
+        let plugin_enable_parts = parts.clone();
+        let plugin_disable_parts = parts.clone();
+        let plugin_reload_parts = parts.clone();
+        let plugin_unload_parts = parts.clone();
+        let plugin_tree_parts = parts.clone();
+        let plugin_root_view = self.plugin_view.clone();
+        let plugin_list_view = self.plugin_view.clone();
+        let plugin_info_view = self.plugin_view.clone();
+        let plugin_enable_view = self.plugin_view.clone();
+        let plugin_disable_view = self.plugin_view.clone();
+        let plugin_reload_view = self.plugin_view.clone();
+        let plugin_unload_view = self.plugin_view.clone();
+        let plugin_tree_view = self.plugin_view.clone();
         let end_shutdown = self.shutdown.clone();
         let reload_all = self.reload.clone();
         let reload_config = self.reload.clone();
@@ -367,6 +393,105 @@ impl CandyCommand for CandyriyaCommand {
                         )
                     },
                 )),
+        )
+        .then(
+            literal::<CommandSource>("plugin")
+                .requires(permission_check("candyriya.command.plugin.list"))
+                .executes(move |ctx: &BrigadierContext<CommandSource>| {
+                    handle_plugin_list(&plugin_parts, &ctx.source, &plugin_root_view)
+                })
+                .then(
+                    literal::<CommandSource>("list")
+                        .requires(permission_check("candyriya.command.plugin.list"))
+                        .executes(move |ctx: &BrigadierContext<CommandSource>| {
+                            handle_plugin_list(&plugin_list_parts, &ctx.source, &plugin_list_view)
+                        }),
+                )
+                .then(
+                    literal::<CommandSource>("info")
+                        .requires(permission_check("candyriya.command.plugin.info"))
+                        .then(argument_without_suggestions("plugin", word()).executes(
+                            move |ctx: &BrigadierContext<CommandSource>| {
+                                let id = get_string(ctx, "plugin").unwrap_or_default();
+                                handle_plugin_info(
+                                    &plugin_info_parts,
+                                    &ctx.source,
+                                    &plugin_info_view,
+                                    &id,
+                                )
+                            },
+                        )),
+                )
+                .then(
+                    literal::<CommandSource>("enable")
+                        .requires(permission_check("candyriya.command.plugin.enable"))
+                        .then(argument_without_suggestions("plugin", word()).executes(
+                            move |ctx: &BrigadierContext<CommandSource>| {
+                                let id = get_string(ctx, "plugin").unwrap_or_default();
+                                handle_plugin_receipt(
+                                    &plugin_enable_parts,
+                                    &ctx.source,
+                                    &plugin_enable_view,
+                                    &id,
+                                    ReceiptVerb::Enable,
+                                )
+                            },
+                        )),
+                )
+                .then(
+                    literal::<CommandSource>("disable")
+                        .requires(permission_check("candyriya.command.plugin.disable"))
+                        .then(argument_without_suggestions("plugin", word()).executes(
+                            move |ctx: &BrigadierContext<CommandSource>| {
+                                let id = get_string(ctx, "plugin").unwrap_or_default();
+                                handle_plugin_receipt(
+                                    &plugin_disable_parts,
+                                    &ctx.source,
+                                    &plugin_disable_view,
+                                    &id,
+                                    ReceiptVerb::Disable,
+                                )
+                            },
+                        )),
+                )
+                .then(
+                    literal::<CommandSource>("reload")
+                        .requires(permission_check("candyriya.command.plugin.reload"))
+                        .then(argument_without_suggestions("plugin", word()).executes(
+                            move |ctx: &BrigadierContext<CommandSource>| {
+                                let id = get_string(ctx, "plugin").unwrap_or_default();
+                                handle_plugin_receipt(
+                                    &plugin_reload_parts,
+                                    &ctx.source,
+                                    &plugin_reload_view,
+                                    &id,
+                                    ReceiptVerb::Reload,
+                                )
+                            },
+                        )),
+                )
+                .then(
+                    literal::<CommandSource>("unload")
+                        .requires(permission_check("candyriya.command.plugin.unload"))
+                        .then(argument_without_suggestions("plugin", word()).executes(
+                            move |ctx: &BrigadierContext<CommandSource>| {
+                                let id = get_string(ctx, "plugin").unwrap_or_default();
+                                handle_plugin_unload(
+                                    &plugin_unload_parts,
+                                    &ctx.source,
+                                    &plugin_unload_view,
+                                    &id,
+                                )
+                            },
+                        )),
+                )
+                .then(
+                    literal::<CommandSource>("tree")
+                        .requires(permission_check("candyriya.command.plugin.tree"))
+                        .executes(move |ctx: &BrigadierContext<CommandSource>| {
+                            handle_plugin_tree(&plugin_tree_parts, &ctx.source, &plugin_tree_view)
+                        }),
+                ),
         )
     }
 }

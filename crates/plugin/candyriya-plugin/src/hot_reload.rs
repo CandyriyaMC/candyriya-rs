@@ -43,6 +43,42 @@
 //! once loaded, a plugin stays loaded until it is unloaded explicitly or
 //! the proxy shuts down. Watch mode only reloads.
 //!
+//! # What a reload means for native plugins
+//!
+//! `/candyriya reload plugins` flows through two phases (see
+//! [`PluginReloader::reload_all`]): phase A swaps every record already in
+//! the set for a freshly staged replacement; phase B re-scans the roots
+//! and registers plugins that were not running before.
+//!
+//! Phase A is wasm-specific by construction — it stages a wasm module
+//! and swaps the record in place. A native record has no wasm module to
+//! stage, so `reload()` on a native id fails with `MissingWasm`, lands in
+//! the report's `failed` list and leaves the running native instance
+//! untouched. A native stage-then-swap (restage the new library while
+//! the old one keeps running, swap under quiescence) is a separate
+//! phase-2 slice and is **not** attempted here — an operator who
+//! restages a native library hears a loud `MissingWasm` failure, never a
+//! half-swapped set.
+//!
+//! Phase B re-scans the roots through [`PluginLoader::load`], so a native
+//! candidate found on disk runs the exact same bring-up the loader runs
+//! at boot (data dirs, cache quotas, the controller-registry walk
+//! `DISCOVERED` → … → `RUNNING`, or a `Failed` record naming the native
+//! step that refused). A native plugin that already holds a record in
+//! the shared process-wide controller registry is refused at insert time
+//! (duplicate id) when phase B rediscovers it; the refusal lands in the
+//! reload issues, the rebuilt duplicate is dropped before registration,
+//! and the running record is untouched — it never reaches `loaded` or
+//! `new_failed`. Either way, a native plugin whose bring-up fails on
+//! reload keeps the same visible-not-silent semantics as a wasm one:
+//! a `Failed` record with the reason in the issues list, never silent.
+//!
+//! A native plugin that was `Failed` at boot is in the set (that is how
+//! startup surfaces broken plugins), so it also goes through phase A,
+//! fails there with `MissingWasm` and keeps its stale `Failed` reason
+//! until the native stage-then-swap slice lands. Its failure stays
+//! visible through the `Failed` state and the issues list.
+//!
 //! The staged replacement gets a fresh, private instance registry: the
 //! outgoing and staged instance are briefly both alive, and `max-instances`
 //! (default 1) must not reject a legitimate stage. The running instance's
@@ -62,7 +98,7 @@ use crate::error::PluginError;
 use crate::health::PluginHealthSet;
 use crate::host_ipc::HostIpc;
 use crate::host_state::HostState;
-use crate::instance::PluginInstance;
+use crate::instance::{PluginFormat, PluginInstance};
 use crate::library_plugin::{LibraryPlugin, PluginState};
 use crate::limits::Limits;
 use crate::locales::SharedLocales;
@@ -327,7 +363,8 @@ impl PluginReloader {
 
         // the replacement is ready; the swap drops the old world's
         // services and exchanges the record in place
-        let mut replacement = LibraryPlugin::new(dir, manifest, origin, instance);
+        let mut replacement =
+            LibraryPlugin::new(dir, manifest, origin, instance, PluginFormat::Wasm);
         if old_state == PluginState::Disabled {
             replacement.disable()?;
         }

@@ -1,0 +1,30 @@
+[package]
+name = "candyriya-native-instance"
+description = "The dlopen/LoadLibrary boundary for candyriya native plugins: opens the plugin's dynamic library, probes the frozen ABI symbols and runs the fail-closed init handshake. Carries one of the workspace's two scoped unsafe opt-outs (the other is candyriya-native-abi)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+keywords = ["plugin", "abi", "ffi", "minecraft", "proxy"]
+categories = ["ffi"]
+readme = "README.md"
+
+[dependencies]
+# pinned exactly: the loader is security-sensitive and the workspace bans
+# duplicate versions (deny.toml multiple-versions = "deny")
+libloading = "=0.9.1"
+thiserror.workspace = true
+candyriya-native-abi = { version = "0.1.1", path = "../candyriya-native-abi" }
+
+[lints.rust]
+# this crate is the unsafe boundary for plugin loading; the opt-out lives
+# here, scoped and explicit, exactly like candyriya-native-abi does it. the
+# workspace keeps `unsafe_code = "forbid"` for everything else.
+unsafe_code = "allow"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"

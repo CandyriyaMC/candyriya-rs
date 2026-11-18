@@ -57,6 +57,11 @@ base64 = { workspace = true }
  # the proxy's interactive console only engages on a TTY; the smoke drives it
  # through a pseudo-terminal
  portable-pty = { workspace = true }
+ # the native-ABI smoke dlopens the real greeting cdylib through the
+ # phase-2 dlopen boundary; the unsafe lives in that crate, the test goes
+ # through its safe doors (see tests/native-smoke.rs)
+ candyriya-native-abi = { version = "0.1.1", path = "../../common/candyriya-native-abi" }
+ candyriya-native-instance = { version = "0.1.1", path = "../../common/candyriya-native-instance" }
 
 [lints]
 workspace = true

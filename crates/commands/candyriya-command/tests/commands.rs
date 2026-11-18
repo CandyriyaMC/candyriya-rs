@@ -16,9 +16,11 @@ use uuid::Uuid;
 use candyriya_command::{
     BackendSnapshot, BackendState, CommandError, CommandRegistry, CommandSource, CommandState,
     ConnectionStats, Dispatcher, Locales, NetworkDirectory, OnlinePlayer, PlayerRef,
-    PluginPhaseReport, ProxyEffects, ProxySnapshot, PsConn, PsExitStatus, PsSnapshot, PsUnit,
+    PluginActionReceipt, PluginInfo, PluginListEntry, PluginOutcome, PluginPhaseReport,
+    PluginTreeNodeState, PluginTreeRow, PluginView, PluginViewPrefix, PluginViewResult,
+    PluginWireStateView, ProxyEffects, ProxySnapshot, PsConn, PsExitStatus, PsSnapshot, PsUnit,
     PsUnitKind, PsUnitState, PsWatchHandle, ReloadReport, ReloadScope, ServerInfo, ShutdownHandle,
-    SwitchRequest, SwitchResult,
+    SwitchRequest, SwitchResult, UnloadReceipt,
 };
 use candyriya_i18n::I18n;
 use candyriya_permissions::{Grant, PermissionNode};
@@ -333,6 +335,15 @@ fn fixture_with_reload_fn(
     capture: Capture,
     reload: Option<candyriya_command::ReloadFn>,
 ) -> Fixture {
+    fixture_with_plugins(directory, capture, reload, None)
+}
+
+fn fixture_with_plugins(
+    directory: TestDirectory,
+    capture: Capture,
+    reload: Option<candyriya_command::ReloadFn>,
+    plugin_view: Option<PluginViewPrefix>,
+) -> Fixture {
     let capture = Arc::new(capture);
     let shutdown = ShutdownHandle::new();
     let watch = PsWatchHandle::new();
@@ -350,6 +361,10 @@ fn fixture_with_reload_fn(
     let registry = CommandRegistry::new(state, shutdown.clone());
     let registry = match reload {
         Some(reload) => registry.with_reload(reload),
+        None => registry,
+    };
+    let registry = match plugin_view {
+        Some(plugin_view) => registry.with_plugin_view(plugin_view),
         None => registry,
     };
     let dispatcher = registry.dispatcher().expect("built-in commands build");
@@ -1618,4 +1633,570 @@ fn ps_outputs_ex_girl_summary_for_ex_girl_source() {
     );
     assert!(joined.contains("АПТАЙМ"), "ex_girl header in {joined}");
     assert!(!joined.contains("UPTIME"), "no en header leak in {joined}");
+}
+
+// --- /candyriya plugin surface ---
+
+/// One canned control surface. Tests script the scripted-per-call results
+/// by replacing fields on the default; the default answers every verb
+/// with the `greeting` success and every list/tree with canned rows.
+struct FakePluginView {
+    listed: Vec<PluginListEntry>,
+    info: PluginViewResult<PluginInfo>,
+    enable: PluginViewResult<PluginActionReceipt>,
+    disable: PluginViewResult<PluginActionReceipt>,
+    reload: PluginViewResult<PluginActionReceipt>,
+    unload: PluginViewResult<UnloadReceipt>,
+    tree: PluginViewResult<Vec<PluginTreeRow>>,
+}
+
+impl PluginView for FakePluginView {
+    fn list(&self) -> PluginViewResult<Vec<PluginListEntry>> {
+        PluginViewResult::Ok(self.listed.clone())
+    }
+
+    fn info(&self, _id: &str) -> PluginViewResult<PluginInfo> {
+        self.info.clone()
+    }
+
+    fn enable(&self, _id: &str) -> PluginViewResult<PluginActionReceipt> {
+        self.enable.clone()
+    }
+
+    fn disable(&self, _id: &str) -> PluginViewResult<PluginActionReceipt> {
+        self.disable.clone()
+    }
+
+    fn reload(&self, _id: &str) -> PluginViewResult<PluginActionReceipt> {
+        self.reload.clone()
+    }
+
+    fn unload(&self, _id: &str) -> PluginViewResult<UnloadReceipt> {
+        self.unload.clone()
+    }
+
+    fn tree(&self) -> PluginViewResult<Vec<PluginTreeRow>> {
+        self.tree.clone()
+    }
+}
+
+fn greeting_entry() -> PluginListEntry {
+    PluginListEntry {
+        id: "greeting".to_owned(),
+        version: "0.1.0".to_owned(),
+        state: PluginWireStateView::Running,
+        last_outcome: Some(PluginOutcome::Ok),
+        restart_elected: false,
+        source: "plugins/greeting/greeting.dll".to_owned(),
+    }
+}
+
+fn quests_entry() -> PluginListEntry {
+    PluginListEntry {
+        id: "quests".to_owned(),
+        version: "0.3.0".to_owned(),
+        state: PluginWireStateView::Unloaded,
+        last_outcome: Some(PluginOutcome::Err),
+        restart_elected: false,
+        source: "plugins/quests/quests.dll".to_owned(),
+    }
+}
+
+fn canned_tree_rows() -> Vec<PluginTreeRow> {
+    vec![
+        PluginTreeRow {
+            pid: 7,
+            ppid: 1,
+            name: "plugins".to_owned(),
+            state: PluginTreeNodeState::Unit(PsUnitState::Running),
+        },
+        PluginTreeRow {
+            pid: 8,
+            ppid: 7,
+            name: "plugin-controller".to_owned(),
+            state: PluginTreeNodeState::Unit(PsUnitState::Running),
+        },
+        PluginTreeRow {
+            pid: 9,
+            ppid: 8,
+            name: "plugin-greeting".to_owned(),
+            state: PluginTreeNodeState::Wire(PluginWireStateView::Running),
+        },
+        PluginTreeRow {
+            pid: 10,
+            ppid: 8,
+            name: "plugin-quests".to_owned(),
+            state: PluginTreeNodeState::Wire(PluginWireStateView::Disabled),
+        },
+    ]
+}
+
+fn default_fake_view() -> FakePluginView {
+    FakePluginView {
+        listed: vec![greeting_entry(), quests_entry()],
+        info: PluginViewResult::Ok(PluginInfo {
+            id: "greeting".to_owned(),
+            version: "0.1.0".to_owned(),
+            description: Some("says hello on startup".to_owned()),
+            author: Some("Jane Doe".to_owned()),
+            entry_point: Some("candyriya_plugin_init".to_owned()),
+            state: PluginWireStateView::Running,
+            recent_exits: vec![],
+            reason: None,
+        }),
+        enable: PluginViewResult::Ok(PluginActionReceipt {
+            id: "greeting".to_owned(),
+        }),
+        disable: PluginViewResult::Ok(PluginActionReceipt {
+            id: "greeting".to_owned(),
+        }),
+        reload: PluginViewResult::Ok(PluginActionReceipt {
+            id: "greeting".to_owned(),
+        }),
+        unload: PluginViewResult::Ok(UnloadReceipt {
+            id: "greeting".to_owned(),
+            detached: false,
+        }),
+        tree: PluginViewResult::Ok(canned_tree_rows()),
+    }
+}
+
+fn plugin_fixture_with(view: FakePluginView) -> Fixture {
+    fixture_with_plugins(
+        fixture_directory(),
+        Capture::switched(),
+        None,
+        Some(PluginViewPrefix::new(view)),
+    )
+}
+
+fn plugin_fixture() -> Fixture {
+    plugin_fixture_with(default_fake_view())
+}
+
+const PLUGIN_INPUTS: [&str; 8] = [
+    "/candyriya plugin",
+    "/candyriya plugin list",
+    "/candyriya plugin info greeting",
+    "/candyriya plugin enable greeting",
+    "/candyriya plugin disable greeting",
+    "/candyriya plugin reload greeting",
+    "/candyriya plugin unload greeting",
+    "/candyriya plugin tree",
+];
+
+#[test]
+fn plugin_bare_root_lists_plugins() {
+    let fixture = plugin_fixture();
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin", CommandSource::console())
+        .expect("bare /candyriya plugin executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("ID"), "header in {joined}");
+    assert!(joined.contains("greeting"), "rows in {joined}");
+}
+
+#[test]
+fn plugin_list_renders_the_contract_table() {
+    let fixture = plugin_fixture();
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin list", CommandSource::console())
+        .expect("plugin list executes");
+    assert_eq!(code, 1);
+    let lines = fixture.lines();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    let joined = lines.join("\n");
+    for label in [
+        "ID",
+        "VERSION",
+        "STATE",
+        "LAST OUTCOME",
+        "RESTART ELECTED",
+        "SOURCE",
+    ] {
+        assert!(joined.contains(label), "header label {label} in {joined}");
+    }
+    assert!(joined.contains("greeting"), "{joined}");
+    assert!(joined.contains("0.1.0"), "{joined}");
+    assert!(joined.contains("running"), "{joined}");
+    assert!(joined.contains("plugins/quests/quests.dll"), "{joined}");
+    assert!(joined.contains("unloaded"), "{joined}");
+}
+
+#[test]
+fn plugin_list_with_nothing_reports_none_found() {
+    let fixture = plugin_fixture_with(FakePluginView {
+        listed: vec![],
+        ..default_fake_view()
+    });
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin list", CommandSource::console())
+        .expect("plugin list executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("No plugins found."), "{joined}");
+    assert!(!joined.contains("RESTART ELECTED"), "no table in {joined}");
+}
+
+#[test]
+fn plugin_commands_fail_soft_when_not_wired() {
+    let fixture = standard();
+    for input in PLUGIN_INPUTS {
+        let code = fixture
+            .dispatcher
+            .execute(input, CommandSource::console())
+            .expect("unwired build still dispatches the command");
+        assert_eq!(code, 0, "{input}");
+        let joined = fixture.lines().join("\n");
+        assert!(
+            joined.contains("not wired"),
+            "unwired notice for {input}: {joined}"
+        );
+    }
+}
+
+#[test]
+fn plugin_info_renders_the_detail_sheet() {
+    let fixture = plugin_fixture();
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin info greeting", CommandSource::console())
+        .expect("plugin info executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    for expected in [
+        "Plugin: <gold>greeting<reset>",
+        "Version: 0.1.0",
+        "Description: says hello on startup",
+        "Author: Jane Doe",
+        "Entry point: candyriya_plugin_init",
+        "State: running",
+        "Recent exits: -",
+    ] {
+        assert!(joined.contains(expected), "{expected} in {joined}");
+    }
+    assert!(!joined.contains("Reason:"), "no latch line in {joined}");
+}
+
+#[test]
+fn plugin_info_shows_latched_reason_when_failed() {
+    let PluginViewResult::Ok(default_info) = default_fake_view().info else {
+        panic!("default info must be Ok");
+    };
+    let fixture = plugin_fixture_with(FakePluginView {
+        info: PluginViewResult::Ok(PluginInfo {
+            state: PluginWireStateView::Unloaded,
+            reason: Some("ABI handshake failed".to_owned()),
+            recent_exits: vec![PsExitStatus::Failure("boom".to_owned())],
+            ..default_info
+        }),
+        ..default_fake_view()
+    });
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin info greeting", CommandSource::console())
+        .expect("plugin info executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("Reason: ABI handshake failed"), "{joined}");
+    assert!(joined.contains("failure(boom)"), "{joined}");
+}
+
+#[test]
+fn plugin_info_unknown_id_rejected_with_known_list() {
+    let fixture = plugin_fixture_with(FakePluginView {
+        info: PluginViewResult::UnknownId {
+            known: vec!["quests".to_owned(), "greeting".to_owned()],
+        },
+        ..default_fake_view()
+    });
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin info GRE", CommandSource::console())
+        .expect("plugin info executes");
+    assert_eq!(code, 0);
+    let lines = fixture.lines();
+    assert_eq!(lines.len(), 1, "exactly the rejection line: {lines:?}");
+    let joined = lines.join("\n");
+    assert!(joined.contains("Unknown plugin"), "{joined}");
+    assert!(
+        joined.contains("greeting, quests"),
+        "known ids are sorted and named: {joined}"
+    );
+    assert!(
+        !joined.contains("State:"),
+        "the command did not run: {joined}"
+    );
+}
+
+#[test]
+fn plugin_action_verbs_render_success_lines() {
+    let fixture = plugin_fixture();
+    for (input, verb) in [
+        ("/candyriya plugin enable greeting", "enabled."),
+        ("/candyriya plugin disable greeting", "disabled."),
+        ("/candyriya plugin reload greeting", "reloaded."),
+        ("/candyriya plugin unload greeting", "unloaded."),
+    ] {
+        let code = fixture
+            .dispatcher
+            .execute(input, CommandSource::console())
+            .expect("action executes");
+        assert_eq!(code, 1, "{input}");
+        let joined = fixture.lines().join("\n");
+        assert!(
+            joined.contains(&format!("Plugin '<gold>greeting<reset>' {verb}")),
+            "{input} in {joined}"
+        );
+        fixture.capture.lines.lock().expect("lines lock").clear();
+    }
+}
+
+#[test]
+fn plugin_enable_failed_phase_reports_the_reason() {
+    let fixture = plugin_fixture_with(FakePluginView {
+        enable: PluginViewResult::Failed {
+            reason: "on_enable returned failure(0x2a)".to_owned(),
+        },
+        ..default_fake_view()
+    });
+    let code = fixture
+        .dispatcher
+        .execute(
+            "/candyriya plugin enable greeting",
+            CommandSource::console(),
+        )
+        .expect("plugin enable executes");
+    assert_eq!(code, 0);
+    let joined = fixture.lines().join("\n");
+    assert!(
+        joined.contains("on_enable returned failure(0x2a)"),
+        "{joined}"
+    );
+    assert!(!joined.contains("enabled."), "no success line in {joined}");
+}
+
+#[test]
+fn plugin_enable_unknown_id_rejected_with_known_list() {
+    let fixture = plugin_fixture_with(FakePluginView {
+        enable: PluginViewResult::UnknownId {
+            known: vec!["greeting".to_owned()],
+        },
+        ..default_fake_view()
+    });
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin enable quests", CommandSource::console())
+        .expect("plugin enable executes");
+    assert_eq!(code, 0);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("Known plugins"), "{joined}");
+    assert!(joined.contains("greeting"), "{joined}");
+    assert!(
+        !joined.contains("enabled."),
+        "the command did not run: {joined}"
+    );
+}
+
+#[test]
+fn plugin_unload_detached_thread_is_reported() {
+    let fixture = plugin_fixture_with(FakePluginView {
+        unload: PluginViewResult::Ok(UnloadReceipt {
+            id: "greeting".to_owned(),
+            detached: true,
+        }),
+        ..default_fake_view()
+    });
+    let code = fixture
+        .dispatcher
+        .execute(
+            "/candyriya plugin unload greeting",
+            CommandSource::console(),
+        )
+        .expect("plugin unload executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("unloaded."), "{joined}");
+    assert!(
+        joined.contains("detached"),
+        "the detach is said aloud: {joined}"
+    );
+}
+
+#[test]
+fn plugin_unload_refused_for_a_running_plugin() {
+    let fixture = plugin_fixture_with(FakePluginView {
+        unload: PluginViewResult::Refused {
+            reason: "Plugin 'greeting' is running; disable it first.".to_owned(),
+        },
+        ..default_fake_view()
+    });
+    let code = fixture
+        .dispatcher
+        .execute(
+            "/candyriya plugin unload greeting",
+            CommandSource::console(),
+        )
+        .expect("plugin unload executes");
+    assert_eq!(code, 0);
+    let joined = fixture.lines().join("\n");
+    assert!(
+        joined.contains("Plugin 'greeting' is running; disable it first."),
+        "the mandated rejection line, verbatim: {joined}"
+    );
+    assert!(!joined.contains("unloaded."), "no success line in {joined}");
+}
+
+#[test]
+fn plugin_commands_denied_for_deny_all_player() {
+    let fixture = plugin_fixture();
+    for input in PLUGIN_INPUTS {
+        let err = fixture
+            .dispatcher
+            .execute(input, deny_all_player())
+            .expect_err("{input} must not be usable without grants");
+        assert!(matches!(err, CommandError::Brigadier(_)), "{input}");
+    }
+    assert!(fixture.lines().is_empty());
+}
+
+#[test]
+fn plugin_star_grant_opens_every_subcommand() {
+    let fixture = plugin_fixture();
+    let player = || player_with(&["candyriya.command.plugin.*"]);
+    for input in PLUGIN_INPUTS {
+        let code = fixture
+            .dispatcher
+            .execute(input, player())
+            .unwrap_or_else(|error| panic!("{input} must be granted: {error:?}"));
+        assert_eq!(code, 1, "{input}");
+        fixture.capture.lines.lock().expect("lines lock").clear();
+    }
+}
+
+#[test]
+fn plugin_list_grant_opens_only_the_list_surface() {
+    let fixture = plugin_fixture();
+    let player = || player_with(&["candyriya.command.plugin.list"]);
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin", player())
+        .expect("the list gate opens the bare plugin literal");
+    assert_eq!(code, 1);
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin list", player())
+        .expect("the list gate opens list");
+    assert_eq!(code, 1);
+    let info_err = fixture
+        .dispatcher
+        .execute("/candyriya plugin info greeting", player())
+        .expect_err("the list gate alone must not open info");
+    assert!(matches!(info_err, CommandError::Brigadier(_)));
+    let tree_err = fixture
+        .dispatcher
+        .execute("/candyriya plugin tree", player())
+        .expect_err("the list gate alone must not open tree");
+    assert!(matches!(tree_err, CommandError::Brigadier(_)));
+}
+
+#[test]
+fn plugin_tree_renders_box_drawing_guides() {
+    let fixture = plugin_fixture();
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin tree", CommandSource::console())
+        .expect("plugin tree executes");
+    assert_eq!(code, 1);
+    let lines = fixture.lines();
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert_eq!(
+        lines[0], "plugins <dark_gray>[pid 7, ppid 1, running]<reset>",
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].starts_with("└── plugin-controller"),
+        "single child of plugins: {lines:?}"
+    );
+    assert!(
+        lines[2].starts_with("    ├── plugin-greeting"),
+        "first sibling: {lines:?}"
+    );
+    assert!(
+        lines[3].starts_with("    └── plugin-quests"),
+        "last sibling: {lines:?}"
+    );
+    let joined = lines.join("\n");
+    assert!(joined.contains("[pid 9, ppid 8, running]"), "{joined}");
+    assert!(joined.contains("[pid 10, ppid 8, disabled]"), "{joined}");
+    assert!(!joined.contains("LAST EXIT"), "no columns: {joined}");
+    assert!(!joined.contains("zombies:"), "no summary line: {joined}");
+}
+
+#[test]
+fn plugin_tree_with_only_the_group_prints_a_single_bare_line() {
+    let fixture = plugin_fixture_with(FakePluginView {
+        tree: PluginViewResult::Ok(vec![PluginTreeRow {
+            pid: 7,
+            ppid: 1,
+            name: "plugins".to_owned(),
+            state: PluginTreeNodeState::Unit(PsUnitState::Running),
+        }]),
+        ..default_fake_view()
+    });
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya plugin tree", CommandSource::console())
+        .expect("plugin tree executes");
+    assert_eq!(code, 1);
+    let lines = fixture.lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(!lines[0].contains("──"), "no guides: {lines:?}");
+    assert!(lines[0].contains("plugins"), "{lines:?}");
+}
+
+#[test]
+fn plugin_ex_girl_source_renders_russian() {
+    let fixture = plugin_fixture();
+    let code = fixture
+        .dispatcher
+        .execute(
+            "/candyriya plugin list",
+            CommandSource::console().with_locale("ex_girl"),
+        )
+        .expect("plugin list executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("ИСТОЧНИК"), "ex_girl header in {joined}");
+    assert!(!joined.contains("SOURCE"), "no en header leak in {joined}");
+
+    let code = fixture
+        .dispatcher
+        .execute(
+            "/candyriya plugin enable greeting",
+            CommandSource::console().with_locale("ex_girl"),
+        )
+        .expect("plugin enable executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(
+        joined.contains("включён"),
+        "ex_girl success line in {joined}"
+    );
+
+    // and the fail-soft notice is localized too
+    let fixture = standard();
+    let code = fixture
+        .dispatcher
+        .execute(
+            "/candyriya plugin list",
+            CommandSource::console().with_locale("ex_girl"),
+        )
+        .expect("unwired list still dispatches");
+    assert_eq!(code, 0);
+    assert!(fixture.lines().join("\n").contains("не подключено"));
 }

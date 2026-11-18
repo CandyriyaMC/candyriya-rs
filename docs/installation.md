@@ -295,3 +295,72 @@ major bump, and treat pre-1.0 migrations as your own responsibility. On
 first start after an upgrade the proxy warns about unknown keys rather than
 failing, so stale config entries from older versions are safe to leave in
 place.
+
+## Native plugins (phase 1+)
+
+Candyriya plans to replace the WebAssembly plugin runtime with native
+Rust plugins: dynamic libraries loaded into the proxy's own address
+space and registered as logical processes in the supervision tree. The
+work is staged as a native-plugins epic tracked as
+[issue #310](https://github.com/CandyriyaMC/candyriya-rs/issues/310);
+phase 1 covers the ABI contract and a reference demo plugin, with the
+Plugin Controller, the native plugin APIs and native distribution in the
+later phases. None of this is usable yet — read this section as a
+heads-up, not a feature announcement. The WASM runtime documented in
+[Plugins](plugins) remains the only supported way to run plugins until
+the later phases land.
+
+**What a native plugin is.** A native plugin is a single dynamic
+library compiled from Rust against the shared `candyriya-native-abi`
+contract: a minimum `extern "C"` surface of versioned structs and
+function tables passed across the boundary with opaque handles. Phase 2
+adds the Plugin Controller that drives the lifecycle. Unlike a WASM
+plugin, a native plugin runs inside the proxy's process — not in a
+sandbox, not on a Tokio worker, on its own OS thread like today's plugins.
+
+**Where the files live.** The layout is the one you already know from
+WASM plugins, with the library file named after the plugin id:
+
+```text
+<data_dir>/plugins/<id>/<id>.dll     # Windows
+<data_dir>/plugins/<id>/<id>.so      # Linux
+<data_dir>/plugins/<id>/<id>.dylib   # macOS
+<data_dir>/libraries/<id>/           # library plugins, resolved first
+```
+
+`<data_dir>` is the directory described under [Running the
+proxy](#running-the-proxy). The `libraries/` root is the existing
+location for library plugins — shared code that other plugins build on,
+resolved before ordinary plugins — and the phase plan keeps native
+distribution to that same folder.
+
+**Minimum OS requirements.** The same 64-bit platforms as the proxy
+itself: Linux (the best-supported target), macOS (Apple Silicon or
+Intel), and Windows 10/11 or Server 2019+. A native plugin is compiled
+for one target triple and loads only on a matching host — a Windows
+`.dll` does not load on Linux, and the library must match the proxy's
+CPU architecture. Mixed-OS fleets need per-target builds.
+
+**Not sandboxed — treat accordingly.** This is the most important
+difference from WASM plugins. A native plugin runs in the proxy's
+address space with the proxy's privileges: it can read and write the
+proxy's memory, open files and sockets, and reach anything the proxy
+user can reach, including `forwarding.secret` and the data directory.
+There is no permission list, no fuel and no memory cap for native code.
+A buggy native plugin can take the whole proxy down; a hostile one can
+do anything the proxy user can do. Install a native plugin only if you
+would trust the proxy binary itself — there is no containment boundary
+to fall back on.
+
+**Where to read more.** The contract itself is documented in the
+`candyriya-native-abi` crate — phase 1 delivers it, together with a
+reference demo plugin — and the `candyriya-plugin-api` crate remains the
+compatibility reference through phases 1–2. For where the plugin
+runtime stands, and for the native plugins phase notes, see the
+"Native plugins (epic, phase 1)" section of [Plugins](plugins).
+
+**You do not need to migrate anything yet.** WASM plugins keep working
+through phases 1–3, alongside the native runtime as it comes online;
+the WASM runtime is removed only in phase 4. Your existing plugins,
+their `plugin.toml` files and the [Plugins](plugins) guide stay valid
+until then.
