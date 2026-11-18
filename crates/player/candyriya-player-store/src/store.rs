@@ -19,10 +19,10 @@ use crate::error::StoreError;
 
 /// Hard cap on the size of the backing file, in bytes (100 MiB).
 ///
-/// A valid store file is a pretty-printed JSON array of records; a file
-/// bigger than this is treated as corrupt rather than opened. The cap is
-/// checked before any bytes are read so a hostile or accidentally huge
-/// file is refused up front.
+/// A valid store file is a JSON array of records; a file bigger than
+/// this is treated as corrupt rather than opened. The cap is checked
+/// before any bytes are read so a hostile or accidentally huge file is
+/// refused up front.
 pub const MAX_FILE_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Process-wide counter used to make temporary file names unique between
@@ -111,10 +111,11 @@ fn persist(path: &Path, players: &BTreeMap<Uuid, OfflinePlayer>) -> Result<(), S
         std::fs::create_dir_all(parent).map_err(|source| StoreError::io(parent, source))?;
     }
 
-    // serialize the full map; records come out in UUID order (BTreeMap)
+    // serialize the full map as compact JSON; records come out in UUID
+    // order (BTreeMap)
     let records: Vec<&OfflinePlayer> = players.values().collect();
-    let bytes = serde_json::to_vec_pretty(&records)
-        .map_err(|source| StoreError::serialize(path, source))?;
+    let bytes =
+        serde_json::to_vec(&records).map_err(|source| StoreError::serialize(path, source))?;
 
     // tmp-<pid>-<counter>, unique within the process via TMP_COUNTER; a
     // stale file from an earlier run with a reused pid is overwritten
@@ -182,10 +183,13 @@ fn insert_and_persist(
 /// One file holds a JSON array of [`OfflinePlayer`] records exactly as
 /// `candyriya-player` serializes them — chrono RFC 3339 timestamps, UUID as
 /// a hyphenated string, `properties` with an optional `signature` key that
-/// is omitted for unsigned properties. The array is pretty-printed with
-/// 2-space indentation and records are written in UUID order so the file
-/// stays diff-friendly and hand-editable. The file is rewritten wholesale
-/// on every save; there is no log or append journal.
+/// is omitted for unsigned properties. The array is compact JSON on a
+/// single line and records are written in UUID order, so the output is
+/// deterministic for the same set of records. The file is rewritten
+/// wholesale on every save; there is no log or append journal. Compact
+/// JSON is not hand-editable and does not diff line-by-line — pretty-printed
+/// files written by older versions still load, since the parser accepts
+/// any JSON `serde_json` can read.
 ///
 /// # Crash safety
 ///
