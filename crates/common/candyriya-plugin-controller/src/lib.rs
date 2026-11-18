@@ -11,7 +11,7 @@
 //! data ([`ALLOWED_TRANSITIONS`]) and is enforced by the registry, but the
 //! semantics around it — dep gates, deadlines as transition data,
 //! stale-generation rejection, the `disable_failed` latch — land in a
-//! later phase as the real `machine::apply`. Today's `machine::apply` is
+//! later phase as the real `machine::apply`. Today's [`machine::apply`] is
 //! an always-`Ok` stub with the final signature, kept deliberately so the
 //! integration can type against it.
 //!
@@ -30,11 +30,15 @@
 #![warn(missing_docs)]
 
 mod error;
+mod machine;
 mod record;
 mod registry;
 mod state;
+mod wire;
 
 pub use crate::error::{RegistryError, TransitionError};
+pub use crate::machine::{PluginEvent, apply};
 pub use crate::record::{ExitStatus, LoadedThreadHandle, PluginManifest, PluginRecord};
 pub use crate::registry::{PluginRegistry, RegistrySnapshot};
 pub use crate::state::{ALLOWED_TRANSITIONS, ALL_STATES, PluginWireState, Transitionable};
+pub use crate::wire::{AckStatus, Generation, MAX_ACK_MESSAGE_BYTES, PluginAck, PluginMsg};
