@@ -5,9 +5,9 @@
 //! ABI exports and runs the fail-closed init handshake. It deliberately does
 //! very little:
 //!
-//! - it never calls a typed plugin function on its own — the one call it
-//!   wraps is the `candyriya_plugin_init` entry point, whose signature is
-//!   pinned by the ABI contract crate;
+//! - it never calls a typed plugin function on its own — the init entry point
+//!   is wrapped in [`initialize`], whose signature is pinned by the ABI
+//!   contract crate;
 //! - it hands out opaque [`libloading::Symbol`] handles; casting them to the
 //!   signatures callers expect is the caller's visible, reviewed step;
 //! - it does not own threads, mailboxes, deadlines or teardown — that
@@ -30,10 +30,14 @@
 #![allow(unsafe_code)]
 
 mod export_names;
+mod handshake;
 mod instance;
+mod plugin_init;
 
 pub use export_names::{
     PLUGIN_INIT_EXPORT, PLUGIN_ON_DISABLE_EXPORT, PLUGIN_ON_ENABLE_EXPORT, PLUGIN_ON_LOAD_EXPORT,
     PLUGIN_ON_UNLOAD_EXPORT,
 };
+pub use handshake::{HandshakeError, validate_handshake, validate_init_output};
 pub use instance::{LibraryLoader, LoaderError, OpenFlags};
+pub use plugin_init::{InitializedPlugin, InitError, PluginIdentity, initialize};
