@@ -341,7 +341,7 @@ fn empty_file_is_destroyed_error_and_stays_untouched() {
     std::fs::write(&path, b"").expect("write empty");
 
     let result = JsonPlayerStore::open(&path);
-    let err = result.err().expect("empty file must error");
+    let err = result.expect_err("empty file must error");
     match &err {
         StoreError::DestroyedFile { path: got, .. } => {
             assert_eq!(got, &path);
@@ -363,9 +363,7 @@ fn whitespace_only_file_is_destroyed_error_and_stays_untouched() {
     let whitespace = b"  \n\n  \t\n";
     std::fs::write(&path, whitespace).expect("write whitespace");
 
-    let err = JsonPlayerStore::open(&path)
-        .err()
-        .expect("whitespace file must error");
+    let err = JsonPlayerStore::open(&path).expect_err("whitespace file must error");
     match &err {
         StoreError::DestroyedFile { path: got, .. } => {
             assert_eq!(got, &path);
