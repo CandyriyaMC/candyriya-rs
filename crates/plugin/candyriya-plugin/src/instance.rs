@@ -239,8 +239,9 @@ pub enum NativeLoadError {
 /// Both flavors share the worker thread, the bounded mailbox and the
 /// supervision shape; the difference lives in exactly these two arms.
 enum PluginCore {
-    /// An extism wasm plugin.
-    Wasm(extism::Plugin),
+    /// An extism wasm plugin. Boxed: extism::Plugin is way bigger than
+    /// NativePluginCore and would otherwise bloat every instance
+    Wasm(Box<extism::Plugin>),
     /// A native ABI v1 library, freshly brought up.
     Native(NativePluginCore),
 }
@@ -441,7 +442,7 @@ impl PluginInstance {
             .name(thread_name)
             .spawn(move || {
                 worker_loop(
-                    PluginCore::Wasm(plugin),
+                    PluginCore::Wasm(Box::new(plugin)),
                     host_state,
                     command_rx,
                     worker_plugin_id,
