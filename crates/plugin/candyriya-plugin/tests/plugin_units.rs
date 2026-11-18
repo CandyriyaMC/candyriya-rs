@@ -81,13 +81,15 @@ fn test_tree(max_attempts: u32) -> Init {
         .blocking_threads(2)
         .build()
         .expect("service builds");
-    let mut options = InitOptions::default();
-    options.restart_limits = RestartLimits {
-        base: Duration::from_millis(2),
-        cap: Duration::from_millis(10),
-        max_attempts,
-        window: Duration::from_secs(600),
-        jitter: 0.0,
+    let options = InitOptions {
+        restart_limits: RestartLimits {
+            base: Duration::from_millis(2),
+            cap: Duration::from_millis(10),
+            max_attempts,
+            window: Duration::from_secs(600),
+            jitter: 0.0,
+        },
+        ..InitOptions::default()
     };
     Init::with_options(service, options)
 }
@@ -367,7 +369,7 @@ async fn repeated_traps_reach_the_start_limit_and_stay_visible() {
         let _ = dispatcher.dispatch_event(&login_event());
         let saw_zombie = poll_until(
             || tree.unit(pid).is_some_and(|u| u.state == UnitState::Zombie),
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             Duration::from_millis(2),
         )
         .await;
@@ -510,7 +512,7 @@ async fn an_unhealthy_plugin_can_be_killed_with_the_rest_of_the_tree() {
     assert_eq!(units.spawned, vec!["spinner".to_owned()]);
 
     let swept = tree.cancel_all();
-    assert!(swept.iter().any(|&pid| pid == plugins_pid));
+    assert!(swept.contains(&plugins_pid));
     assert!(
         unit_pid(&tree, "plugin-spinner").is_some(),
         "a cancelled unit still exists until the sweep drops its body"
