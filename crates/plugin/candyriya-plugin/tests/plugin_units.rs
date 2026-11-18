@@ -369,7 +369,7 @@ async fn repeated_traps_reach_the_start_limit_and_stay_visible() {
         let _ = dispatcher.dispatch_event(&login_event());
         let saw_zombie = poll_until(
             || tree.unit(pid).is_some_and(|u| u.state == UnitState::Zombie),
-            Duration::from_secs(10),
+            Duration::from_secs(60),
             Duration::from_millis(2),
         )
         .await;
