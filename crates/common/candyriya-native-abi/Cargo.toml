@@ -1,0 +1,25 @@
+[package]
+name = "candyriya-native-abi"
+description = "The extern \"C\" contract shared by the proxy and native Rust plugins: versioned structs, an opaque instance handle, byte buffers and the V1 function table. Types only, no runtime, no dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+keywords = ["plugin", "abi", "ffi", "minecraft", "proxy"]
+categories = ["ffi"]
+readme = "README.md"
+
+[dependencies]
+# deliberately empty: this crate is the contract, it must not pull anything in
+
+[lints.rust]
+# the whole point of this crate is the extern "C" boundary; workspace forbids
+# unsafe, so this one opt-out, scoped to the two ABI crates, is explicit here
+unsafe_code = "allow"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"

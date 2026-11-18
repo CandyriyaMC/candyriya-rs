@@ -541,6 +541,28 @@ the ordinary one-shot table. All user-facing strings in the commands go
 through the embedded locales, en and ex_girl; the rendering itself is
 MiniMessage and honors the console's color mode.
 
+## The native plugin ABI (phase 1)
+
+Phase 1 of the native plugin epic lands the contract, nothing else: the
+**candyriya-native-abi** crate (`crates/common/candyriya-native-abi`) —
+the `extern "C"` boundary every native plugin is built against. It carries
+versioned `#[repr(C)]` structs, an opaque instance handle, `(ptr, len)` byte
+buffers and the `CandyriyaPluginApiV1` table the proxy hands out with every
+entry point; V1 deliberately carries no host functions, so every proxy→plugin
+call travels through the plugin's own exports and every plugin→proxy call is
+defined by a later ABI version. `crates/plugins/greeting` is the reference
+plugin: a platform-agnostic `cdylib` (`.so`/`.dll`/`.dylib`) that exports
+`candyriya_plugin_init` / `candyriya_plugin_on_load` /
+`candyriya_plugin_on_enable` and prints one line on enable. The crate
+README is the normative document: the call flow, the buffer rules, the
+versioning rules (V1 is frozen; extensions arrive as new table types with
+`abi_version` at offset 0, never as edits to V1) and how to write a new
+plugin. Nothing in the tree calls the ABI yet — the Plugin Controller that
+dlopens plugins and drives the state machine through the supervision tree
+is phase 2, ABI API expansion is phase 3, and WASM plugins run in parallel
+and stay until phase 4. Unsafe code in the workspace remains forbidden
+outside the two ABI crates, where the opt-out is explicit and scoped.
+
 ## A login end to end
 
 Follow one player joining an offline-mode network whose backends speak

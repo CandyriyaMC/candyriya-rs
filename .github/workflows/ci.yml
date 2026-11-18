@@ -121,6 +121,28 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+  # The native-abi contract and the greeting reference plugin must stay
+  # buildable on every platform the release workflow targets; build the cdylib
+  # here (.so on Linux, .dll on Windows, .dylib on macOS) and run the contract
+  # tests. fmt/clippy/doc still run through the workspace jobs above.
+  native-abi:
+    name: native-abi ${{ matrix.os }}
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Contract tests
+        run: cargo test -p candyriya-native-abi
+      - name: Build the reference plugin cdylib
+        run: cargo build --release -p greeting
+
   fuzz-check:
     name: fuzz targets (check)
     needs: gate

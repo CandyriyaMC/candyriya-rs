@@ -21,6 +21,7 @@ members = [
     "crates/common/candyriya-init",
     "crates/common/candyriya-scheduler",
     "crates/common/candyriya-cache",
+    "crates/common/candyriya-native-abi",
     "crates/messaging/candyriya-messaging",
     "crates/messaging/candyriya-messaging-bungeecord",
     "crates/messaging/candyriya-messaging-velocity",
@@ -33,6 +34,7 @@ members = [
     "crates/bench/candyriya-bench",
     "crates/bench/fuzz",
     "crates/it/candyriya-it",
+    "crates/plugins/greeting",
     "crates/cli/candyriya",
 ]
 
