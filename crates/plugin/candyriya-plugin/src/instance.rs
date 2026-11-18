@@ -1,4 +1,4 @@
-//! A wasm plugin instance living on its own dedicated OS thread.
+//! A plugin living on its own dedicated OS thread.
 //!
 //! Extism plugins are synchronous and may run arbitrary wasm; they must
 //! never execute on the proxy's async workers. Every plugin therefore gets a
@@ -7,6 +7,26 @@
 //! ([`std::sync::mpsc::sync_channel`]). Callers get a `Result`, never a
 //! blocked thread: a full mailbox is [`PluginError::Busy`], a silent plugin
 //! is [`PluginError::Timeout`], a dead one is [`PluginError::PluginGone`].
+//!
+//! # Native plugins (side-by-side with wasm)
+//!
+//! A native `.so` / `.dll` built against the versioned ABI
+//! (`candyriya-native-abi`) runs through the same dedicated thread and the
+//! same mailbox as wasm — the only difference is the core behind the
+//! commands. [`PluginInstance::native`] maps the library
+//! (`LibraryLoader::open`), runs the fail-closed init handshake
+//! (`init_plugin`), then `on_load` and `on_enable`, all on the calling
+//! thread, mirroring how the wasm compiler runs on the calling thread. The
+//! instance registers its lifecycle in a
+//! [`candyriya_plugin_controller::PluginRegistry`] the caller provides:
+//! `DISCOVERED` on entry, walked through `LOADING` / `LOADED` /
+//! `INITIALIZING` / `INITIALIZED` / `ENABLING` to `RUNNING` on success, or
+//! into `UNLOADING -> UNLOADED` with the failure reason preserved when any
+//! step refuses (the plugin never enters the supervision tree). After a
+//! clean [`PluginInstance::unload`] the record lands terminally in
+//! `UNLOADED` with no reason set. The ABI v1 has no generic export calls,
+//! so `call()` answers native instances with a typed refusal instead of
+//! bytes.
 //!
 //! # Sandbox limits
 //!
@@ -38,8 +58,18 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use thiserror::Error;
+use tracing::{error, warn};
 
+use candyriya_native_abi::CandyriyaPluginApiV1;
+use candyriya_native_instance::{
+    LibraryLoader, OpenFlags, PluginToken, TableSlot, export_exists, init_plugin, on_enable,
+    on_load,
+};
 use candyriya_plugin_api::OutcomeReport;
+use candyriya_plugin_controller::{
+    PluginManifest as ControllerManifest, PluginRecord, PluginRegistry, PluginWireState,
+};
 
 use crate::error::PluginError;
 use crate::health::PluginHealth;
@@ -55,6 +85,176 @@ const MAILBOX_CAPACITY: usize = 16;
 /// How long a caller waits for the control-plane commands (thread name,
 /// export existence); plugin calls use the configured timeout instead.
 const MAILBOX_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The format of a plugin entry point.
+///
+/// Both formats share the dedicated thread, the mailbox and the supervision
+/// shape; the wasm path compiles a module, the native path maps a library.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginFormat {
+    /// An [extism](https://extism.org) wasm module, called through the
+    /// extism ABI (`() -> i32`, bytes in, bytes out).
+    Wasm,
+    /// A native dynamic library built against the versioned ABI
+    /// (`candyriya-native-abi`), called through its frozen exports.
+    Native,
+}
+
+/// The unifying description of a plugin, either format.
+///
+/// The same record shape covers the wasm and the native path, so anything
+/// that consumes `PluginInstance::descriptor` never has to ask which kind of
+/// entry point it is looking at before inspecting the path. `abi_version` is
+/// `Some(n)` only for a native plugin whose init handshake completed (where
+/// `n` is the ABI level the plugin echoed, `1` for V1); it stays `None` for
+/// wasm.
+///
+/// `name` and `version` come from the caller for native plugins (the
+/// manifest the discovery pass saw). The wasm instance layer never sees the
+/// manifest, so wasm descriptors carry the plugin id in `name` and an empty
+/// `version` — the composition root that owns the manifest can rebuild a
+/// complete one when the loader stamps descriptors through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginDescriptor {
+    /// The plugin id (validated upstream; the loader guarantees the shape).
+    pub id: String,
+    /// Human-readable name; falls back to the id on the wasm path.
+    pub name: String,
+    /// The semver string from the manifest; empty on the wasm path.
+    pub version: String,
+    /// The entry point: the `.wasm` module or the `.so`/`.dll`/`.dylib`.
+    pub path: PathBuf,
+    /// Which format the entry point is.
+    pub wasm_or_native_format: PluginFormat,
+    /// The ABI version the plugin echoed; `None` unless the native
+    /// handshake completed.
+    pub abi_version: Option<u32>,
+}
+
+impl PluginDescriptor {
+    /// The descriptor for a native ABI plugin with `path` as its library.
+    ///
+    /// `abi_version` starts as `None` and is filled in by the handshake at
+    /// bring-up; a descriptor that never completed bring-up keeps `None`.
+    #[must_use]
+    pub fn native(id: &str, name: &str, version: &str, path: PathBuf) -> Self {
+        Self {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            version: version.to_owned(),
+            path,
+            wasm_or_native_format: PluginFormat::Native,
+            abi_version: None,
+        }
+    }
+
+    pub(crate) fn wasm(id: &str, path: PathBuf) -> Self {
+        Self {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            version: String::new(),
+            path,
+            wasm_or_native_format: PluginFormat::Wasm,
+            abi_version: None,
+        }
+    }
+}
+
+/// Errors produced while bringing a native plugin up.
+///
+/// Separate from [`PluginError`]: a native bring-up failure is never a
+/// recoverable call outcome, and the variants carry exactly what an operator
+/// needs (which file, which step, what the plugin said).
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum NativeLoadError {
+    /// The OS refused the mapping: missing file, unsupported architecture,
+    /// unresolvable dependency, or a constructor that aborted.
+    #[error("failed to load native plugin `{}`: {message}", .path.display())]
+    Open {
+        /// The library file.
+        path: PathBuf,
+        /// What the loader reported.
+        message: String,
+    },
+    /// The library mapped but `candyriya_plugin_init` failed: missing
+    /// export, refused handshake, or the reported identity does not belong
+    /// to this manifest.
+    #[error("native plugin `{}` refused the init handshake: {message}", .path.display())]
+    Init {
+        /// The library file.
+        path: PathBuf,
+        /// What the handshake reported.
+        message: String,
+    },
+    /// `candyriya_plugin_on_load` failed or answered non-`Ok`.
+    #[error("native plugin `{plugin_id}` failed its on_load callback: {message}")]
+    OnLoad {
+        /// The plugin id.
+        plugin_id: String,
+        /// The callback's report.
+        message: String,
+    },
+    /// `candyriya_plugin_on_enable` failed or answered non-`Ok`.
+    #[error("native plugin `{plugin_id}` failed its on_enable callback: {message}")]
+    OnEnable {
+        /// The plugin id.
+        plugin_id: String,
+        /// The callback's report.
+        message: String,
+    },
+    /// The shared instance budget refused a new instance.
+    #[error("native plugin `{plugin_id}` could not acquire an instance slot: {message}")]
+    Slots {
+        /// The plugin id.
+        plugin_id: String,
+        /// What the limit reported.
+        message: String,
+    },
+    /// The lifecycle registry refused to track the plugin (e.g. duplicate id).
+    /// The plugin never runs in this case and the record is left untouched.
+    #[error("native plugin `{plugin_id}` was refused by the plugin registry: {message}")]
+    Registry {
+        /// The plugin id.
+        plugin_id: String,
+        /// What the registry reported.
+        message: String,
+    },
+    /// The worker thread could not be spawned after a successful bring-up.
+    #[error("native plugin thread for `{plugin_id}`: {reason}")]
+    Thread {
+        /// The plugin id.
+        plugin_id: String,
+        /// What the spawn failed with.
+        reason: String,
+    },
+    /// The descriptor does not describe a native plugin, or disagrees with
+    /// the requested id.
+    #[error("native bring-up refused the descriptor: {0}")]
+    Format(String),
+}
+
+/// The runtime behind the mailbox.
+///
+/// Both flavors share the worker thread, the bounded mailbox and the
+/// supervision shape; the difference lives in exactly these two arms.
+enum PluginCore {
+    /// An extism wasm plugin.
+    Wasm(extism::Plugin),
+    /// A native ABI v1 library, freshly brought up.
+    Native(NativePluginCore),
+}
+
+/// The native half of one instance, moved onto the plugin's thread.
+///
+/// Dropping it closes the mapping when the worker exits. The table and the
+/// token stay on the calling-thread side of the boundary (in a `TableSlot`
+/// on the owning instance): nothing crosses into the worker except the
+/// mapping, so no raw handle ever moves threads.
+struct NativePluginCore {
+    /// The mapped library; closed when the worker exits.
+    library: LibraryLoader,
+}
 
 /// Commands the worker thread understands.
 enum PluginCommand {
@@ -105,6 +305,17 @@ pub struct PluginInstance {
     subscribers: Arc<Mutex<std::collections::HashSet<String>>>,
     caller_plugin_id: Arc<Mutex<Option<String>>>,
     pending_outcome: Arc<Mutex<Option<OutcomeReport>>>,
+    /// The unifying descriptor, either format.
+    descriptor: PluginDescriptor,
+    /// Lifecycle-registry bookkeeping for a native plugin: the registry the
+    /// record lives in and the record's id. `None` for wasm instances. Taken
+    /// exactly once at teardown so the `UNLOADING -> UNLOADED` walk runs on
+    /// both `unload` and `drop` paths.
+    native_teardown: Option<(Arc<PluginRegistry>, String)>,
+    /// The V1 table and per-instance token for a native plugin, bundled in
+    /// the `Send + Sync` slot minted by `candyriya-native-instance`; `None`
+    /// for wasm. Never moved onto the worker thread.
+    native_runtime: Option<TableSlot>,
 }
 
 impl PluginInstance {
@@ -230,7 +441,7 @@ impl PluginInstance {
             .name(thread_name)
             .spawn(move || {
                 worker_loop(
-                    plugin,
+                    PluginCore::Wasm(plugin),
                     host_state,
                     command_rx,
                     worker_plugin_id,
@@ -257,6 +468,241 @@ impl PluginInstance {
             subscribers,
             caller_plugin_id,
             pending_outcome,
+            descriptor: PluginDescriptor::wasm(plugin_id, wasm_path.to_path_buf()),
+            native_teardown: None,
+            native_runtime: None,
+        })
+    }
+
+    /// Bring a native plugin up through the side-by-side path.
+    ///
+    /// The library at `descriptor.path` is mapped (`LibraryLoader::open`,
+    /// `OpenFlags::Now`), the opaque per-instance token is minted and the
+    /// V1 table is built, then `candyriya_plugin_init` runs through
+    /// `init_plugin` (the same fail-closed handshake [`initialize`] performs,
+    /// with the table taken by shared reference). On success the plugin
+    /// receives `candyriya_plugin_on_load` and then
+    /// `candyriya_plugin_on_enable`. All of this happens on the calling
+    /// thread, mirroring how the wasm path compiles on the calling thread;
+    /// only the serving loop moves onto the dedicated
+    /// `candyriya-plugin-<plugin_id>` thread afterwards.
+    ///
+    /// The lifecycle is tracked in `registry`, which the caller owns (the
+    /// composition root shares one process-wide registry; tests build their
+    /// own): the plugin is registered as `DISCOVERED` up front and walks
+    /// `LOADING` → `LOADED` → `INITIALIZING` → `INITIALIZED` → `ENABLING` →
+    /// `RUNNING` on success. **Any refusal in any step is a bring-up
+    /// failure**: the reason lands on the record, the record is walked into
+    /// terminal `UNLOADED` (preserving the reason), the instance slot is
+    /// released and `Err` comes back — the plugin never enters the running
+    /// tree. `plugin_id` must match `descriptor.id`.
+    ///
+    /// # Errors
+    ///
+    /// [`NativeLoadError::Open`] when the OS refuses the mapping,
+    /// [`NativeLoadError::Init`] when the init handshake refuses (missing
+    /// export, bad status, ABI echo mismatch, or the plugin's reported
+    /// identity does not belong to `plugin_id`),
+    /// [`NativeLoadError::OnLoad`] / [`NativeLoadError::OnEnable`] when a
+    /// lifecycle callback fails, [`NativeLoadError::Slots`] when the shared
+    /// instance budget is exhausted, [`NativeLoadError::Registry`] when the
+    /// registry refuses the plugin (e.g. a duplicate id), and
+    /// [`NativeLoadError::Thread`] when the worker cannot be spawned after
+    /// a successful bring-up.
+    pub fn native(
+        mut descriptor: PluginDescriptor,
+        host_state: HostState,
+        plugin_id: &str,
+        limits: &Limits,
+        registry: Arc<PluginRegistry>,
+    ) -> Result<Self, NativeLoadError> {
+        if descriptor.wasm_or_native_format != PluginFormat::Native {
+            return Err(NativeLoadError::Format(
+                "wasm_or_native_format is not Native".to_owned(),
+            ));
+        }
+        if descriptor.id != plugin_id {
+            return Err(NativeLoadError::Format(format!(
+                "descriptor id `{}` does not match the requested id `{plugin_id}`",
+                descriptor.id
+            )));
+        }
+        let path = descriptor.path.clone();
+        let host_state_data = host_state.data_dir.clone();
+        let subscribers = Arc::clone(&host_state.subscribers);
+        let caller_plugin_id = Arc::clone(&host_state.caller_plugin_id);
+        let pending_outcome = Arc::clone(&host_state.pending_outcome);
+
+        // the record is registered first so a bring-up failure always has
+        // somewhere to land the reason; discovery order is preserved
+        let manifest =
+            ControllerManifest::new(plugin_id, &descriptor.version, &descriptor.name, None);
+        registry
+            .insert(PluginRecord::from_manifest(&manifest, &path))
+            .map_err(|error| NativeLoadError::Registry {
+                plugin_id: plugin_id.to_owned(),
+                message: error.to_string(),
+            })?;
+
+        // one live-instance slot per plugin, shared across every plugin
+        // loaded together (the loader hands out one registry per run)
+        let slots = host_state.instance_slots();
+        if let Err(error) = slots.try_acquire(plugin_id, limits.max_instances) {
+            let message = error.to_string();
+            native_fail(&registry, &slots, plugin_id, &message);
+            return Err(NativeLoadError::Slots {
+                plugin_id: plugin_id.to_owned(),
+                message,
+            });
+        }
+
+        // LOADING: map + handshake. Both steps fail the same way: the
+        // reason lands on the record, the record walks into UNLOADED, the
+        // slot is released and the plugin never runs.
+        reg_step(&registry, &slots, plugin_id, PluginWireState::Loading)?;
+        let library = match LibraryLoader::open(&path, OpenFlags::Now) {
+            Ok(library) => library,
+            Err(error) => {
+                let message = error.to_string();
+                native_fail(&registry, &slots, plugin_id, &message);
+                return Err(NativeLoadError::Open { path, message });
+            }
+        };
+        // mint the opaque token once; the table borrows nothing, the token
+        // owns the allocation it denotes
+        let token = PluginToken::mint();
+        let table = CandyriyaPluginApiV1::new(token.handle());
+        let initialized = match init_plugin(&library, &table) {
+            Ok(initialized) => initialized,
+            Err(error) => {
+                let message = error.to_string();
+                native_fail(&registry, &slots, plugin_id, &message);
+                return Err(NativeLoadError::Init { path, message });
+            }
+        };
+        // the plugin is who it says it is, or not this manifest's plugin
+        if initialized.identity.id != plugin_id.as_bytes() {
+            let message = format!(
+                "plugin reported id `{}`, but `{plugin_id}` was requested",
+                initialized.identity.id.escape_ascii()
+            );
+            native_fail(&registry, &slots, plugin_id, &message);
+            return Err(NativeLoadError::Init { path, message });
+        }
+        if initialized.identity.name != descriptor.name.as_bytes() {
+            warn!(
+                plugin = %plugin_id,
+                descriptor = %descriptor.name,
+                reported = %initialized.identity.name.escape_ascii(),
+                "native plugin's reported name differs from the descriptor; keeping the descriptor"
+            );
+        }
+        if initialized.identity.version != descriptor.version.as_bytes() {
+            warn!(
+                plugin = %plugin_id,
+                descriptor = %descriptor.version,
+                reported = %initialized.identity.version.escape_ascii(),
+                "native plugin's reported version differs from the descriptor; keeping the descriptor"
+            );
+        }
+        descriptor.abi_version = Some(initialized.abi_version);
+        reg_step(&registry, &slots, plugin_id, PluginWireState::Loaded)?;
+
+        // INITIALIZING: on_load
+        reg_step(&registry, &slots, plugin_id, PluginWireState::Initializing)?;
+        match on_load(&library, &table) {
+            Ok(status) if status.is_ok() => {}
+            Ok(status) => {
+                let message = format!("on_load answered {status:?}");
+                native_fail(&registry, &slots, plugin_id, &message);
+                return Err(NativeLoadError::OnLoad {
+                    plugin_id: plugin_id.to_owned(),
+                    message,
+                });
+            }
+            Err(error) => {
+                let message = error.to_string();
+                native_fail(&registry, &slots, plugin_id, &message);
+                return Err(NativeLoadError::OnLoad {
+                    plugin_id: plugin_id.to_owned(),
+                    message,
+                });
+            }
+        }
+        reg_step(&registry, &slots, plugin_id, PluginWireState::Initialized)?;
+
+        // ENABLING: on_enable
+        reg_step(&registry, &slots, plugin_id, PluginWireState::Enabling)?;
+        match on_enable(&library, &table) {
+            Ok(status) if status.is_ok() => {}
+            Ok(status) => {
+                let message = format!("on_enable answered {status:?}");
+                native_fail(&registry, &slots, plugin_id, &message);
+                return Err(NativeLoadError::OnEnable {
+                    plugin_id: plugin_id.to_owned(),
+                    message,
+                });
+            }
+            Err(error) => {
+                let message = error.to_string();
+                native_fail(&registry, &slots, plugin_id, &message);
+                return Err(NativeLoadError::OnEnable {
+                    plugin_id: plugin_id.to_owned(),
+                    message,
+                });
+            }
+        }
+        reg_step(&registry, &slots, plugin_id, PluginWireState::Running)?;
+
+        // move the native core onto the dedicated thread, exactly like the
+        // wasm plugin moves after its compile
+        let (command_tx, command_rx) = sync_channel::<PluginCommand>(MAILBOX_CAPACITY);
+        let thread_name = format!("candyriya-plugin-{plugin_id}");
+        let worker_plugin_id = plugin_id.to_owned();
+        let native = NativePluginCore { library };
+        let health_cell = host_state.health_cell(plugin_id);
+        let worker = std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                worker_loop(
+                    PluginCore::Native(native),
+                    host_state,
+                    command_rx,
+                    worker_plugin_id,
+                    health_cell,
+                )
+            })
+            .map_err(|error| {
+                // the plugin already ran on_enable; the tree must not see it
+                // as running either. bookkeeping happens on the calling
+                // thread, the mapping closes with the dropped closure.
+                let message = error.to_string();
+                native_fail(&registry, &slots, plugin_id, &message);
+                NativeLoadError::Thread {
+                    plugin_id: plugin_id.to_owned(),
+                    reason: message,
+                }
+            })?;
+
+        crate::metrics::plugin_loaded(plugin_id);
+        Ok(Self {
+            plugin_id: plugin_id.to_owned(),
+            command_tx: Some(command_tx),
+            thread: Some(worker),
+            data_dir: host_state_data,
+            limits: limits.clone(),
+            slots: Some(slots),
+            rate_limiter: CallRateLimiter::new(limits.max_calls),
+            handles: Arc::new(HandleTable::new(
+                limits.max_open_handles,
+                plugin_id.to_owned(),
+            )),
+            subscribers,
+            caller_plugin_id,
+            pending_outcome,
+            descriptor,
+            native_teardown: Some((registry, plugin_id.to_owned())),
+            native_runtime: Some(TableSlot::new(table, token)),
         })
     }
 
@@ -268,6 +714,20 @@ impl PluginInstance {
     /// The sandbox limits this instance was created under.
     pub fn limits(&self) -> &Limits {
         &self.limits
+    }
+
+    /// The unifying descriptor for the entry point behind this instance —
+    /// wasm or native. `abi_version` is `Some(n)` for a native plugin whose
+    /// handshake completed.
+    pub fn descriptor(&self) -> &PluginDescriptor {
+        &self.descriptor
+    }
+
+    /// The V1 table a native plugin saw at every lifecycle call, if this
+    /// instance is native. `None` for wasm. The table is valid for as long
+    /// as this instance is alive.
+    pub fn native_table(&self) -> Option<&CandyriyaPluginApiV1> {
+        self.native_runtime.as_ref().map(TableSlot::table)
     }
 
     /// The plugin's data directory (owned by this plugin alone).
@@ -452,12 +912,17 @@ impl PluginInstance {
     pub fn unload(mut self) -> Result<(), PluginError> {
         close_mailbox(self.command_tx.take());
         let Some(thread) = self.thread.take() else {
+            retire_native(self.native_teardown.take());
             return Ok(());
         };
-        thread.join().map_err(|_| PluginError::PluginThread {
+        let result = thread.join().map_err(|_| PluginError::PluginThread {
             plugin_id: self.plugin_id.clone(),
             reason: "worker thread panicked".to_owned(),
-        })
+        });
+        // the native bookkeeping walk runs after the join so the record only
+        // reaches UNLOADED once the worker (holding the mapping) is gone
+        retire_native(self.native_teardown.take());
+        result
     }
 
     fn send(&self, command: PluginCommand) -> Result<(), PluginError> {
@@ -488,12 +953,74 @@ impl Drop for PluginInstance {
             slots.release(&self.plugin_id);
         }
         crate::metrics::plugin_unloaded(&self.plugin_id);
+        // the native bookkeeping walk is O(4 registry moves); it must run
+        // here too, for the `drop` path can bypass `unload()`
+        retire_native(self.native_teardown.take());
         // Close the mailbox so the worker terminates after its current
         // command. The join is deliberately *not* done here: dropping must
         // never wait on a stuck wasm call. The worker thread is detached
         // and dies with the process at the latest.
         close_mailbox(self.command_tx.take());
         let _ = self.thread.take();
+    }
+}
+
+/// Failure teardown for a native bring-up: log, preserve the reason on the
+/// record, walk it into terminal `UNLOADED` and release the instance slot.
+/// The failure funnel is deliberately the same shape for every bring-up
+/// step, so a dlopen refusal and a refused handshake land identically.
+fn native_fail(registry: &PluginRegistry, slots: &InstanceSlots, plugin_id: &str, reason: &str) {
+    error!(
+        plugin = %plugin_id,
+        %reason,
+        "native plugin bring-up failed; it will not enter the supervision tree"
+    );
+    let _ = registry.set_reason(plugin_id, reason);
+    let _ = registry.set_state(plugin_id, PluginWireState::Unloading);
+    let _ = registry.mark_failed(plugin_id);
+    slots.release(plugin_id);
+}
+
+/// Drive one step of the bring-up ladder. A refused step lands the failure
+/// funnel identically to any bring-up failure: the reason lands on the
+/// record, the record walks into `UNLOADED`, the slot is released, and the
+/// caller gets a typed `Registry` error back.
+fn reg_step(
+    registry: &PluginRegistry,
+    slots: &InstanceSlots,
+    plugin_id: &str,
+    target: PluginWireState,
+) -> Result<(), NativeLoadError> {
+    registry.set_state(plugin_id, target).map_err(|error| {
+        let message = error.to_string();
+        native_fail(registry, slots, plugin_id, &message);
+        NativeLoadError::Registry {
+            plugin_id: plugin_id.to_owned(),
+            message,
+        }
+    })?;
+    Ok(())
+}
+
+/// Clean-unload bookkeeping for a native plugin: walk the record down the
+/// legal funnel to terminal `UNLOADED`. No plugin code runs — in ABI v1
+/// there is no disable/unload contract. A record that already landed in
+/// `UNLOADED` on the failure path makes the walk stop at the first refused
+/// step, which is exactly what it should do.
+fn retire_native(teardown: Option<(Arc<PluginRegistry>, String)>) {
+    let Some((registry, id)) = teardown else {
+        return;
+    };
+    for step in [
+        PluginWireState::Disabling,
+        PluginWireState::Disabled,
+        PluginWireState::Unloading,
+        PluginWireState::Unloaded,
+    ] {
+        if let Err(error) = registry.set_state(&id, step) {
+            tracing::debug!(plugin = %id, %error, "skipping teardown transition; the record already moved on");
+            break;
+        }
     }
 }
 
@@ -510,7 +1037,7 @@ fn close_mailbox(tx: Option<SyncSender<PluginCommand>>) {
 }
 
 fn worker_loop(
-    mut plugin: extism::Plugin,
+    mut core: PluginCore,
     _host_state: HostState,
     command_rx: std::sync::mpsc::Receiver<PluginCommand>,
     plugin_id: String,
@@ -523,65 +1050,88 @@ fn worker_loop(
                 input,
                 respond,
             } => {
-                let wasm_started = std::time::Instant::now();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    plugin
-                        .call::<&[u8], Vec<u8>>(&export, &input)
-                        .map_err(|e| e.to_string())
-                }));
-                // wasm thread time, not caller-observed wall time: a hung
-                // run only lands here once the runtime interrupts it
-                crate::metrics::record_thread_time(&plugin_id, wasm_started.elapsed());
-                let result = match result {
-                    Ok(Ok(bytes)) => Ok(bytes),
-                    Ok(Err(message)) => {
-                        // unambiguously abnormal outcomes flag the plugin as
-                        // unrecoverable; an ordinary guest error does not
-                        let broken = if message.contains("ran out of fuel") {
-                            Some("wasm ran out of fuel")
-                        } else if message == "timeout" {
-                            // the epoch interrupt surfaces with exactly this
-                            // message; the 30s manifest budget was exceeded
-                            Some("wasm call exceeded the manifest timeout and was interrupted")
-                        } else {
-                            None
+                match &mut core {
+                    PluginCore::Wasm(plugin) => {
+                        let wasm_started = std::time::Instant::now();
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            plugin
+                                .call::<&[u8], Vec<u8>>(&export, &input)
+                                .map_err(|e| e.to_string())
+                        }));
+                        // wasm thread time, not caller-observed wall time: a hung
+                        // run only lands here once the runtime interrupts it
+                        crate::metrics::record_thread_time(&plugin_id, wasm_started.elapsed());
+                        let result = match result {
+                            Ok(Ok(bytes)) => Ok(bytes),
+                            Ok(Err(message)) => {
+                                // unambiguously abnormal outcomes flag the plugin as
+                                // unrecoverable; an ordinary guest error does not
+                                let broken = if message.contains("ran out of fuel") {
+                                    Some("wasm ran out of fuel")
+                                } else if message == "timeout" {
+                                    // the epoch interrupt surfaces with exactly this
+                                    // message; the 30s manifest budget was exceeded
+                                    Some(
+                                        "wasm call exceeded the manifest timeout and was interrupted",
+                                    )
+                                } else {
+                                    None
+                                };
+                                if let (Some(cell), Some(reason)) = (&health_cell, broken) {
+                                    cell.mark_broken(reason);
+                                }
+                                // extism surfaces a drained fuel store as an error
+                                // whose message contains this string (via
+                                // catch_out_of_fuel! and raw_call); the epoch timer
+                                // surfaces timeouts the same way with "timeout"
+                                if message.contains("ran out of fuel") {
+                                    Err(PluginError::FuelExhausted {
+                                        plugin_id: plugin_id.clone(),
+                                        export,
+                                    })
+                                } else {
+                                    Err(PluginError::CallFailed {
+                                        plugin_id: plugin_id.clone(),
+                                        export,
+                                        message,
+                                    })
+                                }
+                            }
+                            Err(_) => {
+                                if let Some(cell) = &health_cell {
+                                    cell.mark_broken("plugin panicked during the call");
+                                }
+                                Err(PluginError::CallFailed {
+                                    plugin_id: plugin_id.clone(),
+                                    export,
+                                    message: "plugin panicked during the call".to_owned(),
+                                })
+                            }
                         };
-                        if let (Some(cell), Some(reason)) = (&health_cell, broken) {
-                            cell.mark_broken(reason);
-                        }
-                        // extism surfaces a drained fuel store as an error
-                        // whose message contains this string (via
-                        // catch_out_of_fuel! and raw_call); the epoch timer
-                        // surfaces timeouts the same way with "timeout"
-                        if message.contains("ran out of fuel") {
-                            Err(PluginError::FuelExhausted {
-                                plugin_id: plugin_id.clone(),
-                                export,
-                            })
-                        } else {
-                            Err(PluginError::CallFailed {
-                                plugin_id: plugin_id.clone(),
-                                export,
-                                message,
-                            })
-                        }
+                        // if the caller gave up waiting, nobody reads this — fine
+                        let _ = respond.send(result);
                     }
-                    Err(_) => {
-                        if let Some(cell) = &health_cell {
-                            cell.mark_broken("plugin panicked during the call");
-                        }
-                        Err(PluginError::CallFailed {
+                    PluginCore::Native(_) => {
+                        // the ABI v1 has no generic export calls: a call for a
+                        // native instance is refused with a typed error, never
+                        // a made-up byte answer
+                        let started = std::time::Instant::now();
+                        let result = Err(PluginError::CallFailed {
                             plugin_id: plugin_id.clone(),
                             export,
-                            message: "plugin panicked during the call".to_owned(),
-                        })
+                            message: "native plugins do not accept arbitrary export calls; the ABI v1 surface is lifecycle-only".to_owned(),
+                        });
+                        crate::metrics::record_thread_time(&plugin_id, started.elapsed());
+                        let _ = respond.send(result);
                     }
-                };
-                // if the caller gave up waiting, nobody reads this — fine
-                let _ = respond.send(result);
+                }
             }
             PluginCommand::HasExport { name, respond } => {
-                let _ = respond.send(plugin.function_exists(&name));
+                let found = match &core {
+                    PluginCore::Wasm(plugin) => plugin.function_exists(&name),
+                    PluginCore::Native(native) => export_exists(&native.library, &name),
+                };
+                let _ = respond.send(found);
             }
             PluginCommand::WorkerThreadName { respond } => {
                 let name = std::thread::current()
@@ -593,5 +1143,6 @@ fn worker_loop(
             PluginCommand::Shutdown => break,
         }
     }
-    // `plugin` drops here, releasing the wasm instance and its memory
+    // `core` drops here: the extism instance and its memory are released,
+    // or the native mapping is closed (table/token go with it)
 }

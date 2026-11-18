@@ -11,6 +11,7 @@
 mod export_names;
 mod handshake;
 mod instance;
+mod lifecycle;
 mod plugin_init;
 
 pub use export_names::{
@@ -19,4 +20,5 @@ pub use export_names::{
 };
 pub use handshake::{HandshakeError, validate_handshake, validate_init_output};
 pub use instance::{LibraryLoader, LoaderError, OpenFlags};
+pub use lifecycle::{PluginToken, TableSlot, export_exists, init_plugin, on_enable, on_load};
 pub use plugin_init::{InitError, InitializedPlugin, PluginIdentity, initialize};

@@ -33,6 +33,9 @@ candyriya-scheduler = { version = "0.1.0", path = "../../common/candyriya-schedu
 candyriya-init = { version = "0.1.0", path = "../../common/candyriya-init" }
 candyriya-config = { version = "0.1.0", path = "../../config/candyriya-config" }
 candyriya-metrics = { version = "0.1.0", path = "../../common/candyriya-metrics" }
+candyriya-native-abi = { version = "0.1.1", path = "../../common/candyriya-native-abi" }
+candyriya-native-instance = { version = "0.1.1", path = "../../common/candyriya-native-instance" }
+candyriya-plugin-controller = { version = "0.1.1", path = "../../common/candyriya-plugin-controller" }
 wasmparser = { workspace = true }
 metrics = { workspace = true }
 
