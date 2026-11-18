@@ -295,10 +295,51 @@ always the same decision: who is asking, about which node, with which
 grants in hand. The three scenarios below walk grant tables through it.
 Built-in, node-gated commands in the current release are
 `candyriya.command.info`, `candyriya.command.servers`,
-`candyriya.command.switch` and `candyriya.command.end`; the player-facing
-commands (`/glist`, `/send`, `/server`, `/goto`) are deliberately ungated
-and carry no node. Node IDs prefixed `example.` below are
-network-defined illustrations, not built-ins.
+`candyriya.command.switch`, `candyriya.command.end`,
+`candyriya.command.reload`, `candyriya.command.ps` and
+`candyriya.command.tree`; the player-facing commands
+(`/glist`, `/send`, `/server`, `/goto`) are deliberately ungated and carry no
+node. The `candyriya.command.plugin.*` namespace for the upcoming
+`/candyriya plugin` subcommands is specified in
+[The plugin namespace](#the-plugin-namespace-upcoming) below and is not in
+the tree yet. Node IDs prefixed `example.` below are network-defined
+illustrations, not built-ins.
+
+### The plugin namespace (upcoming)
+
+Phase 2 of the native-plugins epic adds the `/candyriya plugin` subcommands
+(specified in [Commands](commands#candyriya-plugin); tracked in
+[issue #310](https://github.com/CandyriyaMC/candyriya-rs/issues/310)). The
+subcommands are not in the tree yet, and the nodes below are expected nodes,
+not registered ones. When they land, each subcommand carries one node:
+
+| Node | Gates |
+|------|-------|
+| `candyriya.command.plugin.list` | `/candyriya plugin list` |
+| `candyriya.command.plugin.info` | `/candyriya plugin info <plugin>` |
+| `candyriya.command.plugin.load` | `/candyriya plugin load <plugin>` |
+| `candyriya.command.plugin.enable` | `/candyriya plugin enable <plugin>` |
+| `candyriya.command.plugin.disable` | `/candyriya plugin disable <plugin>` |
+| `candyriya.command.plugin.unload` | `/candyriya plugin unload <plugin>` |
+| `candyriya.command.plugin.restart` | `/candyriya plugin restart <plugin>` |
+| `candyriya.command.plugin.inspect` | `/candyriya plugin inspect <plugin>` |
+| `candyriya.command.plugin.logs` | `/candyriya plugin logs <plugin>` |
+| `candyriya.command.plugin.tree` | `/candyriya plugin tree` |
+
+The namespace rolls up exactly like the rest of the gated tree:
+
+- `candyriya.command.plugin.*` — allows the whole plugin set (a 3-segment
+  pattern matching every `candyriya.command.plugin.<name>`).
+- `candyriya.command.*` and `*` — cover the namespace as well.
+- The console's built-in `*` allows all of them.
+- A player or backend with no matching grant is denied every one of them;
+  the namespace is default-deny, like the rest of the tree, and nothing is
+  implied by the root literal or the `plugin` literal itself.
+- The nodes are not registered with a non-deny default; the command layer
+  enforces them, exactly as it does for the other `/candyriya` subcommands.
+
+Granting `candyriya.command.plugin.*` to a group covers the whole plugin
+surface; granting the individual nodes gates them one by one.
 
 ### Scenario 1 — fly locked to the lobby
 

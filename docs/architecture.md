@@ -354,7 +354,10 @@ are ungated, Velocity-style), and dispatches to pure command
 implementations that read the world through the `NetworkDirectory` trait
 and mutate it through `ProxyEffects`. Output
 is MiniMessage lines through an `OutputSender` seam; the crate has no
-network, no async and no I/O.
+network, no async and no I/O. The upcoming `/candyriya plugin` surface
+(phase 2 of the native-plugins epic) is specified in
+[Commands](commands#candyriya-plugin) and gated by the
+`candyriya.command.plugin.*` nodes; the running tree does not carry it yet.
 
 ### Composition root
 

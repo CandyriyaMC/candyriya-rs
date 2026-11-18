@@ -57,6 +57,8 @@ every user-facing string.
 - A plugin system over WebAssembly (Extism). Plugins carry a `plugin.toml`
   descriptor, declare dependencies, run on dedicated OS threads with resource
   limits and timeouts, and never execute on the proxy's async workers.
+- A native Rust plugin ABI is in design and development, tracked in
+  [issue #310](https://github.com/CandyriyaMC/candyriya-rs/issues/310).
 - Per-plugin cache namespaces and quota accounting, backed by cachegirl, with
   atomic leases and a scheduled cleanup engine.
 - A permissions engine built into the core: nodes, subjects, contexts
