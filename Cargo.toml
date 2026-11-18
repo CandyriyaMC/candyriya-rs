@@ -18,6 +18,7 @@ members = [
     "crates/common/candyriya-metrics",
     "crates/common/candyriya-telemetry",
     "crates/common/candyriya-eventbus",
+    "crates/common/candyriya-init",
     "crates/common/candyriya-scheduler",
     "crates/common/candyriya-cache",
     "crates/messaging/candyriya-messaging",

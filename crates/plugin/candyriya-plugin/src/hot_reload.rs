@@ -59,6 +59,8 @@ use parking_lot::Mutex;
 use candyriya_scheduler::TaskService;
 
 use crate::error::PluginError;
+use crate::health::PluginHealthSet;
+use crate::host_ipc::HostIpc;
 use crate::host_state::HostState;
 use crate::instance::PluginInstance;
 use crate::library_plugin::{LibraryPlugin, PluginState};
@@ -156,6 +158,8 @@ pub struct PluginReloader {
     services: ServiceRegistry,
     limits: Limits,
     locales: Option<SharedLocales>,
+    host_ipc: HostIpc,
+    health: Option<PluginHealthSet>,
 }
 
 impl PluginReloader {
@@ -185,6 +189,8 @@ impl PluginReloader {
             services,
             limits,
             locales: None,
+            host_ipc: HostIpc::new(),
+            health: None,
         }
     }
 
@@ -198,6 +204,27 @@ impl PluginReloader {
     #[must_use]
     pub fn with_locales(mut self, locales: SharedLocales) -> Self {
         self.locales = Some(locales);
+        self
+    }
+
+    /// The shared link to the supervised `host` unit staged replacements
+    /// resolve through. Same slot the loader used; without it a reloaded
+    /// plugin's host functions answer with the honest "host unit link is
+    /// not installed" error.
+    #[must_use]
+    pub fn with_host_ipc(mut self, host_ipc: HostIpc) -> Self {
+        self.host_ipc = host_ipc;
+        self
+    }
+
+    /// The shared per-plugin health registry staged replacements flag
+    /// into. Same slot the loader used; every fresh instance this reloader
+    /// builds clears its plugin's conviction. Without it a restaged plugin
+    /// is invisible to the supervision units until its first call, and a
+    /// supervision-driven restage leaves the old conviction in place.
+    #[must_use]
+    pub fn with_plugin_health(mut self, health: PluginHealthSet) -> Self {
+        self.health = Some(health);
         self
     }
 
@@ -244,8 +271,9 @@ impl PluginReloader {
             dir: dir.clone(),
         })?;
 
-        // the replacement inherits the proxy's shared services (the
-        // dispatcher, the roster, ...) so its host functions work
+        // the replacement inherits the shared plugin-owned services and
+        // the host unit link (the dispatcher, the roster, ...) so its
+        // host functions work the same as the startup-loaded instance did
         let data_root = self.config_root.clone();
         let config_dir = data_root.join("config").join(id);
         std::fs::create_dir_all(&config_dir).map_err(|source| PluginError::DataDir {
@@ -258,10 +286,14 @@ impl PluginReloader {
             source,
         })?;
 
-        let mut host_state =
-            HostState::new(data_root, id).with_services(Arc::new(self.services.clone()));
+        let mut host_state = HostState::new(data_root, id)
+            .with_services(Arc::new(self.services.clone()))
+            .with_host_ipc(self.host_ipc.clone());
         if let Some(locales) = &self.locales {
             host_state = host_state.with_locales(locales.clone());
+        }
+        if let Some(health) = &self.health {
+            host_state = host_state.with_plugin_health(health.clone());
         }
         let instance = PluginInstance::new(&wasm_path, host_state, id, &self.limits)?;
         match instance.function_exists(manifest.plugin_main()) {

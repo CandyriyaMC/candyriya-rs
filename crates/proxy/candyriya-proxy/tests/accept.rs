@@ -15,7 +15,9 @@ use tokio::sync::watch;
 use candyriya_config::Config;
 use candyriya_scheduler::TaskService;
 
-use candyriya_proxy::{ProxySocket, ProxyState, REUSE_PORT_SUPPORTED, SocketConfig, serve};
+use candyriya_proxy::{ProxySocket, REUSE_PORT_SUPPORTED, SocketConfig, serve};
+
+mod common;
 
 /// Loopback ephemeral bind address.
 fn loopback_any() -> SocketAddr {
@@ -29,8 +31,8 @@ fn test_service() -> TaskService {
         .expect("task service must build")
 }
 
-fn test_config() -> Arc<Config> {
-    Arc::new(Config::default())
+fn test_config() -> Config {
+    Config::default()
 }
 
 /// Poll `condition` until it holds or `timeout` elapses.
@@ -89,7 +91,7 @@ async fn tcp_fast_open_request_does_not_fail_the_bind() {
 
 #[tokio::test]
 async fn per_ip_cap_closes_the_over_cap_connection() {
-    let state = Arc::new(ProxyState::with_limits(test_config(), 1));
+    let state = Arc::new(common::state_with_limits(test_config(), 1));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -143,8 +145,7 @@ async fn per_ip_cap_closes_the_over_cap_connection() {
 async fn global_semaphore_caps_concurrent_connections() {
     let mut config = Config::default();
     config.advanced.max_connections = 1;
-    let config = Arc::new(config);
-    let state = Arc::new(ProxyState::new(config));
+    let state = Arc::new(common::state(config));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -191,7 +192,7 @@ async fn global_semaphore_caps_concurrent_connections() {
 
 #[tokio::test]
 async fn accept_loop_drains_n_clients_and_releases_slots() {
-    let state = Arc::new(ProxyState::new(test_config()));
+    let state = Arc::new(common::state(test_config()));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -228,7 +229,7 @@ async fn accept_loop_drains_n_clients_and_releases_slots() {
 
 #[tokio::test]
 async fn accept_loop_terminates_on_shutdown_watch() {
-    let state = Arc::new(ProxyState::new(test_config()));
+    let state = Arc::new(common::state(test_config()));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -258,7 +259,7 @@ async fn accept_loop_terminates_on_shutdown_watch() {
 async fn held_open_connection_survives_accept_loop_shutdown() {
     // shutdown stops accepting; an already-accepted connection keeps
     // running in its own task until the peer closes
-    let state = Arc::new(ProxyState::new(test_config()));
+    let state = Arc::new(common::state(test_config()));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();
@@ -300,7 +301,7 @@ async fn held_open_connection_survives_accept_loop_shutdown() {
 async fn handshake_style_bytes_flow_through_and_drain_completes() {
     // drain semantics: the proxy accepts a client that speaks first
     // (like a minecraft handshake) and tears the connection down cleanly
-    let state = Arc::new(ProxyState::new(test_config()));
+    let state = Arc::new(common::state(test_config()));
     let service = test_service();
 
     let socket = ProxySocket::bind(loopback_any(), &SocketConfig::default()).unwrap();

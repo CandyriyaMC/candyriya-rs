@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, experiment/**]
   pull_request:
     branches: [main, dev]
 
@@ -62,6 +62,52 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  no-ad-hoc-spawn:
+    name: no-ad-hoc-spawn
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Grep for task/thread spawns outside the kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Paths where direct spawning is legal:
+          #   crates/common/candyriya-scheduler/ — the kernel itself
+          #   crates/common/candyriya-init/      — the supervision tree built on top of it
+          #   crates/it/candyriya-it/            — loopback integration-test fixtures, spawn their own backend tasks
+          #   crates/bench/                      — benches and fuzz targets
+          #   crates/plugin/candyriya-plugin/src/instance.rs — dedicated OS thread per plugin
+          #     (the plugin execution model; whether it moves into the tree is a design decision)
+          #   */tests/**                         — integration tests
+          allow_re='^crates/common/candyriya-scheduler/|^crates/common/candyriya-init/|^crates/it/candyriya-it/|^crates/bench/|^crates/plugin/candyriya-plugin/src/instance\.rs$|/tests/'
+
+          # Call-shaped spawn patterns: a paren or turbofish right after the
+          # path, so doc comments *about* spawning don't trip the gate.
+          pattern='tokio::spawn[[:space:]]*(\(|::<)|tokio::task::spawn[[:space:]]*(\(|::<)|tokio::spawn_blocking[[:space:]]*(\(|::<)|task::spawn_blocking[[:space:]]*(\(|::<)|task::spawn[[:space:]]*(\(|::<)|std::thread::spawn[[:space:]]*(\(|::<)|thread::spawn[[:space:]]*(\(|::<)|std::thread::Builder|thread::Builder|rayon::spawn[[:space:]]*(\(|::<)|rayon::ThreadPool::spawn[[:space:]]*(\(|::<)|ThreadPool::spawn[[:space:]]*(\(|::<)|JoinSet'
+
+          fail=0
+          while IFS= read -r file; do
+            # the first #[cfg(test)] boundary in the file, if any; hits at or
+            # after it are test code and don't count
+            test_start=$(grep -nE '^[[:space:]]*#\[cfg\((all\()?test' -- "$file" | cut -d: -f1 | head -n1 || true)
+            while IFS= read -r hit; do
+              line=${hit%%:*}
+              if [ -n "$test_start" ] && [ "$line" -ge "$test_start" ]; then
+                continue
+              fi
+              printf 'banned spawn outside the kernel: %s:%s\n' "$file" "$hit"
+              fail=1
+            done < <(grep -nE "$pattern" -- "$file" || true)
+          done < <(git ls-files -z -- '*.rs' | grep -zvE "$allow_re" | tr '\0' '\n')
+
+          if [ "$fail" -ne 0 ]; then
+            echo "direct task/thread spawning is banned outside the kernel; route through candyriya-scheduler (TaskService)" >&2
+            exit 1
+          fi
+          echo "no ad-hoc spawns outside the kernel"
 
   test:
     name: test

@@ -13,11 +13,13 @@
 //!   global cap (a [`candyriya_ratelimit::ConnectionLimiter`] for the
 //!   per-IP side plus a semaphore for the global side), applied before a
 //!   connection is handed to the service.
-//! - [`handle_connection`] — the per-connection task: reads the handshake,
-//!   routes on its intent. A status-intent handshake is answered by
-//!   [`handle_status`]; a login-intent handshake is handed to
+//! - [`handle_connection`] — the per-connection unit body: reads the
+//!   handshake, routes on its intent. A status-intent handshake is answered
+//!   by [`handle_status`]; a login-intent handshake is handed to
 //!   [`handle_login`]; other intents have no handler yet and the
-//!   connection is closed.
+//!   connection is closed. Every connection that passes the accept limits
+//!   is registered as a supervised `conn-<n>` unit under the `players`
+//!   group unit — never as an invisible task.
 //! - [`handle_login`] — the login slice: reads the Login Start, validates
 //!   the username, resolves the profile (offline-mode UUID derivation, or
 //!   the online-mode RSA/AES-CFB8 encryption handshake with Mojang
@@ -58,10 +60,12 @@
 //! [`serve`] registers the accept loop as the named task
 //! `proxy.accept-loop`. Shutdown is signalled by flipping the paired
 //! `watch<bool>` to `true`; the accept loop then drops its listening
-//! work and returns. Connections that are already accepted keep running
-//! in their own `proxy.conn.<id>` tasks until the surrounding
-//! `TaskService` is drained (see `TaskService::drain`) by the
-//! composition root during process shutdown.
+//! work and returns. Connections that are already accepted live in their
+//! own `conn-<id>` units until those are cancelled through the tree (the
+//! composition root's tree-wide cancel sweep reaches them; each dies at
+//! its next loop boundary, and the client sees the disconnect) and the
+//! surrounding `TaskService` is drained (see `TaskService::drain`) by
+//! the composition root during process shutdown.
 //!
 //! # Safety
 //!
@@ -75,8 +79,11 @@
 use std::io;
 
 mod accept;
+pub mod config_unit;
+mod conn;
 mod events;
 mod handshake;
+mod host_unit;
 mod limit;
 mod login;
 mod play;
@@ -87,9 +94,11 @@ mod status;
 mod wire;
 
 pub use crate::accept::{ProxyState, accept_loop, handle_connection, serve};
+pub use crate::config_unit::{ConfigMsg, ConfigResp, config_spec};
 pub use crate::handshake::{
     DEFAULT_MAX_ADDRESS_LEN, HandshakeLimits, HandshakeRead, HandshakeResult, read_handshake,
 };
+pub use crate::host_unit::host_spec;
 pub use crate::limit::{
     ConnectionSlot, DEFAULT_PER_IP_MAX, SlotAcquireError, SlotPhase, try_acquire_slot,
 };
@@ -173,6 +182,12 @@ pub enum ProxyError {
     /// to the client.
     #[error("proxy is misconfigured: {0}")]
     Misconfigured(String),
+
+    /// The configuration unit could not produce a snapshot for this call —
+    /// it is down, busy, slow, or crashed. Safe to log; the client only
+    /// ever sees a dropped connection or a generic disconnect.
+    #[error("configuration unavailable: {0}")]
+    ConfigUnavailable(#[from] candyriya_init::CallError),
 
     /// The embedded protocol registry failed to load. This is a build
     /// bug, not a runtime condition: the compiled-in tables are invalid.

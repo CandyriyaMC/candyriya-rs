@@ -36,7 +36,8 @@
 //!    `[motd-favicon]` points at a readable PNG (size-capped, magic
 //!    bytes checked), its base64 data URI is served. When the ping would
 //!    otherwise pay for a file read and a base64 encode per request, a
-//!    configured [`FaviconCache`] serves it from cachegirl instead.
+//!    configured [`FaviconCache`] serves it through the `cache` unit
+//!    instead.
 //!    Any failure along that path — missing file, wrong magic, oversized
 //!    file, broken cache — degrades to an embedded transparent 64x64 PNG;
 //!    the client always gets *some* icon.
@@ -81,13 +82,15 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::{debug, warn};
 
-use candyriya_cache::{CacheManager, cache_entry};
+use candyriya_cache::{CacheMsg, CacheResp, cache_call};
 use candyriya_config::Config;
 use candyriya_plugin_api::parse_minimessage;
 use candyriya_protocol::{
     DEFAULT_MAX_STRING_LENGTH, Packet, PacketCodec, ProtocolError, write_string,
 };
 use candyriya_protocol_registry::{ConnectionState, Direction, PacketKind, PacketSlot, Registry};
+
+use candyriya_init::{Init, Pid, current_unit};
 
 use crate::ProxyError;
 use crate::accept::ProxyState;
@@ -113,7 +116,7 @@ const HANDSHAKE_TIMEOUT_CAP: Duration = Duration::from_secs(2);
 /// and a firm bound on memory for a hostile `motd-favicon` path.
 const MAX_FAVICON_BYTES: u64 = 1024 * 1024;
 
-/// Cache key for the favicon data served from cachegirl.
+/// Cache key for the favicon data served through the `cache` unit.
 ///
 /// One favicon per process, so one key. TTL-bounded; a file edit is picked
 /// up no later than the TTL.
@@ -245,47 +248,95 @@ where
     }
 }
 
-/// Caches the favicon in cachegirl (namespace `cache/candyriya`).
+/// The unit the call is attributed to: the calling unit's own pid inside a
+/// unit body, the root everywhere else. Connection units hold the grant the
+/// accept loop installed on their spawn, so the call authorizes either way.
+fn caller() -> Pid {
+    current_unit().unwrap_or(Pid::INIT)
+}
+
+/// Caches the favicon through the supervision tree's `cache` unit.
 ///
-/// Optional: the CLI wires this when it owns a [`CacheManager`]; without
+/// Optional: the CLI wires this when it owns the cache unit; without
 /// one, favicons are read from disk per request. TTL-bounded on purpose
 /// so a `[motd-favicon]` edit is picked up without a restart.
 pub struct FaviconCache {
-    namespace: Arc<candyriya_cache::Namespace>,
+    init: Init,
+    cache_pid: Pid,
     ttl: Duration,
 }
 
 impl std::fmt::Debug for FaviconCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FaviconCache")
+            .field("cache_pid", &self.cache_pid)
             .field("ttl", &self.ttl)
             .finish_non_exhaustive()
     }
 }
 
 impl FaviconCache {
-    /// A cache in the core namespace of `manager` with the given entry TTL.
+    /// The pid of the `cache` unit this handle fronts.
     ///
-    /// `registry` is `cache/candyriya`, shared with any other core data;
-    /// the key is private to this exchange.
-    pub fn new(manager: &CacheManager, ttl: Duration) -> candyriya_cache::Result<Self> {
-        Ok(Self {
-            namespace: manager.core_cache()?,
+    /// Used by the accept loop to grant the unit to connection units at
+    /// spawn, like an inherited fd.
+    pub(crate) fn cache_pid(&self) -> Pid {
+        self.cache_pid
+    }
+
+    /// A handle to the `cache` unit serving the core namespace, with the
+    /// given entry TTL.
+    ///
+    /// The handle talks to the unit through the tree; the unit serves
+    /// `cache/candyriya`, shared with any other core data. The key is
+    /// private to this exchange.
+    pub fn new(init: Init, cache_pid: Pid, ttl: Duration) -> Self {
+        Self {
+            init,
+            cache_pid,
             ttl,
-        })
+        }
     }
 
     /// Returns the cached favicon bytes, if present and readable.
     ///
-    /// A cache error is logged and treated as a miss: the disk read that
+    /// A cache outage — the tree refusing the call, or the unit reporting
+    /// a failure — is logged and treated as a miss: the disk read that
     /// follows is always a safe fallback and the ping must not fail
     /// because the cache is unhealthy.
-    pub fn get(&self) -> Option<Vec<u8>> {
-        match cache_entry::get(&self.namespace, FAVICON_CACHE_KEY) {
-            Ok(Some(entry)) => Some(entry.value),
-            Ok(None) => None,
+    pub async fn get(&self) -> Option<Vec<u8>> {
+        match cache_call(
+            &self.init,
+            caller(),
+            self.cache_pid,
+            CacheMsg::Get {
+                key: FAVICON_CACHE_KEY.to_owned(),
+            },
+        )
+        .await
+        {
+            Ok(CacheResp::Value(Some(bytes))) => Some(bytes),
+            Ok(CacheResp::Value(None)) => None,
+            Ok(CacheResp::Rejected { reason }) => {
+                warn!(
+                    reason,
+                    "favicon cache key rejected by the cache unit; reading from disk"
+                );
+                None
+            }
+            Ok(CacheResp::Failed { detail }) => {
+                warn!(detail, "favicon cache lookup failed; reading from disk");
+                None
+            }
+            Ok(reply) => {
+                warn!(
+                    ?reply,
+                    "unexpected reply to a favicon cache get; reading from disk"
+                );
+                None
+            }
             Err(error) => {
-                warn!(%error, "favicon cache lookup failed; reading from disk");
+                warn!(%error, "favicon cache unreachable; reading from disk");
                 None
             }
         }
@@ -296,22 +347,41 @@ impl FaviconCache {
     ///
     /// A failed store is logged and ignored — serving the bytes just read
     /// is strictly better than erroring the exchange.
-    pub fn put(&self, favicon: &[u8]) {
-        // cachegirl keys are unique per namespace; inserting over a live
-        // key would be rejected, so clear the old one first
-        match cache_entry::remove(&self.namespace, FAVICON_CACHE_KEY) {
-            Ok(_) => {}
-            Err(error) => {
-                warn!(%error, "favicon cache eviction failed; overwriting any existing entry");
+    pub async fn put(&self, favicon: &[u8]) {
+        match cache_call(
+            &self.init,
+            caller(),
+            self.cache_pid,
+            CacheMsg::Insert {
+                key: FAVICON_CACHE_KEY.to_owned(),
+                value: favicon.to_vec(),
+                ttl: self.ttl,
+            },
+        )
+        .await
+        {
+            Ok(CacheResp::Inserted) => {}
+            Ok(CacheResp::Rejected { reason }) => {
+                warn!(
+                    reason,
+                    "favicon cache key rejected by the cache unit; favicon will be re-read on the next ping"
+                );
             }
-        }
-        if let Err(error) = cache_entry::insert(
-            &self.namespace,
-            FAVICON_CACHE_KEY,
-            favicon.to_vec(),
-            self.ttl,
-        ) {
-            warn!(%error, "favicon cache insert failed; favicon will be re-read on the next ping");
+            Ok(CacheResp::Failed { detail }) => {
+                warn!(
+                    detail,
+                    "favicon cache insert failed; favicon will be re-read on the next ping"
+                );
+            }
+            Ok(reply) => {
+                warn!(
+                    ?reply,
+                    "unexpected reply to a favicon cache insert; favicon will be re-read on the next ping"
+                );
+            }
+            Err(error) => {
+                warn!(%error, "favicon cache unreachable; favicon will be re-read on the next ping");
+            }
         }
     }
 }
@@ -369,15 +439,16 @@ fn read_favicon_file(path: &str) -> Result<Vec<u8>, &'static str> {
 /// Order: configured cache (if any) → configured path → the embedded
 /// transparent 64x64. Any failure degrades to the embedded icon; the
 /// exchange is never failed over a favicon.
-fn resolve_favicon(state: &ProxyState) -> String {
-    let config = state.config();
+/// The snapshot is fetched once per ping by the caller and passed down by
+/// reference; this function never touches the network or the tree itself.
+async fn resolve_favicon(state: &ProxyState, config: &Config) -> String {
     let path = config.motd_favicon.trim();
     if path.is_empty() {
         return embedded_favicon_uri().to_owned();
     }
 
     if let Some(cache) = &state.favicon_cache
-        && let Some(bytes) = cache.get()
+        && let Some(bytes) = cache.get().await
         && validate_favicon_png(&bytes).is_ok()
     {
         return data_uri(&bytes);
@@ -386,7 +457,7 @@ fn resolve_favicon(state: &ProxyState) -> String {
     match read_favicon_file(path) {
         Ok(bytes) => {
             if let Some(cache) = &state.favicon_cache {
-                cache.put(&bytes);
+                cache.put(&bytes).await;
             }
             data_uri(&bytes)
         }
@@ -524,7 +595,13 @@ where
     let registry = embedded_registry().ok_or_else(|| {
         ProxyError::Registry("embedded protocol snapshot failed to load".to_owned())
     })?;
-    let config = state.config();
+    // no configuration, no answer: the exchange fails before the first
+    // frame is read, and the client sees a dropped connection — the same
+    // shape any pre-handshake failure produces
+    let config = state
+        .config()
+        .await
+        .map_err(ProxyError::ConfigUnavailable)?;
     let protocol = handshake.protocol;
     let ids = status_ids(registry, protocol);
     let deadline = read_deadline(&config);
@@ -545,7 +622,7 @@ where
 
     // 2. answer immediately from configuration; no backend is contacted
     let description = motd_component(&config.motd)?;
-    let favicon = resolve_favicon(state);
+    let favicon = resolve_favicon(state, &config).await;
     // "players online" is the live play-state roster, not the raw
     // connection counter: a server-list ping is not a player
     let online = state.roster.len() as u64;
@@ -625,7 +702,26 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    use candyriya_cache::{CacheManager, cache_spec};
     use candyriya_config::Config;
+    use candyriya_scheduler::TaskService;
+
+    /// A tree with a live `cache` unit over a fresh cache root, for the
+    /// tests that need a real round trip through the unit.
+    fn spawn_cache_unit() -> (Init, Pid, Arc<CacheManager>, tempfile::TempDir) {
+        let service = TaskService::builder()
+            .handle(tokio::runtime::Handle::current())
+            .blocking_threads(1)
+            .build()
+            .expect("task service builds");
+        let root = tempfile::tempdir().expect("tempdir");
+        let manager = Arc::new(CacheManager::new(root.path()).expect("cache manager"));
+        let init = Init::new(service);
+        let cache_pid = init
+            .spawn_unit(Pid::INIT, cache_spec(Arc::clone(&manager)))
+            .expect("cache unit spawns");
+        (init, cache_pid, manager, root)
+    }
 
     fn test_config() -> Config {
         let mut config = Config::default();
@@ -794,22 +890,21 @@ mod tests {
         assert!(packet.payload.is_empty());
     }
 
-    #[test]
-    fn favicon_cache_roundtrip_and_overwrite() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let manager = CacheManager::new(dir.path()).expect("cache manager");
-        let cache = FaviconCache::new(&manager, Duration::from_secs(60)).expect("favicon cache");
+    #[tokio::test]
+    async fn favicon_cache_roundtrip_and_overwrite() {
+        let (init, cache_pid, manager, _root) = spawn_cache_unit();
+        let cache = FaviconCache::new(init, cache_pid, Duration::from_secs(60));
 
-        assert!(cache.get().is_none());
-        cache.put(b"first");
-        cache.put(b"second"); // must overwrite, not fail on the taken key
-        assert_eq!(cache.get().as_deref(), Some(b"second".as_slice()));
+        assert!(cache.get().await.is_none());
+        cache.put(b"first").await;
+        cache.put(b"second").await; // must overwrite, not fail on the taken key
+        assert_eq!(cache.get().await.as_deref(), Some(b"second".as_slice()));
 
         manager.shutdown().expect("cache shutdown");
     }
 
-    #[test]
-    fn resolve_favicon_reads_a_configured_file_and_caches_it() {
+    #[tokio::test]
+    async fn resolve_favicon_reads_a_configured_file_and_caches_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let icon_path = dir.path().join("icon.png");
         // a PNG-magic file, distinct from the embedded icon
@@ -823,18 +918,17 @@ mod tests {
             .write_all(&custom_bytes)
             .unwrap();
 
-        let cache_root = tempfile::tempdir().expect("cache root");
-        let manager = CacheManager::new(cache_root.path()).expect("cache manager");
-        let favicon_cache =
-            Arc::new(FaviconCache::new(&manager, Duration::from_secs(60)).expect("favicon cache"));
+        let (init, cache_pid, manager, _root) = spawn_cache_unit();
+        let favicon_cache = Arc::new(FaviconCache::new(init, cache_pid, Duration::from_secs(60)));
 
         let mut config = test_config();
         config.motd_favicon = icon_path.to_str().expect("utf-8 path").to_owned();
-        let mut state = ProxyState::new(Arc::new(config));
+        let resolve_config = config.clone();
+        let mut state = crate::accept::test_helpers::test_state(config);
         state.favicon_cache = Some(favicon_cache);
         let state = Arc::new(state);
 
-        let first = resolve_favicon(&state);
+        let first = resolve_favicon(&state, &resolve_config).await;
         assert_eq!(first, data_uri(&custom_bytes));
 
         // swap the file on disk; the cache must keep serving the old bytes
@@ -844,41 +938,53 @@ mod tests {
             .chain(b"swapped-icon-bytes".iter().cloned())
             .collect();
         std::fs::write(&icon_path, &swapped).unwrap();
-        let second = resolve_favicon(&state);
+        let second = resolve_favicon(&state, &resolve_config).await;
         assert_eq!(second, first);
 
         manager.shutdown().expect("cache shutdown");
     }
 
-    #[test]
-    fn resolve_favicon_with_a_missing_file_serves_the_embedded_icon() {
+    #[tokio::test]
+    async fn resolve_favicon_with_a_missing_file_serves_the_embedded_icon() {
         let mut config = test_config();
         config.motd_favicon = "definitely/does-not/exist-favicon.png".to_owned();
-        let state = Arc::new(ProxyState::new(Arc::new(config)));
+        let resolve_config = config.clone();
+        let state = crate::accept::test_helpers::test_state(config);
 
-        assert_eq!(resolve_favicon(&state), embedded_favicon_uri());
+        assert_eq!(
+            resolve_favicon(&state, &resolve_config).await,
+            embedded_favicon_uri()
+        );
     }
 
-    #[test]
-    fn resolve_favicon_with_an_empty_path_serves_the_embedded_icon() {
+    #[tokio::test]
+    async fn resolve_favicon_with_an_empty_path_serves_the_embedded_icon() {
         let mut config = test_config();
         config.motd_favicon = String::new();
-        let state = Arc::new(ProxyState::new(Arc::new(config)));
+        let resolve_config = config.clone();
+        let state = crate::accept::test_helpers::test_state(config);
 
-        assert_eq!(resolve_favicon(&state), embedded_favicon_uri());
+        assert_eq!(
+            resolve_favicon(&state, &resolve_config).await,
+            embedded_favicon_uri()
+        );
     }
 
-    #[test]
-    fn resolve_favicon_with_a_garbage_file_serves_the_embedded_icon() {
+    #[tokio::test]
+    async fn resolve_favicon_with_a_garbage_file_serves_the_embedded_icon() {
         let dir = tempfile::tempdir().expect("tempdir");
         let icon_path = dir.path().join("garbage.png");
         std::fs::write(&icon_path, b"definitely not a png").unwrap();
 
         let mut config = test_config();
         config.motd_favicon = icon_path.to_str().expect("utf-8 path").to_owned();
-        let state = Arc::new(ProxyState::new(Arc::new(config)));
+        let resolve_config = config.clone();
+        let state = crate::accept::test_helpers::test_state(config);
 
-        assert_eq!(resolve_favicon(&state), embedded_favicon_uri());
+        assert_eq!(
+            resolve_favicon(&state, &resolve_config).await,
+            embedded_favicon_uri()
+        );
     }
 
     #[test]

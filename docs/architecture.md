@@ -348,10 +348,11 @@ their own slices and are tracked in the build status below.
 **candyriya-command** — the built-in command set and its brigadier wiring.
 The dispatcher is a thin adapter over azalea-brigadier: it validates
 literals, attaches permission gates at the tree level (the `/candyriya`
-subcommands `info`, `servers`, `switch`, `end` are gated; the player-facing
-commands `/glist`, `/send`, `/server` and `/goto` are ungated, Velocity-style),
-and dispatches to pure command implementations that read the world through
-the `NetworkDirectory` trait and mutate it through `ProxyEffects`. Output
+subcommands `info`, `servers`, `switch`, `end`, `reload`, `ps`, `tree` are
+gated; the player-facing commands `/glist`, `/send`, `/server` and `/goto`
+are ungated, Velocity-style), and dispatches to pure command
+implementations that read the world through the `NetworkDirectory` trait
+and mutate it through `ProxyEffects`. Output
 is MiniMessage lines through an `OutputSender` seam; the crate has no
 network, no async and no I/O.
 
@@ -466,12 +467,14 @@ panicking plugin is caught at the boundary, logged, counted and either
 recovered or kicked from the pool. The core never waits on plugins, and
 plugin tasks run at low priority with strict quotas.
 
-**Thread ownership, explicitly.** One accept-loop task; one task per
+**Thread ownership, explicitly.** One accept-loop unit; one unit per
 connection; one exporter thread for the metrics HTTP listener; one dedicated
 thread per loaded plugin; blocking work only on the scheduler's fixed pool;
 and a daily-rotating file writer thread for logs. Everything else is async
-or eliminated by design. Names show up in the logs as `proxy.conn.<id>`,
-`proxy.accept-loop` and `candyriya-plugin-<id>`.
+or eliminated by design. Names in the logs and the `ps` table are unit
+names — `conn-<n>`, `proxy.accept`, `plugin-<id>` — not thread names; the
+mapping from a unit to the task service that runs it is noted under
+[the supervision tree](#the-supervision-tree-and-the-ps-surface).
 
 **Text and rendering.** All user-facing strings come from the embedded
 locales and are MiniMessage-formatted; the MOTD, kick and disconnect
@@ -485,6 +488,55 @@ with per-plugin namespaces and quotas, an atomic lease model and a scheduled
 cleanup sweep. The buffer pool is not quota-accounted; accounted resources
 are. There is intentionally no permissions resolver cache today — see
 [Permissions](permissions) for why.
+
+## The supervision tree and the `ps` surface
+
+Everything the proxy runs is a unit in one supervision tree, rooted at
+`init` (pid 1). Units carry a pid, a parent, a name, a kind
+(`oneshot`, `long-lived`, `every`, `connection`, `plugin`) and a lifecycle
+state; exited units stay visible as zombies until the reaper harvests
+them, and children of a dying unit re-parent to `init`. The tree is the
+source of truth for what exists — not a side channel. Services
+(`config`, `cache`, `route`, `host`, `proxy.accept`, `stats.every-60s`,
+`players`, `plugins`, `console`, …) are children of `init`; the loader
+phase before the tree exists is adopted as already-exited `oneshot`
+bootstrap markers.
+
+Two subtrees carry the high-churn kinds:
+
+- **`players`** is the group node for live sessions. Each accepted
+  connection runs as a `conn-<n>` unit under it, with a cooperative park
+  gate (freeze) and per-connection byte counters. Shutdown cascades
+  accept → players → connections.
+- **`plugins`** is the group node for the plugin subsystem. Each loaded
+  plugin runs as a `plugin-<id>` unit; an unrecoverable failure re-stages
+  the plugin with bounded backoff and lands in `FailedTerminal`, which
+  stays visible rather than vanishing.
+
+`/candyriya ps` renders the process table from a snapshot of the tree
+(permission node `candyriya.command.ps`; the console holds `*`). The
+default view collapses connection units into one `conn × N` row carrying
+the count, byte sums, the worst state present, the restart sum and the
+oldest uptime; every other unit gets its own row. `/candyriya ps --full`
+expands everything. `/candyriya tree` prints the same information as a
+pure indented tree with box-drawing guides, names and brief captions.
+Single-letter states: `R` running, `F` frozen (park gate closed, a
+cooperative freeze — TCP backpressure does the rest), `Z` zombie, `t`
+restarting, `!` failed-terminal. Columns: `PID PPID NAME STATE RESTARTS
+UPTIME RX TX LAST EXIT`. `RX`/`TX` are the connection byte counters;
+`UPTIME` is the unit's own run time. There is no CPU or RSS column and
+never will be — the tree does not measure them. The output ends with a
+summary line (`units: N (conn: M, plugins: K) · zombies: A (stuck: B)`)
+computed from the tree's own counters. `/candyriya ps --watch` repaints
+the same table every second while the console is open; any line read
+(Enter) or Ctrl-C ends the watch, and one final ordinary frame is
+printed on exit. On a terminal each repaint homes the cursor and erases
+below it (the screen is cleared once, at watch entry); with
+`NO_COLOR`/plain output the frames are printed newline-separated and
+carry no escape bytes. The watch is console-only — other sources see
+the ordinary one-shot table. All user-facing strings in the commands go
+through the embedded locales, en and ex_girl; the rendering itself is
+MiniMessage and honors the console's color mode.
 
 ## A login end to end
 

@@ -2,11 +2,14 @@
 //!
 //! These are the `candyriya:*` functions a plugin can call from WASM. The
 //! surface is deliberately small and read/signal-only: no host function
-//! mutates proxy or server state directly, everything goes through the
-//! shared [`ServiceRegistry`] (or fails with an error document the plugin
-//! can read). The typed contract is published in
-//! `candyriya-plugin-api` ([`candyriya_plugin_api::CandyriyaHostApi`]);
-//! this module is the extism binding layer plus the implementation.
+//! mutates proxy or server state directly. The cross-subsystem ones
+//! (`callApi`, `listServers`, `getPlayerRoster`, and the roster check
+//! inside `pingPlayer`) reach the supervised `host` unit over the
+//! capability IPC plane, through the shared [`HostIpc`] link every
+//! plugin instance carries; when the link is missing or the call fails,
+//! each answers with its documented honest error instead of a fallback
+//! it cannot back. Plugin-owned services keep flowing through the
+//! [`ServiceRegistry`], unchanged.
 //!
 //! # Design rules
 //!
@@ -19,7 +22,7 @@
 //!   (`{"ok": false, "error": "..."}`), never a trap: a buggy plugin
 //!   gets a parseable answer instead of a blown-up call.
 //! - Host functions hold no event-dispatch state of their own; they
-//!   delegate to the registry or to the pending-outcome slot the
+//!   delegate to the `host` unit or to the pending-outcome slot the
 //!   dispatcher reads afterwards.
 //! - `switchPlayer` has no backend behind it yet, so it answers with
 //!   `{"ok": false, "error": "not implemented yet"}` — an honest stub
@@ -30,17 +33,31 @@
 //!   `plugin.<id>.*` keys plus `common.*` keys resolve; out-of-scope
 //!   keys answer with the key itself, same as a missing key.
 //!
-//! # Service keys
+//! # The host link and its failure vocabulary
 //!
-//! [`DISPATCHER_SERVICE_KEY`] — the [`ProxyEventDispatcher`] (required for
-//! `candyriya:callApi`; without it callApi answers with an error).
-//! [`PLAYERS_ROSTER_KEY`] — `Vec<PlayerRef>` of online players (optional;
-//! absent means an empty roster).
 //! [`PLAYERS_PING_SINK_KEY`] — a [`PlayerPingSink`] delivering the ping
 //! (optional; without it `pingPlayer` reports failure instead of
-//! pretending to have delivered).
-//! [`SERVERS_NAMES_KEY`] — `Vec<String>` of known backends (optional;
-//! absent falls back to `["local"]`).
+//! pretending to have delivered). The sink stays in the
+//! [`ServiceRegistry`] on purpose: the `host` unit deliberately serves
+//! no ping message because the play state has no client-bound
+//! packet-injection path yet, so there is nothing honest to route it to.
+//!
+//! When the [`HostIpc`] link cannot answer — never installed, unit down,
+//! full mailbox, timeout — the answers are:
+//!
+//! - `callApi` — `CallApiResponse::err` with the reason prefixed
+//!   `callApi: host dispatcher unavailable (...)`, the same shape a
+//!   missing dispatcher used to answer with.
+//! - `listServers` — `["local"]`, the documented stand-in for "no known
+//!   backends" (a boot with no `[servers]`, a disabled routing reload,
+//!   or an unreachable host unit all degrade the same way). A healthy
+//!   route unit serving zero backends answers `["local"]` for the same
+//!   reason, so the plugin never has to know which case it is.
+//! - `getPlayerRoster` — an empty list; the host API carries no error
+//!   channel, so silence is impossible and fabrication is ruled out.
+//! - `pingPlayer` — `player roster unavailable (...)`; skipping the
+//!   online check and delivering anyway would claim a delivery that did
+//!   not happen.
 
 use std::sync::Arc;
 
@@ -53,22 +70,14 @@ use candyriya_plugin_api::{
     LogLevel, LogMessage, OutcomeReport, PlayerNameRequest, PlayerRef, SwitchPlayerRequest,
 };
 
-use crate::dispatch::ProxyEventDispatcher;
 use crate::host_state::HostState;
+use crate::host_wire::{HostMsg, HostResp};
 
 /// The namespace every candyriya host function is registered under.
 pub(crate) const HOST_NAMESPACE: &str = "candyriya";
 
-/// Service key for the [`ProxyEventDispatcher`] the plugin set fans out
-/// through. Registered by the composition root at startup; required for
-/// `candyriya:callApi` to route calls.
-pub const DISPATCHER_SERVICE_KEY: &str = "plugin.dispatcher";
-/// Service key for the online-player roster (`Vec<PlayerRef>`).
-pub const PLAYERS_ROSTER_KEY: &str = "players.roster";
 /// Service key for the player-ping delivery channel ([`PlayerPingSink`]).
 pub const PLAYERS_PING_SINK_KEY: &str = "players.ping_sink";
-/// Service key for the backend name list (`Vec<String>`).
-pub const SERVERS_NAMES_KEY: &str = "servers.names";
 
 /// Delivery channel for `candyriya:pingPlayer`.
 ///
@@ -247,30 +256,39 @@ impl CandyriyaHostApi for HostState {
     }
 
     fn call_api(&self, request: &CallApiRequest) -> CallApiResponse {
-        let Some(dispatcher) = self
-            .services
-            .get_service::<ProxyEventDispatcher>(DISPATCHER_SERVICE_KEY)
-        else {
-            tracing::error!(
-                plugin = %self.plugin_id,
-                "callApi requested but no plugin dispatcher is registered",
-            );
-            return CallApiResponse::err("host dispatcher is not registered");
-        };
         let args = match serde_json::to_vec(&request.args) {
             Ok(args) => args,
             Err(error) => {
                 return CallApiResponse::err(format!("args are not serializable: {error}"));
             }
         };
-        match dispatcher.call_api(
-            &request.target_plugin,
-            &request.function,
-            &args,
-            Some(&self.plugin_id),
-        ) {
-            Ok(output) => CallApiResponse::ok(String::from_utf8_lossy(&output)),
-            Err(error) => CallApiResponse::err(error.to_string()),
+        let message = HostMsg::CallApi {
+            target_plugin: request.target_plugin.clone(),
+            function: request.function.clone(),
+            args,
+            caller: Some(self.plugin_id.clone()),
+        };
+        match self.host_ipc.call(message) {
+            Ok(HostResp::CallApi(outcome)) => match outcome {
+                Ok(output) => CallApiResponse::ok(String::from_utf8_lossy(&output)),
+                // the dispatcher's own diagnosis, verbatim to the plugin
+                Err(message) => CallApiResponse::err(message),
+            },
+            Ok(_) => {
+                tracing::error!(
+                    plugin = %self.plugin_id,
+                    "host unit answered with an unexpected reply for callApi",
+                );
+                CallApiResponse::err("host answered with an unexpected reply type")
+            }
+            Err(error) => {
+                tracing::error!(
+                    plugin = %self.plugin_id,
+                    %error,
+                    "callApi could not reach the host dispatcher",
+                );
+                CallApiResponse::err(format!("callApi: host dispatcher unavailable ({error})"))
+            }
         }
     }
 
@@ -289,26 +307,69 @@ impl CandyriyaHostApi for HostState {
     }
 
     fn list_servers(&self) -> Vec<String> {
-        self.services
-            .get_service::<Vec<String>>(SERVERS_NAMES_KEY)
-            .map(|list| list.as_ref().clone())
-            .unwrap_or_else(|| vec!["local".to_owned()])
+        match self.host_ipc.call(HostMsg::Names) {
+            // a healthy route unit serving zero backends is the empty
+            // answer for "routing is disabled" — same degrade the
+            // documented `["local"]` stand-in covers
+            Ok(HostResp::Names(names)) if !names.is_empty() => names,
+            Ok(HostResp::Names(_)) => vec!["local".to_owned()],
+            Ok(_) => {
+                tracing::error!(
+                    plugin = %self.plugin_id,
+                    "host unit answered with an unexpected reply for listServers",
+                );
+                vec!["local".to_owned()]
+            }
+            Err(error) => {
+                tracing::error!(
+                    plugin = %self.plugin_id,
+                    %error,
+                    "backend list unavailable; answering the documented stand-in",
+                );
+                vec!["local".to_owned()]
+            }
+        }
     }
 
     fn get_player_roster(&self) -> Vec<PlayerRef> {
-        self.services
-            .get_service::<Vec<PlayerRef>>(PLAYERS_ROSTER_KEY)
-            .map(|roster| roster.as_ref().clone())
-            .unwrap_or_default()
+        match self.host_ipc.call(HostMsg::Roster) {
+            Ok(HostResp::Roster(roster)) => roster,
+            Ok(_) => {
+                tracing::error!(
+                    plugin = %self.plugin_id,
+                    "host unit answered with an unexpected reply for getPlayerRoster",
+                );
+                Vec::new()
+            }
+            Err(error) => {
+                tracing::error!(
+                    plugin = %self.plugin_id,
+                    %error,
+                    "player roster unavailable; answering an empty list",
+                );
+                Vec::new()
+            }
+        }
     }
 
     fn ping_player(&self, request: &PlayerNameRequest) -> HostOk {
-        if let Some(roster) = self
-            .services
-            .get_service::<Vec<PlayerRef>>(PLAYERS_ROSTER_KEY)
-            && !roster.iter().any(|player| player.name == request.name)
-        {
-            return HostOk::err(format!("player `{}` is not online", request.name));
+        match self.host_ipc.call(HostMsg::Roster) {
+            Ok(HostResp::Roster(roster)) => {
+                if !roster.iter().any(|player| player.name == request.name) {
+                    return HostOk::err(format!("player `{}` is not online", request.name));
+                }
+            }
+            Ok(_) => {
+                return HostOk::err("host answered with an unexpected reply type");
+            }
+            Err(error) => {
+                tracing::error!(
+                    plugin = %self.plugin_id,
+                    %error,
+                    "player roster unavailable; refusing the ping",
+                );
+                return HostOk::err(format!("player roster unavailable ({error})"));
+            }
         }
         match self
             .services

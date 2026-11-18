@@ -31,9 +31,12 @@ use base64::Engine as _;
 use tokio::sync::watch;
 
 use candyriya_config::Config;
+use candyriya_init::{Init, Pid};
 use candyriya_it::{BackendFixture, BackendForwarding, FakeBackendConfig, Intent, TestClient};
 use candyriya_player::offline_uuid;
-use candyriya_proxy::{ProxySocket, ProxyState, SocketConfig, registry_from_config, serve};
+use candyriya_proxy::{
+    ProxySocket, ProxyState, SocketConfig, config_spec, registry_from_config, serve,
+};
 use candyriya_scheduler::{ShutdownReport, TaskService};
 
 /// Protocol 767 = 1.21.x, present in the embedded registry tables.
@@ -136,6 +139,8 @@ struct RunningProxy {
     addr: SocketAddr,
     shutdown: watch::Sender<bool>,
     service: TaskService,
+    init: Init,
+    players_pid: Pid,
     _state: Arc<ProxyState>,
 }
 
@@ -146,7 +151,30 @@ fn spawn_proxy(config: Config, service: TaskService) -> RunningProxy {
     let socket_config = SocketConfig::from(&config.advanced);
     let bind: SocketAddr = config.bind.parse().expect("config bind is host:port");
     let router = registry_from_config(&config).expect("router builds from config");
-    let state = Arc::new(ProxyState::new(Arc::new(config)).with_router(Arc::new(router)));
+    // the config and route units own the live store and the route table;
+    // the fixture wires them exactly the way the composition root does
+    let store = Arc::new(candyriya_config::ConfigStore::new(config));
+    let router_store = candyriya_route::router_store(Some(Arc::new(router)));
+    let init = Init::new(service.clone());
+    let config_pid = init
+        .spawn_unit(Pid::INIT, config_spec(store))
+        .expect("config unit spawns");
+    let route_pid = init
+        .spawn_unit(
+            Pid::INIT,
+            candyriya_route::route_spec(Arc::clone(&router_store)),
+        )
+        .expect("route unit spawns");
+    // the players group unit: connection units spawn under it, like in
+    // production; it holds the grants conns may inherit
+    let players_pid = spawn_players(&init, &[config_pid, route_pid]);
+    let state = Arc::new(ProxyState::new(
+        init.clone(),
+        config_pid,
+        route_pid,
+        players_pid,
+        router_store,
+    ));
     let socket = ProxySocket::bind(bind, &socket_config).expect("proxy socket binds");
     let addr = socket.local_addr();
     let listener = socket.into_listener();
@@ -156,16 +184,40 @@ fn spawn_proxy(config: Config, service: TaskService) -> RunningProxy {
         addr,
         shutdown,
         service,
+        init,
+        players_pid,
         _state: state,
     }
+}
+
+/// Spawn the `players` group unit parented to the root, holding the grants
+/// connection units may inherit at spawn.
+fn spawn_players(init: &Init, grants: &[Pid]) -> Pid {
+    let mut spec = candyriya_init::UnitSpec::new(
+        "players",
+        candyriya_init::UnitKind::LongLived,
+        candyriya_init::RestartPolicy::Never,
+        std::future::pending::<candyriya_init::ExitStatus>,
+    );
+    for &grant in grants {
+        spec = spec.with_grant(grant);
+    }
+    init.spawn_unit(Pid::INIT, spec)
+        .expect("players unit spawns")
 }
 
 /// Flip the shutdown watch and wait for every task to finish; then drain.
 /// The report and the final stats snapshot go to the caller for assertions.
 async fn finish_proxy(proxy: RunningProxy) -> (ShutdownReport, candyriya_scheduler::TaskStats) {
     let _ = proxy.shutdown.send(true);
+    // the tree-wide sweep reaches everything the fixture spawned through
+    // the tree — config, route, players and any conn units — not just the
+    // two hand-picked units it used to collect
+    let _ = proxy.init.cancel_all();
     let deadline = Instant::now() + Duration::from_secs(5);
     while proxy.service.stats().active != 0 {
+        let _ = proxy.init.reap_children(Pid::INIT);
+        let _ = proxy.init.reap_children(proxy.players_pid);
         assert!(
             Instant::now() < deadline,
             "accept loop and connection task did not finish within 5s (active: {:?})",
@@ -460,10 +512,14 @@ async fn task_service_drops_cleanly_after_disconnect() {
         "no task remains registered after the disconnect"
     );
     assert_eq!(stats.panicked, 0, "no task panicked");
+    assert_eq!(
+        stats.completed, 1,
+        "the accept loop completed (watch-flip stop)"
+    );
     assert!(
-        stats.completed >= 2,
-        "the accept loop and the connection task both completed (got {})",
-        stats.completed
+        stats.cancelled >= 4,
+        "config, route, players and the connection unit were cancelled (got {})",
+        stats.cancelled
     );
 
     // config reset: the file on disk loads again from scratch, with the

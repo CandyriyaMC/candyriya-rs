@@ -25,7 +25,9 @@ use candyriya_protocol::read_string;
 use candyriya_protocol_registry::PacketSlot;
 use candyriya_scheduler::TaskService;
 
-use candyriya_proxy::{ProxySocket, ProxyState, SocketConfig, registry_from_config, serve};
+use candyriya_proxy::{ProxySocket, SocketConfig, registry_from_config, serve};
+
+mod common;
 
 const PROTOCOL: i32 = 767; // 1.21.x, present in the embedded registry tables
 const FORWARDING_SECRET_BYTES: [u8; 32] = [b's'; 32];
@@ -253,7 +255,7 @@ fn start_proxy_with_plugins(
     let dispatcher = Arc::new(ProxyEventDispatcher::new(plugin_set));
 
     let router = registry_from_config(&config).expect("router from config must build");
-    let mut state = ProxyState::new(Arc::new(config)).with_router(Arc::new(router));
+    let mut state = common::state(config).with_router(Arc::new(router));
     state.event_dispatcher = Some(dispatcher);
     let state = Arc::new(state);
 

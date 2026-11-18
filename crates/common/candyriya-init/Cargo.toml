@@ -1,0 +1,28 @@
+[package]
+name = "candyriya-init"
+description = "Recursive supervision tree for the proxy: pid allocation, unit registry, zombie lifecycle, bounded exit history and restarts on top of the central task service."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
+keywords = ["init", "supervision", "process", "tree", "minecraft"]
+categories = ["asynchronous", "concurrency", "games"]
+readme = "../../../README.md"
+exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
+
+[dependencies]
+candyriya-scheduler = { version = "0.1.0", path = "../candyriya-scheduler" }
+candyriya-utils = { version = "0.1.0", path = "../candyriya-utils" }
+candyriya-metrics = { version = "0.1.1", path = "../candyriya-metrics" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+metrics = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

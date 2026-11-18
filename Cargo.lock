@@ -284,6 +284,7 @@ dependencies = [
  "candyriya-command",
  "candyriya-config",
  "candyriya-i18n",
+ "candyriya-init",
  "candyriya-metrics",
  "candyriya-plugin",
  "candyriya-plugin-api",
@@ -334,7 +335,11 @@ name = "candyriya-cache"
 version = "0.1.1"
 dependencies = [
  "cachegirl",
+ "candyriya-init",
+ "candyriya-scheduler",
+ "tempfile",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -436,6 +441,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "candyriya-init"
+version = "0.1.1"
+dependencies = [
+ "candyriya-metrics",
+ "candyriya-scheduler",
+ "candyriya-utils",
+ "metrics",
+ "parking_lot",
+ "rand 0.9.5",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "candyriya-it"
 version = "0.1.1"
 dependencies = [
@@ -444,10 +464,12 @@ dependencies = [
  "candyriya-compression",
  "candyriya-config",
  "candyriya-forwarding",
+ "candyriya-init",
  "candyriya-player",
  "candyriya-protocol",
  "candyriya-protocol-registry",
  "candyriya-proxy",
+ "candyriya-route",
  "candyriya-scheduler",
  "portable-pty",
  "reqwest",
@@ -556,6 +578,7 @@ dependencies = [
  "candyriya-cache",
  "candyriya-config",
  "candyriya-i18n",
+ "candyriya-init",
  "candyriya-metrics",
  "candyriya-plugin-api",
  "candyriya-scheduler",
@@ -616,7 +639,6 @@ dependencies = [
 name = "candyriya-proxy"
 version = "0.1.1"
 dependencies = [
- "arc-swap",
  "base64 0.22.1",
  "bytes",
  "candyriya-auth",
@@ -626,6 +648,7 @@ dependencies = [
  "candyriya-encryption",
  "candyriya-forwarding",
  "candyriya-i18n",
+ "candyriya-init",
  "candyriya-it",
  "candyriya-player",
  "candyriya-plugin",
@@ -660,8 +683,13 @@ dependencies = [
 name = "candyriya-route"
 version = "0.1.1"
 dependencies = [
+ "arc-swap",
  "bytes",
+ "candyriya-init",
+ "candyriya-metrics",
  "candyriya-protocol",
+ "candyriya-scheduler",
+ "metrics",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

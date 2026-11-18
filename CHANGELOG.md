@@ -9,6 +9,10 @@ GitHub Releases are attached to tags automatically when they are pushed; each
 release carries the prebuilt binaries as assets. See the
 [Releases](https://github.com/CandyriyaMC/candyriya-rs/releases) page.
 
+## [Unreleased]
+
+- The process lifecycle is now a supervision tree: `init` (pid 1) supervises every subsystem as a unit with restart policy, zombie reaping and capability-based IPC between units; the same tree drives `/candyriya ps` (with `--full` and a live console `--watch`), `/candyriya tree`, and the `candyriya_services_*`, `candyriya_zombie_reaps_total` and `candyriya_zombies*` Prometheus series.
+
 ## [0.1.1] - 2026-11-17
 
 The plugin runtime release: plugins now actually receive lifecycle events,

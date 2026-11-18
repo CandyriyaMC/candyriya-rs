@@ -17,6 +17,27 @@
 //! global label `service="candyriya"` to every metric, on top of whatever the
 //! call site sets.
 //!
+//! Every label vocabulary in this module is closed - free-form labels are
+//! never acceptable, because untrusted peers and plugin ids are the callers'
+//! only excuse for cardinality explosions, and that excuse is not taken:
+//!
+//! - `target` (IPC): one of `config`, `cache`, `auth`, `router`, `plugins`,
+//!   `accept`, `repl`, `stats`, `roster`, `console` or `unit`. Derived from
+//!   the called unit's service kind, never its name, never a pid.
+//! - `outcome` (IPC): one of `ok`, `timeout`, `busy`, `not_running`,
+//!   `panicked`, `type_mismatch` or `not_cappable`.
+//! - `outcome` (plugins): one of `ok`, `timeout`, `failed`,
+//!   `fuel_exhausted` or `cancelled`.
+//! - `mode` (logins): `online` or `offline`.
+//! - `direction` (forwarded traffic): `client_to_server` or
+//!   `server_to_client`.
+//! - `plugin`: the plugin id from the manifest, bounded by what the operator
+//!   loads.
+//! - `reason` (handshake/disconnects), `backend` (ping), `mode`: free-form
+//!   by design, with the curation rule spelled out on the constant - bounded
+//!   and human-reviewed, never raw error strings.
+//! - pids, connection ids and unit names are never labels, anywhere.
+//!
 //! This module holds constants only. Any logic lives in the crate root.
 
 /// Gauge. Players currently connected to the proxy, in any session state
@@ -188,6 +209,81 @@ pub const NAME_PLUGIN_BUSY_TOTAL: &str = "candyriya_plugin_busy_total";
 /// - `plugin` (required): the plugin id from the manifest.
 pub const NAME_PLUGIN_LOADED: &str = "candyriya_plugin_loaded";
 
+/// Counter. Calls from one unit in the supervision tree to another unit,
+/// counted once per call, labelled by the outcome the call settled on.
+///
+/// Labels:
+///
+/// - `target` (required): the bounded service-kind vocabulary of the called
+///   unit - one of `config`, `cache`, `auth`, `router`, `plugins`, `accept`,
+///   `repl`, `stats`, `roster`, `console` or `unit` (the last is the fallback
+///   for units that declare no service kind). Never a unit name, never a
+///   pid, never per-instance state.
+/// - `outcome` (required): one of `ok`, `timeout`, `busy`, `not_running`,
+///   `panicked`, `type_mismatch` or `not_cappable`. `busy` is a
+///   mailbox-full rejection (the call never ran); `not_cappable` is a
+///   capability-check failure (caller is neither an ancestor of the target
+///   nor holds a grant for it); `not_running` covers absent, reaped, zombie
+///   or otherwise uncallable targets; `panicked` covers handler panics
+///   contained by the task service and bodies dropped mid-call.
+pub const NAME_IPC_CALLS_TOTAL: &str = "candyriya_ipc_calls_total";
+
+/// Gauge. Number of exited-but-not-yet-reaped units currently in the
+/// supervision tree. Exited units stay visible as zombies until the
+/// reaper harvests them, so a non-zero value is normal drain churn; a
+/// persistently high or growing one is a reaper bug or a stuck backoff.
+/// Emitted by `candyriya-init` from the same books the tree keeps.
+///
+/// No labels.
+pub const NAME_ZOMBIES: &str = "candyriya_zombies";
+
+/// Gauge. Zombies that exceeded the tree's stuck threshold (exited longer
+/// ago than the configured limit without being reaped). Always a subset of
+/// [`NAME_ZOMBIES`]; anything non-zero means the reaper missed a unit.
+/// Emitted by `candyriya-init` from the same books the tree keeps.
+///
+/// No labels.
+pub const NAME_ZOMBIES_STUCK: &str = "candyriya_zombies_stuck";
+
+/// Counter. Units reaped through the supervision tree. Fires once per
+/// zombie the reaper harvests, whatever the restart policy decided next
+/// (removed, parked into `FailedTerminal`, or scheduled for respawn).
+///
+/// No labels.
+pub const NAME_ZOMBIE_REAPS_TOTAL: &str = "candyriya_zombie_reaps_total";
+
+/// Counter. Units that hit their restart start limit and were parked into
+/// the terminal `FailedTerminal` state. Fires once per unit at the moment
+/// the limit is breached; the unit then stays visible in `ps` until the
+/// process exits.
+///
+/// No labels.
+pub const NAME_SERVICES_FAILED_TERMINAL_TOTAL: &str = "candyriya_services_failed_terminal_total";
+
+/// Counter. Units whose restart backoff expired and who were re-created by
+/// the tree. Fires once per actual respawn, not per exit; the restart
+/// budget (start limit, window) is enforced by the tree itself.
+///
+/// No labels.
+pub const NAME_SERVICES_RESTARTS_TOTAL: &str = "candyriya_services_restarts_total";
+
+/// Histogram. Wall-clock time for one unit-to-unit call, from the caller's
+/// entry into the call until the answer (or the failure) comes back, in
+/// seconds.
+///
+/// Labels:
+///
+/// - `target` (required): same bounded vocabulary as in
+///   [`NAME_IPC_CALLS_TOTAL`].
+/// - `outcome` (required): same bounded vocabulary as in
+///   [`NAME_IPC_CALLS_TOTAL`]. Calls rejected by the capability check or by
+///   a full/closed mailbox are observed with their outcome label; they are
+///   ~0 and do not move the distribution's body.
+///
+/// Rendered as a true Prometheus histogram with
+/// [`crate::DEFAULT_HISTOGRAM_BUCKETS`] as the bucket bounds.
+pub const NAME_IPC_CALL_DURATION_SECONDS: &str = "candyriya_ipc_call_duration_seconds";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,7 +305,26 @@ mod tests {
         NAME_PLUGIN_ACTIVE_CALLS,
         NAME_PLUGIN_BUSY_TOTAL,
         NAME_PLUGIN_LOADED,
+        NAME_IPC_CALLS_TOTAL,
+        NAME_IPC_CALL_DURATION_SECONDS,
+        NAME_ZOMBIES,
+        NAME_ZOMBIES_STUCK,
+        NAME_ZOMBIE_REAPS_TOTAL,
+        NAME_SERVICES_FAILED_TERMINAL_TOTAL,
+        NAME_SERVICES_RESTARTS_TOTAL,
     ];
+
+    #[test]
+    fn all_names_lists_every_declared_constant() {
+        // ALL_NAMES is hand-maintained on purpose: the compiler cannot
+        // reflect over a module's constants, so this count is the tripwire.
+        // If you add a constant to this module, add it to ALL_NAMES too.
+        assert_eq!(
+            ALL_NAMES.len(),
+            23,
+            "a new constant was added without updating ALL_NAMES"
+        );
+    }
 
     // prometheus data model: metric names must match [a-zA-Z_:][a-zA-Z0-9_:]*
     fn is_valid_prometheus_name(name: &str) -> bool {

@@ -19,6 +19,7 @@ candyriya-cache = { path = "../../common/candyriya-cache" }
 candyriya-command = { path = "../../commands/candyriya-command" }
 candyriya-config = { path = "../../config/candyriya-config" }
 candyriya-i18n = { path = "../../common/candyriya-i18n" }
+candyriya-init = { version = "0.1.0", path = "../../common/candyriya-init" }
 candyriya-metrics = { path = "../../common/candyriya-metrics" }
 candyriya-plugin = { path = "../../plugin/candyriya-plugin" }
 candyriya-plugin-api = { path = "../../plugin/candyriya-plugin-api" }

@@ -16,6 +16,14 @@
 //! e.g. from the scheduler), and packet forwarding (that is the proxy's
 //! pipeline).
 //!
+//! # The `route` unit
+//!
+//! The `unit` module carries the supervision-tree contract for this
+//! crate: the `RouteMsg`/`RouteResp` protocol, the `route` and
+//! `route.health` unit specs ([`route_spec`]/[`health_spec`]), and the
+//! shared store type the composition root and the reload path use. See the
+//! module docs there for the reply semantics and the capability model.
+//!
 //! ```text
 //! client -> handshake -> Login Start
 //!     forced host match? -> those backends, in order
@@ -31,9 +39,14 @@ mod error;
 mod forced;
 mod ping;
 mod registry;
+mod unit;
 
 pub use backend::{Backend, BackendState};
 pub use error::RouteError;
 pub use forced::{ForcedHost, ForcedHosts};
 pub use ping::MOTD_PREVIEW_BYTES;
 pub use registry::{BackendRegistry, DEFAULT_HEALTH_CHECK_TIMEOUT, HealthCheckOutcome};
+pub use unit::{
+    BackendRef, BackendSnapshot, DEFAULT_HEALTH_CHECK_INTERVAL, RouteMsg, RouteResp, RouterStore,
+    health_spec, route_call, route_spec, router_store,
+};
