@@ -29,6 +29,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod error;
+mod record;
+mod registry;
 mod state;
 
+pub use crate::error::{RegistryError, TransitionError};
+pub use crate::record::{ExitStatus, LoadedThreadHandle, PluginManifest, PluginRecord};
+pub use crate::registry::{PluginRegistry, RegistrySnapshot};
 pub use crate::state::{ALLOWED_TRANSITIONS, ALL_STATES, PluginWireState, Transitionable};
