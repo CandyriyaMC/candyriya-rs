@@ -146,7 +146,7 @@ fn roundtrip_preserves_records_written_by_serialization() {
 }
 
 #[test]
-fn file_is_pretty_printed_two_space_and_uuid_ordered() {
+fn file_is_compact_single_line_and_uuid_ordered() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = store_path(dir.path());
 
@@ -156,9 +156,14 @@ fn file_is_pretty_printed_two_space_and_uuid_ordered() {
     drop(store);
 
     let raw = std::fs::read_to_string(&path).expect("read raw");
-    assert!(raw.contains('\n'), "pretty-printed output must span lines");
-    assert!(!raw.contains('\t'), "indentation is spaces, not tabs");
-    assert!(raw.contains("\n  {"), "array items are indented two spaces");
+    assert!(
+        !raw.contains('\n') && !raw.contains('\t'),
+        "compact output must be a single line with no tabs"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&raw).is_ok(),
+        "compact output must still be valid JSON"
+    );
     let idx_one = raw
         .find(&Uuid::from_u128(1).to_string())
         .expect("uuid 1 present");
@@ -166,6 +171,24 @@ fn file_is_pretty_printed_two_space_and_uuid_ordered() {
         .find(&Uuid::from_u128(9).to_string())
         .expect("uuid 9 present");
     assert!(idx_one < idx_nine, "records are written in UUID order");
+}
+
+#[test]
+fn pretty_printed_file_from_older_versions_still_loads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(dir.path());
+
+    // simulate a store written before compact serialization: pretty-printed
+    // 2-space indent, which the parser must keep accepting
+    let records = vec![record(1, "One"), record(9, "Nine")];
+    let raw = serde_json::to_string_pretty(&records).expect("serialize");
+    std::fs::write(&path, &raw).expect("write pretty file");
+
+    let store = JsonPlayerStore::open(&path).expect("pretty file must open");
+    assert_eq!(store.len(), 2);
+    let map = store.load_all();
+    assert_eq!(map[&Uuid::from_u128(1)].name, "One");
+    assert_eq!(map[&Uuid::from_u128(9)].name, "Nine");
 }
 
 #[test]
@@ -263,7 +286,7 @@ fn corrupt_file_with_one_bad_record_errors() {
 fn corrupt_file_truncated_json_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = store_path(dir.path());
-    let full = serde_json::to_string_pretty(&vec![record(1, "One")]).expect("serialize");
+    let full = serde_json::to_string(&vec![record(1, "One")]).expect("serialize");
     std::fs::write(&path, &full[..full.len() / 2]).expect("write truncated");
 
     let result = JsonPlayerStore::open(&path);
@@ -279,8 +302,8 @@ fn duplicate_uuids_error_reports_all_indices() {
     let path = store_path(dir.path());
     let dup = record(777, "Dup");
     let other = record(888, "Other");
-    let raw = serde_json::to_string_pretty(&vec![dup.clone(), other, dup.clone(), dup])
-        .expect("serialize");
+    let raw =
+        serde_json::to_string(&vec![dup.clone(), other, dup.clone(), dup]).expect("serialize");
     std::fs::write(&path, raw).expect("write duplicates");
 
     match JsonPlayerStore::open(&path) {
@@ -299,7 +322,7 @@ fn duplicate_uuids_reports_earliest_first_occurrence_first() {
     let a = record(300, "A");
     let b = record(200, "B");
     // b appears twice at indices 1 and 3, a twice at 0 and 2: a reported first
-    let raw = serde_json::to_string_pretty(&vec![a.clone(), b.clone(), a, b]).expect("serialize");
+    let raw = serde_json::to_string(&vec![a.clone(), b.clone(), a, b]).expect("serialize");
     std::fs::write(&path, raw).expect("write duplicates");
 
     match JsonPlayerStore::open(&path) {
@@ -509,7 +532,7 @@ fn duplicate_detection_runs_before_any_record_is_kept() {
         record(3, "Three"),
         record(1, "OneAgain"),
     ];
-    let raw = serde_json::to_string_pretty(&records).expect("serialize");
+    let raw = serde_json::to_string(&records).expect("serialize");
     std::fs::write(&path, &raw).expect("write");
 
     match JsonPlayerStore::open(&path) {
