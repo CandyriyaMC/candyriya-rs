@@ -111,7 +111,7 @@ fn lexically_normalize(path: &Path) -> PathBuf {
             Component::CurDir => {}
             Component::ParentDir => {
                 // never pop past the root
-                if matches!(out.components().last(), Some(Component::Normal(_))) {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
                     out.pop();
                 }
             }
