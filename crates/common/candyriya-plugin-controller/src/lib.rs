@@ -40,5 +40,5 @@ pub use crate::error::{RegistryError, TransitionError};
 pub use crate::machine::{PluginEvent, apply};
 pub use crate::record::{ExitStatus, LoadedThreadHandle, PluginManifest, PluginRecord};
 pub use crate::registry::{PluginRegistry, RegistrySnapshot};
-pub use crate::state::{ALLOWED_TRANSITIONS, ALL_STATES, PluginWireState, Transitionable};
+pub use crate::state::{ALL_STATES, ALLOWED_TRANSITIONS, PluginWireState, Transitionable};
 pub use crate::wire::{AckStatus, Generation, MAX_ACK_MESSAGE_BYTES, PluginAck, PluginMsg};
