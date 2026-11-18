@@ -227,6 +227,39 @@ pub fn run(args: Args) -> Result<(), CliError> {
     result
 }
 
+/// Write `contents` to `path` atomically.
+///
+/// A half-written file is never on disk under `path`: the bytes land in a
+/// sibling temp file first, then a rename puts them in place — atomic on the
+/// same filesystem on Unix and Windows. Readers therefore see the old file,
+/// the complete new file, or nothing at all.
+fn write_file_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+    static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+    })?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or(0);
+    let counter = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_name = format!(
+        ".{}.tmp-{}-{nanos}-{counter}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    );
+    let temp_path = path.with_file_name(temp_name);
+
+    let cleanup = |error: std::io::Error| {
+        // best effort — a stale temp sibling is harmless, the error is not
+        let _ = std::fs::remove_file(&temp_path);
+        error
+    };
+    std::fs::write(&temp_path, contents).map_err(cleanup)?;
+    std::fs::rename(&temp_path, path).map_err(cleanup)
+}
+
 /// Poll cadence for the selection loop's unit-failure watch and for the
 /// bounded waits in the shutdown cascade. Short enough that a failed accept
 /// stops the process without a human noticing, cheap enough to ignore.
@@ -514,7 +547,9 @@ fn run_proxy(data_dir: &Path, log_level: &str, use_ansi: bool, args: Args) -> Re
                 message: "configuration file does not exist; pass --config <PATH>, or run without arguments to create ./candyriya.toml from the embedded template".to_string(),
             });
         }
-        match std::fs::write(&config_path, DEFAULT_CONFIG_TOML) {
+        // atomic rename: a concurrent reader (or a second proxy starting at
+        // the same time) can never observe a half-written template
+        match write_file_atomically(&config_path, DEFAULT_CONFIG_TOML) {
             Ok(()) => {
                 info!(path = %config_path.display(), "no configuration file found; wrote the embedded default template")
             }
@@ -1796,6 +1831,37 @@ mod tests {
         assert!(exit_is_failure(&ExitStatus::TimedOut));
         assert!(!exit_is_failure(&ExitStatus::Success));
         assert!(!exit_is_failure(&ExitStatus::Cancelled));
+    }
+
+    #[test]
+    fn write_file_atomically_lands_complete_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("candyriya.toml");
+        write_file_atomically(&path, DEFAULT_CONFIG_TOML).expect("atomic write");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            DEFAULT_CONFIG_TOML
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp siblings must not linger");
+    }
+
+    #[test]
+    fn write_file_atomically_replaces_existing_file() {
+        // covers the window where the file appears between the exists()
+        // check and the rename — the rename must win, with complete bytes
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("candyriya.toml");
+        std::fs::write(&path, "stale = true\n").expect("seed file");
+        write_file_atomically(&path, DEFAULT_CONFIG_TOML).expect("atomic write");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            DEFAULT_CONFIG_TOML
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
