@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::error::PluginError;
-use crate::instance::PluginInstance;
+use crate::instance::{PluginFormat, PluginInstance};
 use crate::manifest::PluginManifest;
 
 /// Where a plugin was discovered.
@@ -49,12 +49,18 @@ impl PluginState {
 /// Records in `Failed` state carry no instance; [`LibraryPlugin::instance`]
 /// returns `None` for them. Records are cheap to keep around regardless of
 /// state, so discovery problems never take a plugin silently off the map.
+///
+/// The `flavor` records which format won discovery — additive information
+/// for the phase-2 native path. Discovery never instantiates a native
+/// plugin; a native-flavor record is a `Failed` record whose reason names
+/// the library on disk. The wasm lifecycle does not consult the field.
 pub struct LibraryPlugin {
     dir: PathBuf,
     manifest: PluginManifest,
     origin: PluginOrigin,
     instance: Option<PluginInstance>,
     state: PluginState,
+    flavor: PluginFormat,
 }
 
 // Manual Debug: LibraryPlugin carries a live wasm instance whose internals
@@ -66,6 +72,7 @@ impl std::fmt::Debug for LibraryPlugin {
             .field("dir", &self.dir)
             .field("origin", &self.origin)
             .field("state", &self.state)
+            .field("flavor", &self.flavor)
             .finish_non_exhaustive()
     }
 }
@@ -77,6 +84,7 @@ impl LibraryPlugin {
         manifest: PluginManifest,
         origin: PluginOrigin,
         instance: PluginInstance,
+        flavor: PluginFormat,
     ) -> Self {
         Self {
             dir,
@@ -84,6 +92,7 @@ impl LibraryPlugin {
             origin,
             instance: Some(instance),
             state: PluginState::Loaded,
+            flavor,
         }
     }
 
@@ -93,6 +102,7 @@ impl LibraryPlugin {
         manifest: PluginManifest,
         origin: PluginOrigin,
         reason: String,
+        flavor: PluginFormat,
     ) -> Self {
         Self {
             dir,
@@ -100,6 +110,7 @@ impl LibraryPlugin {
             origin,
             instance: None,
             state: PluginState::Failed(reason),
+            flavor,
         }
     }
 
@@ -121,6 +132,17 @@ impl LibraryPlugin {
     /// Where the plugin was discovered.
     pub fn origin(&self) -> PluginOrigin {
         self.origin
+    }
+
+    /// Which format won discovery for this record.
+    ///
+    /// [`PluginFormat::Wasm`] is the only flavor this loader instantiates;
+    /// [`PluginFormat::Native`] records are detection-only — a `Failed`
+    /// record whose reason names the library on disk, held for the phase-2
+    /// native bring-up path. When both a wasm module and a native library
+    /// sit next to `plugin.toml`, the native flavor wins (OQ13).
+    pub fn flavor(&self) -> PluginFormat {
+        self.flavor
     }
 
     /// Current lifecycle state.

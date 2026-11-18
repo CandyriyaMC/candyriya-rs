@@ -62,7 +62,7 @@ use crate::error::PluginError;
 use crate::health::PluginHealthSet;
 use crate::host_ipc::HostIpc;
 use crate::host_state::HostState;
-use crate::instance::PluginInstance;
+use crate::instance::{PluginFormat, PluginInstance};
 use crate::library_plugin::{LibraryPlugin, PluginState};
 use crate::limits::Limits;
 use crate::locales::SharedLocales;
@@ -327,7 +327,8 @@ impl PluginReloader {
 
         // the replacement is ready; the swap drops the old world's
         // services and exchanges the record in place
-        let mut replacement = LibraryPlugin::new(dir, manifest, origin, instance);
+        let mut replacement =
+            LibraryPlugin::new(dir, manifest, origin, instance, PluginFormat::Wasm);
         if old_state == PluginState::Disabled {
             replacement.disable()?;
         }

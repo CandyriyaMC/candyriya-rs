@@ -90,7 +90,7 @@ const MAILBOX_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Both formats share the dedicated thread, the mailbox and the supervision
 /// shape; the wasm path compiles a module, the native path maps a library.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PluginFormat {
     /// An [extism](https://extism.org) wasm module, called through the
     /// extism ABI (`() -> i32`, bytes in, bytes out).

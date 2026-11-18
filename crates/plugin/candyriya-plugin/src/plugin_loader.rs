@@ -12,6 +12,7 @@
 //!   my-plugin/
 //!     plugin.toml      # required
 //!     my-plugin.wasm   # or lib.wasm
+//!     my-plugin.so     # or .dll/.dylib — the native flavor candidate
 //! libraries/
 //!   some-library/
 //!     plugin.toml
@@ -24,6 +25,28 @@
 //! the resulting records. Ids are unique across both directories — an id
 //! collision is an error, not a precedence rule.
 //!
+//! # Native flavor detection
+//!
+//! Alongside the wasm module, the scanner also stats for a native library
+//! directly inside the plugin directory: `<id>.<ext>`, then cargo's cdylib
+//! default `lib<id>.<ext>` on unix (no `lib` prefix on Windows). `<ext>` is
+//! `dll` on Windows, `dylib` on macOS/iOS, and `so` everywhere else
+//! (Linux, Android) — the preferred extension lives in exactly one cfg
+//! block (`PREFERRED_NATIVE_EXT`), the fallback list in
+//! [`native_library_names`]. Detection is a stat only: the library is never
+//! opened, mapped or executed here, no thread is spawned and no handshake
+//! is attempted. A candidate that exists but is not a regular file is not
+//! a candidate at all.
+//!
+//! A plugin shipping both a wasm module and a native library gets the
+//! *native* flavor (OQ13): a warning naming the plugin id and both paths is
+//! logged, the wasm module is left untouched on disk, and the record
+//! reports the native flavor. Detection never instantiates a native
+//! plugin — the phase-2 bring-up path does that — so a native-flavor
+//! record surfaces as a `Failed` record whose reason names the library on
+//! disk, the same visible-not-silent discipline the wasm path uses. The
+//! flavor is additive information on the record; the wasm path ignores it.
+//!
 //! # Failure policy
 //!
 //! Discovery never fails the whole load. Everything that is wrong with one
@@ -33,7 +56,9 @@
 //! A plugin whose wasm compiles but fails preparation (missing `plugin_main`
 //! export, uncreatable data directory, cache quota rejected) is recorded as
 //! a [`LibraryPlugin`] in [`PluginState::Failed`] — visible, not silent — and
-//! its reason is also listed in `issues`.
+//! its reason is also listed in `issues`. A native-only candidate follows
+//! the same rule: it is a `Failed` record with a reason naming its library,
+//! never a silently dropped directory.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,7 +68,7 @@ use candyriya_cache::CacheManager;
 use crate::health::PluginHealthSet;
 use crate::host_ipc::HostIpc;
 use crate::host_state::HostState;
-use crate::instance::PluginInstance;
+use crate::instance::{PluginFormat, PluginInstance};
 use crate::library_plugin::{LibraryPlugin, PluginOrigin};
 use crate::limits::{InstanceSlots, Limits};
 use crate::locales::SharedLocales;
@@ -260,6 +285,11 @@ impl<'a> PluginLoader<'a> {
                     path,
                     "found a .wasm file directly in this directory; plugins live in <id>/ subdirectories".to_owned(),
                 ));
+            } else if file_type.is_file() && is_native_library_file(&path) {
+                issues.push((
+                    path,
+                    "found a native library directly in this directory; plugins live in <id>/ subdirectories".to_owned(),
+                ));
             }
         }
     }
@@ -294,7 +324,16 @@ impl<'a> PluginLoader<'a> {
                     ),
                 ));
             }
-            // no wasm either: not a plugin directory, ignore silently
+            if let Some(stray) = find_native_library_file(dir) {
+                issues.push((
+                    stray,
+                    format!(
+                        "found a native library but no plugin.toml next to it (expected {})",
+                        manifest_path.display()
+                    ),
+                ));
+            }
+            // no wasm and no native library either: not a plugin directory, ignore silently
             return;
         }
 
@@ -323,20 +362,48 @@ impl<'a> PluginLoader<'a> {
             return;
         }
 
-        let wasm_path = match select_wasm(dir, manifest.id()) {
-            Ok(path) => path,
-            Err(why) => {
-                issues.push((dir.to_path_buf(), why));
-                return;
-            }
-        };
+        // native flavor detection: a stat, never an open. when both formats
+        // sit next to the manifest the native one wins (OQ13) and the wasm
+        // module stays untouched on disk
+        let native_path = find_native_library(dir, manifest.id());
+        let wasm_path = select_wasm(dir, manifest.id());
 
-        candidates.push(Candidate {
-            dir: dir.to_path_buf(),
-            manifest,
-            origin,
-            wasm_path,
-        });
+        match (native_path, wasm_path) {
+            (Some(native_path), wasm_path) => {
+                if let Ok(wasm_path) = &wasm_path {
+                    tracing::warn!(
+                        plugin = %manifest.id(),
+                        native = %native_path.display(),
+                        wasm = %wasm_path.display(),
+                        "plugin `{}` ships both a wasm module ({}) and a native library ({}); the native flavor wins (OQ13) and the wasm module is not loaded",
+                        manifest.id(),
+                        wasm_path.display(),
+                        native_path.display(),
+                    );
+                }
+                candidates.push(Candidate {
+                    dir: dir.to_path_buf(),
+                    manifest,
+                    origin,
+                    flavor: PluginFormat::Native,
+                    wasm_path: wasm_path.ok(),
+                    native_path: Some(native_path),
+                });
+            }
+            (None, Ok(wasm_path)) => {
+                candidates.push(Candidate {
+                    dir: dir.to_path_buf(),
+                    manifest,
+                    origin,
+                    flavor: PluginFormat::Wasm,
+                    wasm_path: Some(wasm_path),
+                    native_path: None,
+                });
+            }
+            (None, Err(why)) => {
+                issues.push((dir.to_path_buf(), why));
+            }
+        }
     }
 
     /// Reject candidates whose id collides with an earlier candidate.
@@ -385,9 +452,33 @@ impl<'a> PluginLoader<'a> {
             dir,
             manifest,
             origin,
+            flavor,
             wasm_path,
+            native_path,
         } = candidate;
         let id = manifest.id().to_owned();
+
+        // detection-only pass for the native flavor: no dirs are created,
+        // nothing is compiled, mapped or executed. the plugin is held as a
+        // Failed record so operators see it, same visible-not-silent
+        // discipline the wasm path uses for its own failures.
+        if flavor == PluginFormat::Native {
+            let native_path = native_path.expect("native flavor always carries its winning path");
+            let reason = match &wasm_path {
+                Some(wasm_path) => format!(
+                    "plugin `{id}` ships both a wasm module ({}) and a native library ({}); the native flavor wins (OQ13), the wasm module is left untouched and native bring-up is not wired into this loader yet",
+                    wasm_path.display(),
+                    native_path.display()
+                ),
+                None => format!(
+                    "native library `{}` discovered for plugin `{id}`; no wasm module is present and native bring-up is not wired into this loader yet (phase 2)",
+                    native_path.display()
+                ),
+            };
+            issues.push((native_path, reason.clone()));
+            return LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Native);
+        }
+        let wasm_path = wasm_path.expect("wasm flavor always carries its module path");
 
         // every plugin owns <data_dir>/config/<id>/ and <data_dir>/cache/<id>/
         let data_root = self.cache.root().to_path_buf();
@@ -398,7 +489,7 @@ impl<'a> PluginLoader<'a> {
                 config_dir.display()
             );
             issues.push((config_dir.clone(), reason.clone()));
-            return LibraryPlugin::failed(dir, manifest, origin, reason);
+            return LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Wasm);
         }
         let cache_dir = data_root.join("cache").join(&id);
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
@@ -407,13 +498,13 @@ impl<'a> PluginLoader<'a> {
                 cache_dir.display()
             );
             issues.push((cache_dir.clone(), reason.clone()));
-            return LibraryPlugin::failed(dir, manifest, origin, reason);
+            return LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Wasm);
         }
 
         // honor the cache quotas the manifest declares, if any
         if let Err(why) = self.apply_cache_quotas(&id, manifest.metadata()) {
             issues.push((dir.clone(), why.clone()));
-            return LibraryPlugin::failed(dir, manifest, origin, why);
+            return LibraryPlugin::failed(dir, manifest, origin, why, PluginFormat::Wasm);
         }
 
         let mut host_state =
@@ -431,7 +522,7 @@ impl<'a> PluginLoader<'a> {
             Err(e) => {
                 let reason = e.to_string();
                 issues.push((wasm_path.clone(), reason.clone()));
-                return LibraryPlugin::failed(dir, manifest, origin, reason);
+                return LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Wasm);
             }
         };
 
@@ -441,7 +532,7 @@ impl<'a> PluginLoader<'a> {
                 if manifest.has_locales() {
                     self.register_plugin_locales(&id, &dir, issues);
                 }
-                LibraryPlugin::new(dir, manifest, origin, instance)
+                LibraryPlugin::new(dir, manifest, origin, instance, PluginFormat::Wasm)
             }
             Ok(false) => {
                 let reason = format!(
@@ -451,12 +542,12 @@ impl<'a> PluginLoader<'a> {
                 // the instance is useless to us; dropping it closes the worker
                 drop(instance);
                 issues.push((dir.clone(), reason.clone()));
-                LibraryPlugin::failed(dir, manifest, origin, reason)
+                LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Wasm)
             }
             Err(e) => {
                 let reason = e.to_string();
                 issues.push((dir.clone(), reason.clone()));
-                LibraryPlugin::failed(dir, manifest, origin, reason)
+                LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Wasm)
             }
         }
     }
@@ -515,7 +606,16 @@ struct Candidate {
     dir: PathBuf,
     manifest: PluginManifest,
     origin: PluginOrigin,
-    wasm_path: PathBuf,
+    /// Which flavor won discovery; the native one wins when both sit next
+    /// to the manifest (OQ13).
+    flavor: PluginFormat,
+    /// The wasm module, when one was found. Always `Some` for the wasm
+    /// flavor; for the native flavor it names the module that was found
+    /// but will not be loaded.
+    wasm_path: Option<PathBuf>,
+    /// The native library that won the probe; `Some` exactly when the
+    /// flavor is native.
+    native_path: Option<PathBuf>,
 }
 
 /// Read the entries of `dir`, sorted by file name for deterministic order.
@@ -537,6 +637,63 @@ fn read_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, String> {
 fn is_wasm(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("wasm"))
+}
+
+/// Is this file something a native plugin could be? Used for the stray
+/// reporting in the roots; the sibling-of-`plugin.toml` probe does its own
+/// name-based matching in [`find_native_library`].
+fn is_native_library_file(path: &Path) -> bool {
+    path.extension().is_some_and(|e| {
+        e.eq_ignore_ascii_case("so")
+            || e.eq_ignore_ascii_case("dll")
+            || e.eq_ignore_ascii_case("dylib")
+    })
+}
+
+// the one cfg block for the preferred native library extension: `dll` on
+// Windows, `dylib` on macOS/iOS, `so` everywhere else (Linux, Android).
+// everything else about the fallback mapping lives in `native_library_names`
+#[cfg(windows)]
+const PREFERRED_NATIVE_EXT: &str = "dll";
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const PREFERRED_NATIVE_EXT: &str = "dylib";
+#[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
+const PREFERRED_NATIVE_EXT: &str = "so";
+
+/// Candidate file names for a plugin's native library, in probe order:
+/// `<id>.<ext>` with this platform's preferred extension first, then cargo's
+/// cdylib default `lib<id>.<ext>` on unix (windows has no `lib` prefix). A
+/// stock `cargo build -p greeting` drop-in is found without a rename.
+fn native_library_names(id: &str) -> Vec<String> {
+    let mut names = vec![format!("{id}.{PREFERRED_NATIVE_EXT}")];
+    if cfg!(not(windows)) {
+        names.push(format!("lib{id}.{PREFERRED_NATIVE_EXT}"));
+    }
+    names
+}
+
+/// The native library sitting directly inside `dir`, in probe order.
+/// A stat per candidate, never an open: the library is never mapped,
+/// executed or read here. A candidate that exists but is not a regular
+/// file is not a candidate at all.
+fn find_native_library(dir: &Path, id: &str) -> Option<PathBuf> {
+    native_library_names(id)
+        .into_iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file())
+}
+
+/// First native-looking file directly inside `dir`, if any (used to detect
+/// manifest-less plugin directories).
+fn find_native_library_file(dir: &Path) -> Option<PathBuf> {
+    let mut matches: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_native_library_file(p))
+        .collect();
+    matches.sort();
+    matches.into_iter().next()
 }
 
 /// First `.wasm` file directly inside `dir`, if any (used to detect
@@ -566,4 +723,532 @@ pub(crate) fn select_wasm(dir: &Path, id: &str) -> Result<PathBuf, String> {
         "no wasm module found for plugin `{id}` in {} (expected `{id}.wasm`, or `lib.wasm`)",
         dir.display()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    //! flavor detection for the native candidate: stat-only, detection-only.
+    //! the dummy native libraries written here are empty files; nothing in
+    //! discovery ever opens them, so they never have to be loadable.
+    use super::*;
+
+    use std::fs;
+    use std::sync::Arc;
+
+    use crate::library_plugin::PluginState;
+    use candyriya_cache::CacheManager;
+    use tempfile::TempDir;
+
+    const GREET_WAT: &str = r#"
+(module
+  (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+  (import "extism:host/env" "output_set" (func $output_set (param i64 i64)))
+  (import "extism:host/env" "store_u8" (func $store_u8 (param i64 i32)))
+  (memory (export "memory") 1)
+  (func (export "greet") (result i32)
+    (local $p i64)
+    (local.set $p (call $alloc (i64.const 5)))
+    (call $store_u8 (local.get $p) (i32.const 104))
+    (call $store_u8 (i64.add (local.get $p) (i64.const 1)) (i32.const 101))
+    (call $store_u8 (i64.add (local.get $p) (i64.const 2)) (i32.const 108))
+    (call $store_u8 (i64.add (local.get $p) (i64.const 3)) (i32.const 108))
+    (call $store_u8 (i64.add (local.get $p) (i64.const 4)) (i32.const 111))
+    (call $output_set (local.get $p) (i64.const 5))
+    (i32.const 0)))
+"#;
+
+    struct Fixture {
+        _root: TempDir,
+        plugins_dir: PathBuf,
+        libraries_dir: PathBuf,
+        cache_root: PathBuf,
+        cache: CacheManager,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = TempDir::new().expect("tempdir");
+            let plugins_dir = root.path().join("plugins");
+            let libraries_dir = root.path().join("libraries");
+            let cache_root = root.path().join("data");
+            fs::create_dir_all(&plugins_dir).expect("plugins dir");
+            fs::create_dir_all(&libraries_dir).expect("libraries dir");
+            fs::create_dir_all(&cache_root).expect("cache root");
+            let cache = CacheManager::new(&cache_root).expect("cache manager");
+            Self {
+                _root: root,
+                plugins_dir,
+                libraries_dir,
+                cache_root,
+                cache,
+            }
+        }
+
+        fn load(&self) -> LoadReport {
+            PluginLoader::new(
+                self.plugins_dir.clone(),
+                self.libraries_dir.clone(),
+                &self.cache,
+            )
+            .load()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = self.cache.shutdown();
+        }
+    }
+
+    fn manifest(id: &str, plugin_main: &str) -> String {
+        format!(
+            "id = \"{id}\"\nversion = \"0.1.0\"\nname = \"Test plugin {id}\"\nplugin_main = \"{plugin_main}\"\nplugin_api = \"0.1\"\n"
+        )
+    }
+
+    fn greet_wasm() -> Vec<u8> {
+        wat::parse_str(GREET_WAT).expect("greet wat compiles")
+    }
+
+    fn write_manifest(dir: &Path, id: &str) {
+        fs::create_dir_all(dir.join(id)).expect("plugin dir");
+        fs::write(dir.join(id).join("plugin.toml"), manifest(id, "greet")).expect("manifest");
+    }
+
+    /// the empty dummy library next to the manifest; the name is whatever
+    /// this platform probes first, so the file is always the winner
+    fn dummy_native_library(dir: &Path, id: &str) -> PathBuf {
+        let name = native_library_names(id)
+            .into_iter()
+            .next()
+            .expect("at least one candidate name");
+        let path = dir.join(id).join(name);
+        fs::write(&path, b"").expect("dummy native library");
+        path
+    }
+
+    /// events collected by the capture subscriber; the state is shared
+    /// through an Arc because `with_default` consumes the subscriber
+    #[derive(Clone, Default)]
+    struct CapturedEvents {
+        events: Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>,
+    }
+
+    impl CapturedEvents {
+        fn warn_message(&self) -> Option<String> {
+            self.events
+                .lock()
+                .expect("captured events")
+                .iter()
+                .find(|(level, _)| *level == tracing::Level::WARN)
+                .map(|(_, message)| message.clone())
+        }
+    }
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = MessageVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("captured events")
+                .push((*event.metadata().level(), visitor.message));
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: String,
+    }
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.message, "{}={value:?};", field.name());
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            use std::fmt::Write as _;
+            let _ = write!(self.message, "{}={value};", field.name());
+        }
+    }
+
+    #[test]
+    fn native_library_names_probe_order() {
+        let names = native_library_names("widget");
+        #[cfg(windows)]
+        assert_eq!(names, ["widget.dll".to_owned()]);
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        assert_eq!(
+            names,
+            ["widget.dylib".to_owned(), "libwidget.dylib".to_owned()]
+        );
+        #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
+        assert_eq!(names, ["widget.so".to_owned(), "libwidget.so".to_owned()]);
+    }
+
+    #[test]
+    fn wasm_only_plugin_stays_wasm_flavor_and_loads() {
+        let fx = Fixture::new();
+        write_manifest(&fx.plugins_dir, "wasm-only");
+        fs::write(
+            fx.plugins_dir.join("wasm-only").join("wasm-only.wasm"),
+            greet_wasm(),
+        )
+        .expect("wasm");
+
+        let report = fx.load();
+
+        assert_eq!(report.plugins.len(), 1);
+        let plugin = &report.plugins[0];
+        assert_eq!(plugin.flavor(), PluginFormat::Wasm);
+        assert!(plugin.state().is_loaded(), "issues: {:?}", report.issues);
+        assert!(report.issues.is_empty());
+    }
+
+    #[test]
+    fn native_only_plugin_is_a_failed_record_with_reason() {
+        let fx = Fixture::new();
+        write_manifest(&fx.plugins_dir, "native-only");
+        let native_path = dummy_native_library(&fx.plugins_dir, "native-only");
+
+        let report = fx.load();
+
+        assert_eq!(report.plugins.len(), 1);
+        let plugin = &report.plugins[0];
+        assert_eq!(plugin.flavor(), PluginFormat::Native);
+        // detection-only: no instance, ever
+        assert!(plugin.instance().is_none());
+        let native = native_path.display().to_string();
+        match plugin.state() {
+            PluginState::Failed(reason) => {
+                assert!(
+                    reason.contains(&native),
+                    "reason names the library: {reason}"
+                )
+            }
+            other => panic!("native-only plugin must be Failed, got {other:?}"),
+        }
+        // the same reason is listed in issues, visible-not-silent
+        assert!(
+            report.issues.iter().any(|(_, why)| why.contains(&native)),
+            "issues name the native library: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn native_only_plugin_creates_no_data_dirs() {
+        let fx = Fixture::new();
+        write_manifest(&fx.plugins_dir, "side-effects");
+        dummy_native_library(&fx.plugins_dir, "side-effects");
+
+        let report = fx.load();
+        assert_eq!(report.plugins.len(), 1);
+
+        // detection is side-effect-free: no config/cache dirs for a plugin
+        // this loader never prepared
+        assert!(!fx.cache_root.join("config").join("side-effects").exists());
+        assert!(!fx.cache_root.join("cache").join("side-effects").exists());
+    }
+
+    #[test]
+    fn both_present_native_wins_and_warn_names_id_and_both_paths() {
+        let fx = Fixture::new();
+        write_manifest(&fx.plugins_dir, "dual");
+        let wasm_path = fx.plugins_dir.join("dual").join("dual.wasm");
+        let wasm_bytes = greet_wasm();
+        fs::write(&wasm_path, &wasm_bytes).expect("wasm");
+        let native_path = dummy_native_library(&fx.plugins_dir, "dual");
+
+        let captured = CapturedEvents::default();
+        let probe = captured.clone();
+        let report = tracing::subscriber::with_default(captured, || fx.load());
+
+        assert_eq!(report.plugins.len(), 1);
+        let plugin = &report.plugins[0];
+        assert_eq!(plugin.flavor(), PluginFormat::Native);
+        assert!(plugin.instance().is_none());
+        let wasm = wasm_path.display().to_string();
+        let native = native_path.display().to_string();
+        match plugin.state() {
+            PluginState::Failed(reason) => {
+                assert!(
+                    reason.contains(&wasm),
+                    "reason names the wasm module: {reason}"
+                );
+                assert!(
+                    reason.contains(&native),
+                    "reason names the native library: {reason}"
+                );
+            }
+            other => panic!("both-present plugin must be Failed, got {other:?}"),
+        }
+        // the wasm module is untouched on disk
+        assert_eq!(fs::read(&wasm_path).expect("wasm readable"), wasm_bytes);
+        // one WARN, naming the plugin id and both paths
+        let warn = probe.warn_message().expect("an OQ13 warning is logged");
+        assert!(warn.contains("dual"), "warn names the plugin id: {warn}");
+        assert!(warn.contains(&wasm), "warn names the wasm module: {warn}");
+        assert!(
+            warn.contains(&native),
+            "warn names the native library: {warn}"
+        );
+    }
+
+    #[test]
+    fn manifest_without_native_library_stays_wasm_flavor() {
+        let fx = Fixture::new();
+        // nothing next to the manifest at all: today's behavior, unchanged
+        write_manifest(&fx.plugins_dir, "empty-manifest");
+        // a garbage wasm module: today's behavior, now tagged with its flavor
+        write_manifest(&fx.plugins_dir, "garbage");
+        fs::write(
+            fx.plugins_dir.join("garbage").join("garbage.wasm"),
+            b"\x00asm\xde\xad not wasm",
+        )
+        .expect("garbage wasm");
+
+        let report = fx.load();
+
+        // no wasm and no native library: no record, today's issue text
+        assert!(
+            !report.plugins.iter().any(|p| p.id() == "empty-manifest"),
+            "no manifest-only record is produced"
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|(_, why)| why.contains("no wasm module found")),
+            "today's issue text is preserved: {:?}",
+            report.issues
+        );
+        // garbage wasm: Failed as today, flavor Wasm
+        let garbage = report
+            .plugins
+            .iter()
+            .find(|p| p.id() == "garbage")
+            .expect("garbage record");
+        assert_eq!(garbage.flavor(), PluginFormat::Wasm);
+        assert!(matches!(garbage.state(), PluginState::Failed(_)));
+    }
+
+    #[test]
+    fn native_candidate_that_is_a_directory_degrades_to_todays_behavior() {
+        let fx = Fixture::new();
+        // malformed layout: <id>.<ext> exists but is a directory, and there
+        // is no wasm module -> exactly what the loader reported before
+        // the native probe existed
+        write_manifest(&fx.plugins_dir, "broken");
+        let name = native_library_names("broken")
+            .into_iter()
+            .next()
+            .expect("at least one candidate name");
+        fs::create_dir_all(fx.plugins_dir.join("broken").join(name)).expect("candidate as dir");
+
+        let report = fx.load();
+
+        assert!(report.plugins.is_empty());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|(_, why)| why.contains("no wasm module found")),
+            "malformed native layout falls back to today's issue: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn native_detection_ignores_library_contents() {
+        let fx = Fixture::new();
+        write_manifest(&fx.plugins_dir, "garbage-native");
+        let name = native_library_names("garbage-native")
+            .into_iter()
+            .next()
+            .expect("at least one candidate name");
+        // bytes that are not a dynamic library anywhere; detection never parses them
+        fs::write(
+            fx.plugins_dir.join("garbage-native").join(name),
+            b"\x00\x01\x02definitely not a library\xff\xfe",
+        )
+        .expect("garbage library");
+
+        let report = fx.load();
+
+        assert_eq!(report.plugins.len(), 1);
+        assert_eq!(report.plugins[0].flavor(), PluginFormat::Native);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn cargo_default_lib_prefix_is_probed_after_preferred() {
+        let fx = Fixture::new();
+        write_manifest(&fx.plugins_dir, "prefixed");
+        // only the cargo cdylib default (`lib<id>.<ext>`) exists
+        let names = native_library_names("prefixed");
+        assert_eq!(
+            names.len(),
+            2,
+            "unix probes the bare and the lib-prefixed name"
+        );
+        fs::write(fx.plugins_dir.join("prefixed").join(&names[1]), b"")
+            .expect("prefixed dummy library");
+
+        let report = fx.load();
+
+        assert_eq!(report.plugins.len(), 1);
+        assert_eq!(report.plugins[0].flavor(), PluginFormat::Native);
+
+        // the preferred name wins when both are present
+        fs::write(fx.plugins_dir.join("prefixed").join(&names[0]), b"")
+            .expect("preferred dummy library");
+        let report = fx.load();
+        assert_eq!(report.plugins.len(), 1);
+        let plugin = &report.plugins[0];
+        assert_eq!(plugin.flavor(), PluginFormat::Native);
+        let preferred = fx
+            .plugins_dir
+            .join("prefixed")
+            .join(&names[0])
+            .display()
+            .to_string();
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|(_, why)| why.contains(&preferred)),
+            "the preferred probe wins: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn stray_native_library_without_manifest_is_reported() {
+        let fx = Fixture::new();
+        // a directory carrying only a native library, no plugin.toml
+        let stray = fx.plugins_dir.join("stray-native");
+        fs::create_dir_all(&stray).expect("plugin dir");
+        let name = native_library_names("stray-native")
+            .into_iter()
+            .next()
+            .expect("at least one candidate name");
+        let stray_file = stray.join(name);
+        fs::write(&stray_file, b"").expect("stray library");
+
+        let report = fx.load();
+
+        assert!(report.plugins.is_empty());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|(where_, why)| { *where_ == stray_file && why.contains("no plugin.toml") }),
+            "the stray is reported: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn stray_native_library_directly_in_root_is_reported() {
+        let fx = Fixture::new();
+        let name = native_library_names("loose")
+            .into_iter()
+            .next()
+            .expect("a name");
+        let stray_file = fx.plugins_dir.join(name);
+        fs::write(&stray_file, b"").expect("loose library");
+
+        let report = fx.load();
+
+        assert!(
+            report.issues.iter().any(|(where_, why)| {
+                *where_ == stray_file && why.contains("directly in this directory")
+            }),
+            "the loose library is reported: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn discovery_order_is_preserved_with_mixed_flavors() {
+        let fx = Fixture::new();
+        // libraries: native-only alpha, wasm beta; plugins: native-only delta, wasm gamma
+        write_manifest(&fx.libraries_dir, "alpha-native");
+        dummy_native_library(&fx.libraries_dir, "alpha-native");
+        write_manifest(&fx.libraries_dir, "beta-wasm");
+        fs::write(
+            fx.libraries_dir.join("beta-wasm").join("beta-wasm.wasm"),
+            greet_wasm(),
+        )
+        .expect("wasm");
+        write_manifest(&fx.plugins_dir, "delta-native");
+        dummy_native_library(&fx.plugins_dir, "delta-native");
+        write_manifest(&fx.plugins_dir, "gamma-wasm");
+        fs::write(
+            fx.plugins_dir.join("gamma-wasm").join("gamma-wasm.wasm"),
+            greet_wasm(),
+        )
+        .expect("wasm");
+
+        let report = fx.load();
+
+        let ids: Vec<&str> = report.plugins.iter().map(|p| p.id()).collect();
+        assert_eq!(
+            ids,
+            ["alpha-native", "beta-wasm", "delta-native", "gamma-wasm"]
+        );
+        let flavors: Vec<PluginFormat> = report.plugins.iter().map(|p| p.flavor()).collect();
+        assert_eq!(
+            flavors,
+            [
+                PluginFormat::Native,
+                PluginFormat::Wasm,
+                PluginFormat::Native,
+                PluginFormat::Wasm,
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_id_across_roots_keeps_first_in_load_order() {
+        let fx = Fixture::new();
+        // the library root is scanned first: its native-only candidate wins
+        // over the plugins-root wasm candidate with the same id
+        write_manifest(&fx.libraries_dir, "dual");
+        dummy_native_library(&fx.libraries_dir, "dual");
+        write_manifest(&fx.plugins_dir, "dual");
+        fs::write(fx.plugins_dir.join("dual").join("dual.wasm"), greet_wasm()).expect("wasm");
+
+        let report = fx.load();
+
+        assert_eq!(report.plugins.len(), 1);
+        let keeper = &report.plugins[0];
+        assert_eq!(keeper.origin(), PluginOrigin::Library);
+        assert_eq!(keeper.flavor(), PluginFormat::Native);
+        assert!(
+            report.issues.iter().any(|(where_, why)| {
+                *where_ == fx.plugins_dir.join("dual") && why.contains("duplicate")
+            }),
+            "the dropped copy is reported: {:?}",
+            report.issues
+        );
+    }
 }

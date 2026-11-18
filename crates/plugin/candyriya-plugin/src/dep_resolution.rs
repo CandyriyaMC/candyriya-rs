@@ -564,6 +564,7 @@ fn resolve_inner(plugins: Vec<LibraryPlugin>) -> Result<Resolution, PluginError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instance::PluginFormat;
     use crate::manifest::PluginManifest;
     use std::path::PathBuf;
 
@@ -608,6 +609,7 @@ mod tests {
             manifest,
             origin,
             "test record, no wasm".to_owned(),
+            PluginFormat::Wasm,
         )
     }
 
