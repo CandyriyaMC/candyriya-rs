@@ -68,7 +68,7 @@ toml = "1"
 uuid = { version = "1", features = ["v4", "v3", "serde"] }
 hmac = "0.12"
 sha1 = "0.10"
-reqwest = { version = "0.12" }
+reqwest = { version = "0.13" }
 sha2 = "0.10"
 md5 = "0.8"
 # pure safe-Rust backend only (miniz_oxide); never libz/zlib/zlib-sys
