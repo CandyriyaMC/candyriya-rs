@@ -8,6 +8,10 @@
 //!   A [`ReloadFn`](crate::ReloadFn) can be wired in with
 //!   [`CommandRegistry::with_reload`] — the cli hands over the real reload;
 //!   without one `/candyriya reload` reports that reload is not wired.
+//!   A [`PluginViewPrefix`](crate::PluginViewPrefix) can be wired in with
+//!   [`CommandRegistry::with_plugin_view`] the same way — the cli hands
+//!   over the plugin control surface; without one every `/candyriya plugin`
+//!   subcommand reports that plugin control is not wired.
 //! - [`CommandRegistry::register`] validates and attaches every built-in
 //!   command to a [`Dispatcher`] as one atomic batch, then attaches the
 //!   internal pre-dispatch hook. A failure leaves the dispatcher tree
@@ -22,6 +26,7 @@ use crate::commands::{CandyriyaCommand, GlistCommand, SendCommand, StaticHidden}
 use crate::dispatcher::Dispatcher;
 use crate::effects::ReloadFn;
 use crate::error::CommandError;
+use crate::plugin::PluginViewPrefix;
 use crate::state::CommandState;
 
 /// Shared registry for every built-in command.
@@ -33,6 +38,7 @@ pub struct CommandRegistry {
     state: CommandState,
     shutdown: crate::ShutdownHandle,
     reload: Option<ReloadFn>,
+    plugin_view: Option<PluginViewPrefix>,
 }
 
 impl CommandRegistry {
@@ -45,6 +51,7 @@ impl CommandRegistry {
             state,
             shutdown,
             reload: None,
+            plugin_view: None,
         }
     }
 
@@ -56,6 +63,18 @@ impl CommandRegistry {
     #[must_use]
     pub fn with_reload(mut self, reload: ReloadFn) -> Self {
         self.reload = Some(reload);
+        self
+    }
+
+    /// Wires the plugin control surface `/candyriya plugin` runs through.
+    ///
+    /// The handle is the composition root's to build (and to drop): the
+    /// command layer only parses, gates and renders. Without one, every
+    /// `/candyriya plugin` subcommand answers that plugin control is not
+    /// wired in this build.
+    #[must_use]
+    pub fn with_plugin_view(mut self, plugin_view: PluginViewPrefix) -> Self {
+        self.plugin_view = Some(plugin_view);
         self
     }
 
@@ -74,6 +93,7 @@ impl CommandRegistry {
                 self.state.clone(),
                 self.shutdown.clone(),
                 self.reload.clone(),
+                self.plugin_view.clone(),
             )),
         ]
     }
