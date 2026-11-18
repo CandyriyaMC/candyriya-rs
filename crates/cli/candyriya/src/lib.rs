@@ -1042,7 +1042,7 @@ async fn run_async(
     // one trait-object view, shared by the command state and the console
     // unit (ps --watch frames)
     let directory: Arc<dyn candyriya_command::NetworkDirectory> = directory;
-    let effects = Arc::new(CliEffects::new(use_ansi));
+    let effects = Arc::new(CliEffects::new(use_ansi, Arc::clone(&proxy_state)));
     let console_locales = locales.clone();
     let console_directory = Arc::clone(&directory);
     let console_watch = ps_watch.clone();
