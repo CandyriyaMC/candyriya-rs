@@ -19,4 +19,4 @@ pub use export_names::{
 };
 pub use handshake::{HandshakeError, validate_handshake, validate_init_output};
 pub use instance::{LibraryLoader, LoaderError, OpenFlags};
-pub use plugin_init::{InitializedPlugin, InitError, PluginIdentity, initialize};
+pub use plugin_init::{InitError, InitializedPlugin, PluginIdentity, initialize};
