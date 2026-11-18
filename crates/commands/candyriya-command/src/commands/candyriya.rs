@@ -1,6 +1,8 @@
 //! `/candyriya` — the proxy admin root.
 //!
 //! Subcommands: `info`, `servers`, `switch`, `end`, `reload`, `ps`, `tree`.
+//! The watch variant of `ps` is console-only; the REPL runs it after
+//! dispatch through the shared `PsWatchHandle` latch.
 //! The root itself carries no permission; each subcommand carries its own
 //! gate, so an unauthorized source cannot even parse the subtree it may not use.
 //!
@@ -24,7 +26,7 @@ use candyriya_i18n::I18n;
 use candyriya_utils::format_uptime;
 
 use crate::command::{CandyCommand, argument_with_suggestions};
-use crate::source::CommandSource;
+use crate::source::{CommandSource, SourceKind};
 use crate::state::CommandState;
 use crate::text::escape_minimessage;
 
@@ -181,6 +183,21 @@ fn handle_ps(state: &CommandState, source: &CommandSource, full: bool) -> i32 {
     1
 }
 
+/// `/candyriya ps --watch [--full]` — a console-only live view.
+///
+/// The handler cannot repaint the screen itself (the REPL owns stdin and
+/// the terminal), so it records the request in the shared latch and
+/// returns; the REPL takes the latch after dispatch and paints. Non-console
+/// sources get one ordinary ps frame instead — the latch is console-only
+/// by construction.
+fn handle_ps_watch(state: &CommandState, source: &CommandSource, full: bool) -> i32 {
+    if source.source_kind() != SourceKind::Console {
+        return handle_ps(state, source, full);
+    }
+    state.watch.request(full);
+    1
+}
+
 fn handle_tree(state: &CommandState, source: &CommandSource) -> i32 {
     let t = state.locales.pick(source);
     let snapshot = state.directory.ps_snapshot();
@@ -227,6 +244,9 @@ impl CandyCommand for CandyriyaCommand {
         let reload_plugins_parts = parts.clone();
         let ps_parts = parts.clone();
         let ps_full_parts = parts.clone();
+        let ps_watch_parts = parts.clone();
+        let ps_watch_full_parts = parts.clone();
+        let ps_full_watch_parts = parts.clone();
         let tree_parts = parts.clone();
         let end_shutdown = self.shutdown.clone();
         let reload_all = self.reload.clone();
@@ -291,11 +311,28 @@ impl CandyCommand for CandyriyaCommand {
                 .executes(move |ctx: &BrigadierContext<CommandSource>| {
                     handle_ps(&ps_parts, &ctx.source, false)
                 })
-                .then(literal::<CommandSource>("--full").executes(
-                    move |ctx: &BrigadierContext<CommandSource>| {
-                        handle_ps(&ps_full_parts, &ctx.source, true)
-                    },
-                )),
+                .then(
+                    literal::<CommandSource>("--full")
+                        .executes(move |ctx: &BrigadierContext<CommandSource>| {
+                            handle_ps(&ps_full_parts, &ctx.source, true)
+                        })
+                        .then(literal::<CommandSource>("--watch").executes(
+                            move |ctx: &BrigadierContext<CommandSource>| {
+                                handle_ps_watch(&ps_full_watch_parts, &ctx.source, true)
+                            },
+                        )),
+                )
+                .then(
+                    literal::<CommandSource>("--watch")
+                        .executes(move |ctx: &BrigadierContext<CommandSource>| {
+                            handle_ps_watch(&ps_watch_parts, &ctx.source, false)
+                        })
+                        .then(literal::<CommandSource>("--full").executes(
+                            move |ctx: &BrigadierContext<CommandSource>| {
+                                handle_ps_watch(&ps_watch_full_parts, &ctx.source, true)
+                            },
+                        )),
+                ),
         )
         .then(
             literal::<CommandSource>("tree")

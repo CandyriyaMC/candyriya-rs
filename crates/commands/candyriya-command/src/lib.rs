@@ -77,6 +77,10 @@ mod state;
 mod text;
 mod tree;
 
+// re-exported as the one public entry to the MiniMessage ps renderer; the
+// console REPL repaints through the exact same code path as the command
+pub use ps::render_ps;
+
 pub mod commands;
 
 pub use azalea_brigadier::builder::argument_builder::ArgumentBuilder;
@@ -86,8 +90,8 @@ pub use commands::{GlistCommand, GlistReport, GlistServerEntry, SendCommand, Sen
 pub use context::CommandContext;
 pub use dispatcher::{Dispatcher, build};
 pub use effects::{
-    OutputSender, PluginPhaseReport, ProxyEffects, ReloadFn, ReloadReport, ReloadScope,
-    ShutdownHandle, SwitchRequest, SwitchResult,
+    OutputSender, PluginPhaseReport, ProxyEffects, PsWatchHandle, ReloadFn, ReloadReport,
+    ReloadScope, ShutdownHandle, SwitchRequest, SwitchResult,
 };
 pub use error::CommandError;
 pub use locales::Locales;

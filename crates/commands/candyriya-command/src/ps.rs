@@ -478,7 +478,11 @@ fn summary_line(t: &I18n, snapshot: &PsSnapshot) -> String {
 }
 
 /// Render `ps` (or `ps --full`) to MiniMessage lines.
-pub(crate) fn render_ps(snapshot: &PsSnapshot, full: bool, now: Instant, t: &I18n) -> Vec<String> {
+///
+/// The full view and the aggregate come out of the same code path; the
+/// console REPL repaints its frames through this exact function so a
+/// `ps --watch` frame is always the ordinary `ps` frame.
+pub fn render_ps(snapshot: &PsSnapshot, full: bool, now: Instant, t: &I18n) -> Vec<String> {
     let conns = conn_map(&snapshot.conns);
 
     let mut rows: Vec<Row> = Vec::with_capacity(snapshot.units.len().saturating_add(1));

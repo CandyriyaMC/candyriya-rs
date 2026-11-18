@@ -17,8 +17,8 @@ use candyriya_command::{
     BackendSnapshot, BackendState, CommandError, CommandRegistry, CommandSource, CommandState,
     ConnectionStats, Dispatcher, Locales, NetworkDirectory, OnlinePlayer, PlayerRef,
     PluginPhaseReport, ProxyEffects, ProxySnapshot, PsConn, PsExitStatus, PsSnapshot, PsUnit,
-    PsUnitKind, PsUnitState, ReloadReport, ReloadScope, ServerInfo, ShutdownHandle, SwitchRequest,
-    SwitchResult,
+    PsUnitKind, PsUnitState, PsWatchHandle, ReloadReport, ReloadScope, ServerInfo, ShutdownHandle,
+    SwitchRequest, SwitchResult,
 };
 use candyriya_i18n::I18n;
 use candyriya_permissions::{Grant, PermissionNode};
@@ -305,11 +305,18 @@ struct Fixture {
     dispatcher: Dispatcher,
     capture: Arc<Capture>,
     shutdown: ShutdownHandle,
+    watch: PsWatchHandle,
 }
 
 impl Fixture {
     fn lines(&self) -> Vec<String> {
         self.capture.lines()
+    }
+
+    /// Take the pending ps watch request, if any; mirrors what the console
+    /// REPL does after dispatch.
+    fn take_watch(&self) -> Option<bool> {
+        self.watch.take()
     }
 }
 
@@ -328,6 +335,7 @@ fn fixture_with_reload_fn(
 ) -> Fixture {
     let capture = Arc::new(capture);
     let shutdown = ShutdownHandle::new();
+    let watch = PsWatchHandle::new();
     let locales = Locales::new(
         I18n::new("en").expect("embedded en locale"),
         I18n::new("ex_girl").expect("embedded ex_girl locale"),
@@ -337,6 +345,7 @@ fn fixture_with_reload_fn(
         locales,
         directory: Arc::new(directory),
         effects,
+        watch: watch.clone(),
     };
     let registry = CommandRegistry::new(state, shutdown.clone());
     let registry = match reload {
@@ -348,6 +357,7 @@ fn fixture_with_reload_fn(
         dispatcher,
         capture,
         shutdown,
+        watch,
     }
 }
 
@@ -1356,6 +1366,78 @@ fn ps_full_is_the_same_table_with_every_row() {
 }
 
 #[test]
+fn ps_watch_sets_the_latch_without_printing() {
+    for command in [
+        "/candyriya ps --watch",
+        "/candyriya ps --watch --full",
+        "/candyriya ps --full --watch",
+    ] {
+        let fixture = standard();
+        let code = fixture
+            .dispatcher
+            .execute(command, CommandSource::console())
+            .expect("ps --watch executes");
+        assert_eq!(code, 1);
+        assert!(
+            fixture.lines().is_empty(),
+            "ps --watch must not paint before the REPL takes the latch: {command}"
+        );
+        let watch = fixture.take_watch();
+        assert!(watch.is_some(), "latch must be set by {command}");
+        assert_eq!(
+            watch,
+            Some(command.contains("--full")),
+            "view selection carried by {command}"
+        );
+        assert_eq!(
+            fixture.take_watch(),
+            None,
+            "the latch is consumed once (the REPL takes it after dispatch)"
+        );
+    }
+}
+
+#[test]
+fn ps_watch_from_a_non_console_source_renders_one_frame_without_latching() {
+    let fixture = standard();
+    let player = player_with(&["candyriya.command.ps"]);
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya ps --watch", player)
+        .expect("granted player may run ps --watch");
+    assert_eq!(code, 1);
+    // no watch latch: a chat source gets one ordinary frame, like /candyriya ps
+    assert_eq!(fixture.take_watch(), None);
+    let joined = fixture.lines().join("\n");
+    assert!(
+        joined.contains("PID"),
+        "ordinary frame for a player: {joined}"
+    );
+}
+
+#[test]
+fn ps_watch_is_denied_for_a_deny_all_player() {
+    let fixture = standard();
+    let err = fixture
+        .dispatcher
+        .execute("/candyriya ps --watch", deny_all_player())
+        .expect_err("deny-all player cannot run ps --watch");
+    assert!(matches!(err, CommandError::Brigadier(_)));
+    assert_eq!(fixture.take_watch(), None);
+}
+
+#[test]
+fn ordinary_ps_does_not_set_the_watch_latch() {
+    let fixture = standard();
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya ps --full", CommandSource::console())
+        .expect("ps --full executes");
+    assert_eq!(code, 1);
+    assert_eq!(fixture.take_watch(), None);
+}
+
+#[test]
 fn tree_renders_box_drawing_guides() {
     let fixture = standard();
     let code = fixture
@@ -1442,7 +1524,12 @@ fn tree_marks_parked_and_failed_units() {
 #[test]
 fn ps_denied_for_deny_all_player() {
     let fixture = standard();
-    for input in ["/candyriya ps", "/candyriya ps --full", "/candyriya tree"] {
+    for input in [
+        "/candyriya ps",
+        "/candyriya ps --full",
+        "/candyriya ps --watch",
+        "/candyriya tree",
+    ] {
         let err = fixture
             .dispatcher
             .execute(input, deny_all_player())

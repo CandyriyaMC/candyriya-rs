@@ -92,6 +92,8 @@ is not a valid command. The nodes are:
 - `candyriya.command.switch` - `/candyriya switch <player> <server>`
 - `candyriya.command.end` - `/candyriya end`
 - `candyriya.command.reload` - `/candyriya reload [config|plugins]`
+- `candyriya.command.ps` - `/candyriya ps [--full] [--watch]`
+- `candyriya.command.tree` - `/candyriya tree`
 
 Because the check lives on the tree nodes themselves, a source without the
 grant cannot even parse the subtree: to an unauthorized player the gated
@@ -221,6 +223,56 @@ candyriya > /candyriya reload config
 config reloaded
 ```
 
+### `/candyriya ps [--full] [--watch]`
+
+Prints the supervision tree as a process-style table:
+
+```text
+PID PPID NAME STATE RESTARTS UPTIME RX TX LAST EXIT
+```
+
+The default view collapses connection units into one `conn × N` row
+carrying the count, the byte sums, the worst state present, the restart
+sum and the oldest uptime; every other unit gets its own row. `--full`
+expands every unit to its own row. Single-letter states: `R` running,
+`F` frozen (park gate closed — a cooperative freeze, TCP backpressure
+does the rest), `Z` zombie, `t` restarting, `!` failed-terminal. `RX` and
+`TX` are the connection byte counters; `UPTIME` is the unit's own run
+time. There is no CPU or RSS column and never will be — the tree does
+not measure them. The output ends with a summary line computed from the
+tree's own counters (`units: N (conn: M, plugins: K) · zombies: A
+(stuck: B)`), followed by a one-line state legend.
+
+`--watch` is console-only: it repaints the same table once per second
+until any line is read (press Enter) or Ctrl-C is pressed, then prints
+one final ordinary frame, so the screen ends with the full table. The
+line that ends the watch is swallowed, not executed — anything typed
+during the watch (including `/candyriya end`) is dropped, so exit the
+watch first, then run the command. On a
+terminal each repaint homes the cursor and erases below the previous
+frame, after a single clear at watch entry; with `NO_COLOR`/plain
+output (stdout piped) the frames are printed newline-separated and
+carry no escape bytes. Other sources (players, backends) see the
+ordinary one-shot table instead.
+
+```shell
+candyriya > /candyriya ps --watch
+```
+
+Requires `candyriya.command.ps`.
+
+### `/candyriya tree`
+
+Prints the same supervision tree as an indented box-drawing tree
+(`├──` / `└──` guides, `│` continuation stems), one line per unit with
+its kind as a caption, plus a `frozen` marker for parked bodies and the
+last exit when present. Units whose parent is not in the snapshot are
+promoted to top level rather than dropped. There are no columns and no
+summary line — this is the pure shape of the tree, useful when the
+table's rows are not the question.
+
+Requires `candyriya.command.tree`.
+
 ### `/server <server>`
 
 Switches the invoking player to `<server>`. The backend must be configured;
@@ -322,7 +374,8 @@ an empty roster, not placeholder output.
 
 **"command not registered" / unknown command.** Only the commands on this
 page exist. Check the spelling; `/candyriya` requires a subcommand
-(`info`, `servers`, `switch`, `end`) - a bare `/candyriya` does not parse.
+(`info`, `servers`, `switch`, `end`, `reload`, `ps`, `tree`) - a bare
+`/candyriya` does not parse.
 In the console you get one red `command failed: ...` line. In chat the
 message is forwarded to the backend, which answers with its own
 unknown-command response - so an "unknown command" from the backend that
@@ -334,6 +387,7 @@ registered (or, today, that the chat dispatch is not wired yet - see
 Players start with no grants; the console's `*` is its own. Grant the
 relevant node - `candyriya.command.info`, `candyriya.command.servers`,
 `candyriya.command.switch`, `candyriya.command.end`, `candyriya.command.reload`,
+`candyriya.command.ps`, `candyriya.command.tree`,
 or the wildcard
 `candyriya.command.*` (or `*`) - in the `[permissions]` table of
 `candyriya.toml` and reload. A source without the grant cannot even parse

@@ -22,6 +22,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::source::{CommandSource, PlayerRef};
@@ -197,5 +198,79 @@ impl fmt::Debug for ShutdownHandle {
         f.debug_struct("ShutdownHandle")
             .field("requested", &self.is_requested())
             .finish()
+    }
+}
+
+/// Shared one-shot latch behind `/candyriya ps --watch`.
+///
+/// The `ps --watch` handler cannot run the watch itself: the console REPL
+/// owns the terminal and the pacing, so the handler only records the
+/// request here and returns. The REPL takes the latch after the command
+/// finishes and enters watch mode; requests from non-console sources never
+/// reach this latch (those render one ordinary ps frame instead). One slot,
+/// last write wins, [`Self::take`] clears it, so a stale request cannot
+/// fire twice. Bounded: the watch itself repaints on a fixed cadence, and
+/// nothing here accumulates.
+#[derive(Clone, Default)]
+pub struct PsWatchHandle {
+    requested: Arc<Mutex<Option<bool>>>,
+}
+
+impl PsWatchHandle {
+    /// A fresh latch in the not-requested state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a watch request; `full` selects the `--full` view.
+    pub fn request(&self, full: bool) {
+        *self.lock() = Some(full);
+    }
+
+    /// Take (and clear) the pending request, if any. The returned `true`
+    /// means the `--full` view was asked for; the REPL enters watch mode
+    /// and the latch is empty again.
+    pub fn take(&self) -> Option<bool> {
+        self.lock().take()
+    }
+
+    /// Lock the slot, riding through a poisoned mutex: the value inside is
+    /// a plain `Option<bool>` written without panics, so a poison can only
+    /// mean another thread panicked while holding it, and the data is fine.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<bool>> {
+        self.requested
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl fmt::Debug for PsWatchHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PsWatchHandle")
+            .field("requested", &self.lock().is_some())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_latch_roundtrip_takes_and_clears() {
+        let handle = PsWatchHandle::new();
+        assert_eq!(handle.take(), None);
+        handle.request(false);
+        assert_eq!(handle.take(), Some(false));
+        assert_eq!(handle.take(), None, "took latch must not fire twice");
+    }
+
+    #[test]
+    fn watch_latch_is_shared_and_last_write_wins() {
+        let first = PsWatchHandle::new();
+        let second = first.clone();
+        first.request(false);
+        second.request(true);
+        assert_eq!(first.take(), Some(true));
     }
 }

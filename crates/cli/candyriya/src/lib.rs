@@ -991,6 +991,7 @@ async fn run_async(
     // ---- command tree: the registry itself is built after the plugin set
     // exists, so `/candyriya reload` can run both phases
     let shutdown = ShutdownHandle::new();
+    let ps_watch = candyriya_command::PsWatchHandle::new();
     let directory = Arc::new(CliDirectory::new(
         Arc::clone(&proxy_state),
         TreeLinks {
@@ -1003,11 +1004,19 @@ async fn run_async(
         log_level.to_string(),
         started,
     ));
+    // one trait-object view, shared by the command state and the console
+    // unit (ps --watch frames)
+    let directory: Arc<dyn candyriya_command::NetworkDirectory> = directory;
     let effects = Arc::new(CliEffects::new(use_ansi));
+    let console_locales = locales.clone();
+    let console_directory = Arc::clone(&directory);
+    let console_watch = ps_watch.clone();
+    let shutdown_ctrlc = shutdown.clone();
     let command_state = CommandState {
         locales: locales.clone(),
-        directory: directory as Arc<dyn candyriya_command::NetworkDirectory>,
+        directory,
         effects: effects.clone() as Arc<dyn candyriya_command::ProxyEffects>,
+        watch: ps_watch,
     };
 
     // ---- hot reload: the same machinery, on demand
@@ -1168,12 +1177,17 @@ async fn run_async(
 
     // ---- interactive console REPL (only when stdin is a TTY)
     let console_spec = repl::console_spec(
-        service.clone(),
         Arc::clone(&dispatcher),
         effects.clone(),
-        shutdown,
-        shutdown_tx.clone(),
-        use_ansi,
+        repl::ConsoleWiring {
+            service: service.clone(),
+            shutdown_handle: shutdown,
+            shutdown_tx: shutdown_tx.clone(),
+            use_ansi,
+            directory: console_directory,
+            locales: console_locales,
+            watch: console_watch,
+        },
     );
     match tree.spawn_unit(Pid::INIT, console_spec) {
         Ok(pid) => debug!(pid = %pid, "console unit spawned"),
@@ -1213,6 +1227,9 @@ async fn run_async(
                     Ok(()) => info!("Ctrl-C received; shutting down"),
                     Err(error) => warn!(%error, "failed to listen for Ctrl-C; continuing until told otherwise"),
                 }
+                // flip the shared console flag too, so the REPL's watch
+                // loop sees the shutdown the same way /candyriya end is seen
+                let _ = shutdown_ctrlc.trigger();
                 break None;
             }
             result = console_rx.changed() => {

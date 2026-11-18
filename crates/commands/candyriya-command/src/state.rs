@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::effects::ProxyEffects;
+use crate::effects::{ProxyEffects, PsWatchHandle};
 use crate::locales::Locales;
 use crate::snapshot::ProxySnapshot;
 
@@ -119,4 +119,7 @@ pub struct CommandState {
     pub directory: Arc<dyn NetworkDirectory>,
     /// Side effects the commands trigger — output and player moves.
     pub effects: Arc<dyn ProxyEffects>,
+    /// One-shot latch behind `/candyriya ps --watch`; the console REPL
+    /// takes it after dispatch and enters watch mode.
+    pub watch: PsWatchHandle,
 }

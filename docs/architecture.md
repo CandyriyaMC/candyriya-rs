@@ -527,10 +527,16 @@ UPTIME RX TX LAST EXIT`. `RX`/`TX` are the connection byte counters;
 `UPTIME` is the unit's own run time. There is no CPU or RSS column and
 never will be — the tree does not measure them. The output ends with a
 summary line (`units: N (conn: M, plugins: K) · zombies: A (stuck: B)`)
-computed from the tree's own counters. A `--watch` mode does not exist
-yet. All user-facing strings in the commands go through the embedded
-locales, en and ex_girl; the rendering itself is MiniMessage and honors
-the console's color mode.
+computed from the tree's own counters. `/candyriya ps --watch` repaints
+the same table every second while the console is open; any line read
+(Enter) or Ctrl-C ends the watch, and one final ordinary frame is
+printed on exit. On a terminal each repaint homes the cursor and erases
+below it (the screen is cleared once, at watch entry); with
+`NO_COLOR`/plain output the frames are printed newline-separated and
+carry no escape bytes. The watch is console-only — other sources see
+the ordinary one-shot table. All user-facing strings in the commands go
+through the embedded locales, en and ex_girl; the rendering itself is
+MiniMessage and honors the console's color mode.
 
 ## A login end to end
 

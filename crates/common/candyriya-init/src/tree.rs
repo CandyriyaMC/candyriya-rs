@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 
+use candyriya_metrics::names;
 use candyriya_scheduler::{TaskId, TaskService};
 
 use crate::error::InitError;
@@ -251,8 +252,8 @@ impl TreeState {
     }
 
     fn emit_zombie_metrics(&self) {
-        metrics::gauge!("candyriya_zombies").set(self.zombies_current as f64);
-        metrics::gauge!("candyriya_zombies_stuck").set(self.stuck_count(Instant::now()) as f64);
+        metrics::gauge!(names::NAME_ZOMBIES).set(self.zombies_current as f64);
+        metrics::gauge!(names::NAME_ZOMBIES_STUCK).set(self.stuck_count(Instant::now()) as f64);
     }
 
     /// Resolve a node's call-relevant state into an owned view (or `None`).
@@ -390,7 +391,7 @@ impl TreeState {
 
         self.reaps_total += 1;
         self.zombies_current = self.zombies_current.saturating_sub(1);
-        metrics::counter!("candyriya_zombie_reaps_total").increment(1);
+        metrics::counter!(names::NAME_ZOMBIE_REAPS_TOTAL).increment(1);
 
         let recent_attempts = node
             .attempts
@@ -415,7 +416,7 @@ impl TreeState {
                 node.last_exit = Some(status);
                 node.exited_at = Some(exited_at);
                 self.failed_terminal_total += 1;
-                metrics::counter!("candyriya_services_failed_terminal_total").increment(1);
+                metrics::counter!(names::NAME_SERVICES_FAILED_TERMINAL_TOTAL).increment(1);
                 self.emit_zombie_metrics();
                 Ok(ReapOutcome::FailedTerminal { record })
             }
@@ -475,7 +476,7 @@ impl TreeState {
             return false;
         };
         self.restarts_total += 1;
-        metrics::counter!("candyriya_services_restarts_total").increment(1);
+        metrics::counter!(names::NAME_SERVICES_RESTARTS_TOTAL).increment(1);
         let (mailbox, body) = build_run(wiring, capacity, factory, pid);
         let service_id = crate::runner::spawn_wrapper(
             service,

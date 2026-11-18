@@ -48,6 +48,16 @@ impl Locales {
         }
     }
 
+    /// Borrow the locale the console renders with.
+    ///
+    /// The console source carries no locale override, so console output
+    /// always uses the English handle; this exposes the same binding the
+    /// dispatcher uses, for callers that render outside a dispatched
+    /// command (the console REPL repainting `ps --watch` frames).
+    pub fn console(&self) -> &I18n {
+        &self.en
+    }
+
     /// Re-read both locale handles from disk atomically.
     ///
     /// `/candyriya reload` calls this so locale overrides added or edited
