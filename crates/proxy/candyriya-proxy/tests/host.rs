@@ -143,6 +143,8 @@ fn spawn_fixture(seed: Option<RouterStore>, plugins: &[(&str, &str, Vec<u8>)]) -
     // the plugins the host unit's dispatcher fans out into; an empty
     // set is an honest state for everything except callApi
     let plugins_dir = tempfile::tempdir().expect("plugins tempdir");
+    std::fs::create_dir_all(plugins_dir.path().join("libraries"))
+        .expect("libraries dir for the fixture loads");
     for (id, manifest, wasm) in plugins {
         let dir = plugins_dir.path().join(id);
         std::fs::create_dir_all(&dir).expect("plugin dir");

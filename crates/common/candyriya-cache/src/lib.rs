@@ -26,7 +26,7 @@
 //! supervised `cache` unit through the tree ([`cache_spec`],
 //! [`cache_call`], [`CacheMsg`]). The unit serves the core namespace only
 //! and validates keys with the same rules cachegirl enforces — see the
-//! [`mod@unit`] module for the protocol and its semantics.
+//! `unit` module for the protocol and its semantics.
 //!
 //! `<plugin>` is a validated plugin id (`[a-z0-9_.-]{1,32}`, no reserved
 //! device names) — see [`validate_plugin_id`]. One namespace per plugin
