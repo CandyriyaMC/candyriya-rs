@@ -50,10 +50,12 @@ impl PluginState {
 /// returns `None` for them. Records are cheap to keep around regardless of
 /// state, so discovery problems never take a plugin silently off the map.
 ///
-/// The `flavor` records which format won discovery — additive information
-/// for the phase-2 native path. Discovery never instantiates a native
-/// plugin; a native-flavor record is a `Failed` record whose reason names
-/// the library on disk. The wasm lifecycle does not consult the field.
+/// The `flavor` records which format won discovery. When the loader was
+/// built with a plugin-controller registry, the native flavor is brought
+/// up for real at load time (the record then carries a live instance and
+/// reports [`PluginState::Loaded`]); without one, a native-flavor record
+/// is a `Failed` record whose reason says bring-up is not wired into the
+/// loader. The wasm lifecycle does not consult the field.
 pub struct LibraryPlugin {
     dir: PathBuf,
     manifest: PluginManifest,
@@ -136,11 +138,16 @@ impl LibraryPlugin {
 
     /// Which format won discovery for this record.
     ///
-    /// [`PluginFormat::Wasm`] is the only flavor this loader instantiates;
-    /// [`PluginFormat::Native`] records are detection-only — a `Failed`
-    /// record whose reason names the library on disk, held for the phase-2
-    /// native bring-up path. When both a wasm module and a native library
-    /// sit next to `plugin.toml`, the native flavor wins (OQ13).
+    /// [`PluginFormat::Wasm`] is instantiated through the wasm path.
+    /// [`PluginFormat::Native`] is brought up at load time when the
+    /// loader carries a plugin-controller registry (see
+    /// [`crate::PluginLoader::with_plugin_controller`]) — a live instance
+    /// reporting [`PluginState::Loaded`] on success, or a `Failed` record
+    /// naming the native step that refused on failure. Without a
+    /// controller the native flavor is detection-only: a `Failed` record
+    /// whose reason says bring-up is not wired into the loader. When both
+    /// a wasm module and a native library sit next to `plugin.toml`, the
+    /// native flavor wins (OQ13).
     pub fn flavor(&self) -> PluginFormat {
         self.flavor
     }
@@ -150,7 +157,8 @@ impl LibraryPlugin {
         &self.state
     }
 
-    /// The underlying wasm instance, if this plugin is running.
+    /// The underlying instance, if this plugin is running (wasm or
+    /// native — consult [`LibraryPlugin::flavor`] to tell which).
     pub fn instance(&self) -> Option<&PluginInstance> {
         self.instance.as_ref()
     }

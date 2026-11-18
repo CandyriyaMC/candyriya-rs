@@ -34,18 +34,41 @@
 //! (Linux, Android) — the preferred extension lives in exactly one cfg
 //! block (`PREFERRED_NATIVE_EXT`), the fallback list in
 //! [`native_library_names`]. Detection is a stat only: the library is never
-//! opened, mapped or executed here, no thread is spawned and no handshake
-//! is attempted. A candidate that exists but is not a regular file is not
-//! a candidate at all.
+//! opened, mapped or executed during discovery, no thread is spawned and no
+//! handshake is attempted. A candidate that exists but is not a regular file
+//! is not a candidate at all.
 //!
 //! A plugin shipping both a wasm module and a native library gets the
 //! *native* flavor (OQ13): a warning naming the plugin id and both paths is
 //! logged, the wasm module is left untouched on disk, and the record
-//! reports the native flavor. Detection never instantiates a native
-//! plugin — the phase-2 bring-up path does that — so a native-flavor
-//! record surfaces as a `Failed` record whose reason names the library on
-//! disk, the same visible-not-silent discipline the wasm path uses. The
-//! flavor is additive information on the record; the wasm path ignores it.
+//! reports the native flavor. The flavor is additive information on the
+//! record; the wasm path ignores it.
+//!
+//! # Native bring-up
+//!
+//! Discovery finds native candidates; instantiating them is a different
+//! step. When the loader was built with
+//! [`PluginLoader::with_plugin_controller`], a native candidate is brought
+//! up at load time through [`crate::PluginInstance::native`] — the same
+//! code path at boot and at `/candyriya reload plugins` (phase B re-scan):
+//! the plugin's config/cache directories and cache quotas are applied
+//! first, exactly like the wasm path, then the shared host state (instance
+//! slots, services, host IPC, locales, health cells) is built the same way,
+//! a [`crate::PluginDescriptor`] native descriptor is stamped from the
+//! manifest, and the library is mapped, handshaken, `on_load`d and
+//! `on_enable`d on the calling thread. On success the record carries a
+//! live instance and reports `Loaded` with [`crate::PluginFormat::Native`];
+//! the controller registry walks `DISCOVERED` → … → `RUNNING`. Any refusal
+//! — open, handshake, `on_load`, `on_enable` or the registry itself — lands
+//! a `Failed` record whose reason names the native step that refused, and
+//! the registry walks the record into terminal `UNLOADED` with the reason
+//! preserved. Never a silent drop, never a pretend success.
+//!
+//! Without a controller installed, native-flavor records stay exactly what
+//! they were before bring-up existed: a `Failed` record whose reason says
+//! native bring-up is not wired into this loader. No directories are
+//! created, nothing is mapped, no registry record appears — an honest
+//! refusal, never a half-wired pretend success.
 //!
 //! # Failure policy
 //!
@@ -56,9 +79,11 @@
 //! A plugin whose wasm compiles but fails preparation (missing `plugin_main`
 //! export, uncreatable data directory, cache quota rejected) is recorded as
 //! a [`LibraryPlugin`] in [`PluginState::Failed`] — visible, not silent — and
-//! its reason is also listed in `issues`. A native-only candidate follows
-//! the same rule: it is a `Failed` record with a reason naming its library,
-//! never a silently dropped directory.
+//! its reason is also listed in `issues`. A native candidate that refuses
+//! bring-up (or never gets the chance, because no controller registry is
+//! installed) follows the same rule: a `Failed` record whose reason names
+//! the library and the step that refused, never a silently dropped
+//! directory.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -68,7 +93,7 @@ use candyriya_cache::CacheManager;
 use crate::health::PluginHealthSet;
 use crate::host_ipc::HostIpc;
 use crate::host_state::HostState;
-use crate::instance::{PluginFormat, PluginInstance};
+use crate::instance::{PluginDescriptor, PluginFormat, PluginInstance};
 use crate::library_plugin::{LibraryPlugin, PluginOrigin};
 use crate::limits::{InstanceSlots, Limits};
 use crate::locales::SharedLocales;
@@ -116,7 +141,11 @@ pub struct LoadReport {
 /// resolve against a private embedded-defaults pair and plugin locale
 /// files are never registered. The per-plugin health registry goes
 /// through [`PluginLoader::with_plugin_health`]; without it the
-/// supervision units never observe an unrecoverable plugin.
+/// supervision units never observe an unrecoverable plugin. The
+/// process-wide plugin-controller registry — the one the native lifecycle
+/// story tracks native plugins in — goes through
+/// [`PluginLoader::with_plugin_controller`]; without it, native-flavor
+/// candidates stay detection-only `Failed` records (see the module docs).
 pub struct PluginLoader<'a> {
     plugins_dir: PathBuf,
     libraries_dir: PathBuf,
@@ -126,6 +155,10 @@ pub struct PluginLoader<'a> {
     locales: Option<SharedLocales>,
     host_ipc: HostIpc,
     health: Option<PluginHealthSet>,
+    /// The process-wide plugin-controller registry, shared with the rest
+    /// of the composition root. `None` means this loader discovers
+    /// native candidates but never brings them up.
+    controller: Option<Arc<candyriya_plugin_controller::PluginRegistry>>,
 }
 
 impl<'a> PluginLoader<'a> {
@@ -150,6 +183,7 @@ impl<'a> PluginLoader<'a> {
             locales: None,
             host_ipc: HostIpc::new(),
             health: None,
+            controller: None,
         }
     }
 
@@ -202,6 +236,31 @@ impl<'a> PluginLoader<'a> {
     #[must_use]
     pub fn with_plugin_health(mut self, health: PluginHealthSet) -> Self {
         self.health = Some(health);
+        self
+    }
+
+    /// The shared plugin-controller registry this loader brings native
+    /// candidates up in.
+    ///
+    /// The composition root installs one process-wide registry (the same
+    /// one the `plugin-<id>` supervision story and the controller unit
+    /// keep); the crate root re-exports [`PluginRegistry`](crate::PluginRegistry),
+    /// so the same `Arc` clone can be shared without extra imports — the
+    /// parameter takes the type as `candyriya_plugin_controller::PluginRegistry`
+    /// by that exact path, which is the same type either way. Boot and
+    /// `/candyriya reload plugins` both run through this loader, so one
+    /// installed registry serves both.
+    ///
+    /// Without this call, a native candidate is never mapped: it is a
+    /// `Failed` record whose reason says bring-up is not wired into this
+    /// loader — same visible-not-silent semantics the wasm path uses for
+    /// its own failures, never a pretend success.
+    #[must_use]
+    pub fn with_plugin_controller(
+        mut self,
+        registry: Arc<candyriya_plugin_controller::PluginRegistry>,
+    ) -> Self {
+        self.controller = Some(registry);
         self
     }
 
@@ -458,25 +517,95 @@ impl<'a> PluginLoader<'a> {
         } = candidate;
         let id = manifest.id().to_owned();
 
-        // detection-only pass for the native flavor: no dirs are created,
-        // nothing is compiled, mapped or executed. the plugin is held as a
-        // Failed record so operators see it, same visible-not-silent
-        // discipline the wasm path uses for its own failures.
+        // the native flavor maps the library, handshakes and enables the
+        // plugin right here — the same code path at boot and at
+        // `/candyriya reload plugins` (phase B re-scan). the data dirs are
+        // applied first, exactly like the wasm path, so a native plugin
+        // that refuses bring-up still lands its directories for the
+        // record. without a controller installed the native candidate is
+        // never mapped: an honest Failed record, never a pretend success.
         if flavor == PluginFormat::Native {
             let native_path = native_path.expect("native flavor always carries its winning path");
-            let reason = match &wasm_path {
-                Some(wasm_path) => format!(
-                    "plugin `{id}` ships both a wasm module ({}) and a native library ({}); the native flavor wins (OQ13), the wasm module is left untouched and native bring-up is not wired into this loader yet",
-                    wasm_path.display(),
-                    native_path.display()
-                ),
-                None => format!(
-                    "native library `{}` discovered for plugin `{id}`; no wasm module is present and native bring-up is not wired into this loader yet (phase 2)",
-                    native_path.display()
-                ),
+            let Some(registry) = &self.controller else {
+                let reason = match &wasm_path {
+                    Some(wasm_path) => format!(
+                        "plugin `{id}` ships both a wasm module ({}) and a native library ({}); the native flavor wins (OQ13), the wasm module is left untouched and native bring-up is not wired into this loader (install one with `PluginLoader::with_plugin_controller`)",
+                        wasm_path.display(),
+                        native_path.display()
+                    ),
+                    None => format!(
+                        "native library `{}` discovered for plugin `{id}`; no wasm module is present and native bring-up is not wired into this loader (install one with `PluginLoader::with_plugin_controller`)",
+                        native_path.display()
+                    ),
+                };
+                issues.push((native_path, reason.clone()));
+                return LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Native);
             };
-            issues.push((native_path, reason.clone()));
-            return LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Native);
+            let registry = Arc::clone(registry);
+
+            // every plugin owns <data_dir>/config/<id>/ and <data_dir>/cache/<id>/;
+            // creating them is the same error discipline the wasm path gets —
+            // a directory-creation failure lands a Failed record with the reason
+            let data_root = self.cache.root().to_path_buf();
+            let config_dir = data_root.join("config").join(&id);
+            if let Err(e) = std::fs::create_dir_all(&config_dir) {
+                let reason = format!(
+                    "failed to create plugin config directory {}: {e}",
+                    config_dir.display()
+                );
+                issues.push((config_dir.clone(), reason.clone()));
+                return LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Native);
+            }
+            let cache_dir = data_root.join("cache").join(&id);
+            if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+                let reason = format!(
+                    "failed to create plugin cache directory {}: {e}",
+                    cache_dir.display()
+                );
+                issues.push((cache_dir.clone(), reason.clone()));
+                return LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Native);
+            }
+
+            // honor the cache quotas the manifest declares, if any
+            if let Err(why) = self.apply_cache_quotas(&id, manifest.metadata()) {
+                issues.push((dir.clone(), why.clone()));
+                return LibraryPlugin::failed(dir, manifest, origin, why, PluginFormat::Native);
+            }
+
+            let mut host_state =
+                HostState::with_instance_slots(data_root, Arc::clone(instance_slots), &id)
+                    .with_services(Arc::new(self.services.clone()))
+                    .with_host_ipc(self.host_ipc.clone());
+            if let Some(locales) = &self.locales {
+                host_state = host_state.with_locales(locales.clone());
+            }
+            if let Some(health) = &self.health {
+                host_state = host_state.with_plugin_health(health.clone());
+            }
+
+            // the descriptor carries the manifest identity; the handshake
+            // checks it against what the library reports
+            let descriptor = PluginDescriptor::native(
+                &id,
+                &manifest.metadata().name,
+                &manifest.metadata().version,
+                native_path.clone(),
+            );
+            return match PluginInstance::native(descriptor, host_state, &id, &self.limits, registry)
+            {
+                Ok(instance) => {
+                    // the conviction reset rides on the host_state health
+                    // plumbing: PluginInstance::native clears the plugin's
+                    // cell at bring-up time, same discipline as the wasm
+                    // path's fresh build
+                    LibraryPlugin::new(dir, manifest, origin, instance, PluginFormat::Native)
+                }
+                Err(why) => {
+                    let reason = why.to_string();
+                    issues.push((native_path, reason.clone()));
+                    LibraryPlugin::failed(dir, manifest, origin, reason, PluginFormat::Native)
+                }
+            };
         }
         let wasm_path = wasm_path.expect("wasm flavor always carries its module path");
 
@@ -727,15 +856,20 @@ pub(crate) fn select_wasm(dir: &Path, id: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    //! flavor detection for the native candidate: stat-only, detection-only.
-    //! the dummy native libraries written here are empty files; nothing in
-    //! discovery ever opens them, so they never have to be loadable.
+    //! flavor detection and native bring-up. discovery is stat-only; the
+    //! bring-up test dlopens the real greeting cdylib and is `#[ignore]`d
+    //! by default (build it first with `cargo build --release -p greeting`).
+    //! the dummy native libraries written here are empty files — the
+    //! detection tests never open them; only the bring-up tests map a
+    //! real library (the greeting cdylib, or a deliberately bogus file
+    //! for the failure path).
     use super::*;
 
     use std::fs;
     use std::sync::Arc;
 
     use crate::library_plugin::PluginState;
+    use crate::{PluginRegistry, PluginWireState};
     use candyriya_cache::CacheManager;
     use tempfile::TempDir;
 
@@ -933,7 +1067,8 @@ mod tests {
         assert_eq!(report.plugins.len(), 1);
         let plugin = &report.plugins[0];
         assert_eq!(plugin.flavor(), PluginFormat::Native);
-        // detection-only: no instance, ever
+        // without a controller the native candidate is never brought up:
+        // no instance, no mapping, the record is Failed
         assert!(plugin.instance().is_none());
         let native = native_path.display().to_string();
         match plugin.state() {
@@ -962,8 +1097,8 @@ mod tests {
         let report = fx.load();
         assert_eq!(report.plugins.len(), 1);
 
-        // detection is side-effect-free: no config/cache dirs for a plugin
-        // this loader never prepared
+        // without a controller the native candidate is never prepared:
+        // no config/cache dirs for a plugin this loader never brought up
         assert!(!fx.cache_root.join("config").join("side-effects").exists());
         assert!(!fx.cache_root.join("cache").join("side-effects").exists());
     }
@@ -1248,6 +1383,170 @@ mod tests {
                 *where_ == fx.plugins_dir.join("dual") && why.contains("duplicate")
             }),
             "the dropped copy is reported: {:?}",
+            report.issues
+        );
+    }
+
+    /// Locate the reference cdylib for the bring-up test.
+    ///
+    /// Workspace layout: `crates/plugin/candyriya-plugin`, the target
+    /// directory is three levels up (or wherever `CARGO_TARGET_DIR`
+    /// points). Release first, debug as a fallback — same lookup the
+    /// `tests/native.rs` integration test uses.
+    fn greeting_cdylib() -> PathBuf {
+        let artifact = if cfg!(windows) {
+            "greeting.dll"
+        } else if cfg!(target_os = "macos") {
+            "libgreeting.dylib"
+        } else {
+            "libgreeting.so"
+        };
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(manifest).join("../../..").join("target"));
+        for profile in ["release", "debug"] {
+            let candidate = target_dir.join(profile).join(artifact);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        panic!(
+            "reference cdylib `{artifact}` not found under {}; build it first with `cargo build --release -p greeting`",
+            target_dir.display()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the greeting cdylib: cargo build --release -p greeting"]
+    fn native_plugin_brings_up_through_the_loader() {
+        let fx = Fixture::new();
+        write_manifest(&fx.plugins_dir, "greeting");
+        // the fixture layout discovery probes: <id>.<ext> for this
+        // platform, i.e. exactly what `find_native_library` looks for
+        let artifact = greeting_cdylib();
+        let preferred = native_library_names("greeting")
+            .into_iter()
+            .next()
+            .expect("at least one candidate name");
+        std::fs::copy(&artifact, fx.plugins_dir.join("greeting").join(preferred))
+            .expect("copy the cdylib into the fixture");
+
+        let registry = Arc::new(PluginRegistry::new());
+        let report = PluginLoader::new(fx.plugins_dir.clone(), fx.libraries_dir.clone(), &fx.cache)
+            .with_plugin_controller(Arc::clone(&registry))
+            .load();
+
+        assert_eq!(report.plugins.len(), 1);
+        let plugin = &report.plugins[0];
+        assert_eq!(plugin.flavor(), PluginFormat::Native);
+        assert!(plugin.state().is_loaded(), "issues: {:?}", report.issues);
+        let instance = plugin.instance().expect("a live instance");
+        assert_eq!(
+            instance.descriptor().wasm_or_native_format,
+            PluginFormat::Native
+        );
+        // the handshake completed and the plugin echoed ABI v1
+        assert_eq!(instance.descriptor().abi_version, Some(1));
+        // a clean bring-up is silent on the issues list
+        assert!(report.issues.is_empty(), "issues: {:?}", report.issues);
+        // the data dirs were created before the bring-up, like the wasm path
+        assert!(fx.cache_root.join("config").join("greeting").is_dir());
+        assert!(fx.cache_root.join("cache").join("greeting").is_dir());
+        // the shared registry walked the ladder to RUNNING
+        let record = registry.get("greeting").expect("the bring-up was tracked");
+        assert_eq!(record.state(), PluginWireState::Running);
+        assert_eq!(record.reason, None);
+    }
+
+    #[test]
+    fn native_without_a_controller_is_a_failed_record_nothing_mapped() {
+        let fx = Fixture::new();
+        write_manifest(&fx.plugins_dir, "no-controller");
+        let native_path = dummy_native_library(&fx.plugins_dir, "no-controller");
+
+        // deliberately built WITHOUT with_plugin_controller
+        let registry = Arc::new(PluginRegistry::new());
+        let report = fx.load();
+
+        assert_eq!(report.plugins.len(), 1);
+        let plugin = &report.plugins[0];
+        assert_eq!(plugin.flavor(), PluginFormat::Native);
+        assert!(plugin.instance().is_none());
+        let reason = match plugin.state() {
+            PluginState::Failed(reason) => reason.clone(),
+            other => {
+                panic!("a native candidate without a controller must be Failed, got {other:?}")
+            }
+        };
+        let native = native_path.display().to_string();
+        assert!(
+            reason.contains(&native),
+            "the reason names the library: {reason}"
+        );
+        assert!(
+            reason.contains("not wired"),
+            "the reason says bring-up is not wired: {reason}"
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|(_, why)| why.contains("not wired")),
+            "issues name the not-wired reason: {:?}",
+            report.issues
+        );
+        // nothing was mapped, no dirs were created, the registry stayed empty
+        assert!(!fx.cache_root.join("config").join("no-controller").exists());
+        assert!(!fx.cache_root.join("cache").join("no-controller").exists());
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn native_with_a_bogus_library_fails_at_open() {
+        let fx = Fixture::new();
+        write_manifest(&fx.plugins_dir, "bogus");
+        let name = native_library_names("bogus")
+            .into_iter()
+            .next()
+            .expect("at least one candidate name");
+        let bogus = fx.plugins_dir.join("bogus").join(&name);
+        // never a loadable library on any platform — the OS refuses it at the open step
+        fs::write(&bogus, b"this is not a dynamic library").expect("bogus library");
+
+        let registry = Arc::new(PluginRegistry::new());
+        let report = PluginLoader::new(fx.plugins_dir.clone(), fx.libraries_dir.clone(), &fx.cache)
+            .with_plugin_controller(Arc::clone(&registry))
+            .load();
+
+        assert_eq!(report.plugins.len(), 1);
+        let plugin = &report.plugins[0];
+        assert_eq!(plugin.flavor(), PluginFormat::Native);
+        assert!(plugin.instance().is_none());
+        let reason = match plugin.state() {
+            PluginState::Failed(reason) => reason.clone(),
+            other => panic!("a bogus library must be Failed, got {other:?}"),
+        };
+        assert!(
+            reason.contains("failed to load"),
+            "the reason names the open step that failed: {reason}"
+        );
+        assert!(!plugin.state().is_loaded());
+        // the bring-up was attempted and tracked: terminal UNLOADED with the
+        // reason preserved, never RUNNING
+        let record = registry.get("bogus").expect("the attempt was tracked");
+        assert_eq!(record.state(), PluginWireState::Unloaded);
+        assert!(record.reason.is_some());
+        // the data dirs were created before the bring-up, same as the wasm path
+        assert!(fx.cache_root.join("config").join("bogus").is_dir());
+        assert!(fx.cache_root.join("cache").join("bogus").is_dir());
+        // the refusal is listed in the issues, visible-not-silent
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|(_, why)| why.contains("failed to load")),
+            "issues name the open failure: {:?}",
             report.issues
         );
     }

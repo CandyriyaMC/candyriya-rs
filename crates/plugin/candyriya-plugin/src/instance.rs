@@ -24,8 +24,10 @@
 //! into `UNLOADING -> UNLOADED` with the failure reason preserved when any
 //! step refuses (the plugin never enters the supervision tree). After a
 //! clean [`PluginInstance::unload`] the record lands terminally in
-//! `UNLOADED` with no reason set. The ABI v1 has no generic export calls,
-//! so `call()` answers native instances with a typed refusal instead of
+//! `UNLOADED` with no reason set. A fresh build clears the plugin's health
+//! conviction up front, exactly like the wasm path — a restage is an
+//! explicit clean slate. The ABI v1 has no generic export calls, so
+//! `call()` answers native instances with a typed refusal instead of
 //! bytes.
 //!
 //! # Sandbox limits
@@ -557,6 +559,12 @@ impl PluginInstance {
             });
         }
 
+        // a fresh build clears the plugin's health conviction up front —
+        // same clean-slate discipline the wasm path applies before its
+        // spawn. a bring-up that fails afterwards is still an explicit
+        // "give it another shot".
+        let health_cell = host_state.health_cell(plugin_id);
+
         // LOADING: map + handshake. Both steps fail the same way: the
         // reason lands on the record, the record walks into UNLOADED, the
         // slot is released and the plugin never runs.
@@ -661,7 +669,6 @@ impl PluginInstance {
         let thread_name = format!("candyriya-plugin-{plugin_id}");
         let worker_plugin_id = plugin_id.to_owned();
         let native = NativePluginCore { library };
-        let health_cell = host_state.health_cell(plugin_id);
         let worker = std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
