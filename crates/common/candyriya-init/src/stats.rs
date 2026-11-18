@@ -47,7 +47,7 @@ pub struct ConnectionInfo {
 }
 
 /// Shared per-connection counters, handed to the body via the task-local
-/// [`current_conn_stats`] and to the tree through [`Init::connection_info`].
+/// [`current_conn_stats`] and to the tree through [`Init::connection_info`](crate::Init::connection_info).
 ///
 /// This is the write path for a session; ps should read
 /// [`ConnectionInfo`](crate::ConnectionInfo) instead. Cheap to clone.
