@@ -19,8 +19,12 @@ use uuid::Uuid;
 /// UUID, independent of platform, and matches what vanilla servers hand to
 /// plugins and backends. Names are **not** validated — any string derives a
 /// valid, distinct UUID; the caller is responsible for enforcing the
-/// protocol's name rules (1–16 chars, `[A-Za-z0-9_]`) before login if it
-/// wants them.
+/// protocol's name rules before login if it wants them.
+///
+/// The protocol name rule for Java Edition is 3–16 chars,
+/// `[A-Za-z0-9_]` — see `candyriya-auth`'s `validate_username` for the
+/// shared validator. A 1-2 character name is not a legal offline-mode
+/// name, whatever this function accepts.
 ///
 /// ```
 /// use candyriya_player::offline_uuid;
