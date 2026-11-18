@@ -1,0 +1,24 @@
+[package]
+name = "candyriya-plugin-controller"
+description = "Pure data model of the native plugin controller: the 11-state wire machine vocabulary, plugin records, the in-memory registry and the controller <-> plugin-unit wire types. No runtime, no async, no unsafe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
+keywords = ["plugin", "controller", "minecraft", "proxy", "lifecycle"]
+categories = ["data-structures", "games"]
+readme = "README.md"
+exclude = [".github", "docs", "deny.toml", "*.md", "target", "fuzz", "tests/**"]
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
