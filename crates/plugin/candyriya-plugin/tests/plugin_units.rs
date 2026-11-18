@@ -161,6 +161,9 @@ async fn poll_until(
         if start.elapsed() > deadline {
             return false;
         }
+        if start.elapsed() % Duration::from_secs(5) < step {
+            eprintln!("[diag] poll_until heartbeat: elapsed={:?}", start.elapsed());
+        }
         tokio::time::sleep(step).await;
     }
 }
@@ -366,7 +369,9 @@ async fn repeated_traps_reach_the_start_limit_and_stay_visible() {
 
     // two restarts are allowed, the third failure is terminal
     for expected_attempt in 1..=3u32 {
-        let _ = dispatcher.dispatch_event(&login_event());
+        eprintln!("[diag] plugin state before dispatch: {:?}", set.state("spinner"));
+        let outcome = dispatcher.dispatch_event(&login_event());
+        eprintln!("[diag] attempt {expected_attempt} dispatch outcome: {outcome:?}");
 // CI ubuntu runners are shared/throttled and each restart restages a
 // WAT-compiled wasm instance; attempts 1+2 alone can consume most of a
 // minute before the third trap lands. The assertions are unchanged;
