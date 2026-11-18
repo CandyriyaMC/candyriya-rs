@@ -209,7 +209,7 @@ async fn parked_flag_is_visible_on_connection_units() {
                 "conn-103",
                 UnitKind::Connection,
                 RestartPolicy::Never,
-                || std::future::pending::<ExitStatus>(),
+                std::future::pending::<ExitStatus>,
             ),
         )
         .expect("unit spawns");

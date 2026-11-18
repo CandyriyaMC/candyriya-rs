@@ -11,7 +11,7 @@
 //!
 //! Naming and policy: the name is `conn-<n>` where `n` is the connection
 //! counter handed out by the accept loop (monotonic, starting at 1), and
-//! the restart policy is [`RestartPolicy::Never`] — a connection is not
+//! the restart policy is [`candyriya_init::RestartPolicy::Never`] — a connection is not
 //! restartable; a reconnected player is a new unit with a new pid. The
 //! kind already existed in the closed [`UnitKind`] vocabulary (`Connection`
 //! is rendered by ps as its own category), so no new variant was added.

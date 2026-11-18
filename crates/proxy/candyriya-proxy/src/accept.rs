@@ -389,7 +389,7 @@ impl ProxyState {
 /// Accepts connections from `listener` until `shutdown` flips to `true`
 /// (or the sending half of the watch channel is dropped), and hands each
 /// one to the limit checks; every connection that passes them is registered
-/// as a supervised [`crate::conn`] unit through the tree.
+/// as a supervised `conn` unit through the tree.
 ///
 /// The global-connection cap is sized from the `config` unit at loop start.
 /// If the unit cannot produce a snapshot, the loop refuses to serve and
@@ -555,7 +555,7 @@ pub fn serve(
 /// a session that ended for any reason, a dropped or mistyped frame),
 /// [`ExitStatus::Failure`] only when the proxy itself could not proceed
 /// (the configuration was unavailable before the handshake). Neither is a
-/// restart-worthy condition; the unit runs under [`RestartPolicy::Never`].
+/// restart-worthy condition; the unit runs under [`candyriya_init::RestartPolicy::Never`].
 pub async fn handle_connection(
     state: Arc<ProxyState>,
     mut stream: TcpStream,
