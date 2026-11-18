@@ -308,7 +308,7 @@ illustrations, not built-ins.
 ### The plugin namespace (upcoming)
 
 Phase 2 of the native-plugins epic adds the `/candyriya plugin` subcommands
-(specified in [Commands](commands#candyriya-plugin); tracked in
+(specified in [Plugin commands](plugin-commands); tracked in
 [issue #310](https://github.com/CandyriyaMC/candyriya-rs/issues/310)). The
 subcommands are not in the tree yet, and the nodes below are expected nodes,
 not registered ones. When they land, each subcommand carries one node:
@@ -317,13 +317,10 @@ not registered ones. When they land, each subcommand carries one node:
 |------|-------|
 | `candyriya.command.plugin.list` | `/candyriya plugin list` |
 | `candyriya.command.plugin.info` | `/candyriya plugin info <plugin>` |
-| `candyriya.command.plugin.load` | `/candyriya plugin load <plugin>` |
 | `candyriya.command.plugin.enable` | `/candyriya plugin enable <plugin>` |
 | `candyriya.command.plugin.disable` | `/candyriya plugin disable <plugin>` |
+| `candyriya.command.plugin.reload` | `/candyriya plugin reload <plugin>` |
 | `candyriya.command.plugin.unload` | `/candyriya plugin unload <plugin>` |
-| `candyriya.command.plugin.restart` | `/candyriya plugin restart <plugin>` |
-| `candyriya.command.plugin.inspect` | `/candyriya plugin inspect <plugin>` |
-| `candyriya.command.plugin.logs` | `/candyriya plugin logs <plugin>` |
 | `candyriya.command.plugin.tree` | `/candyriya plugin tree` |
 
 The namespace rolls up exactly like the rest of the gated tree:

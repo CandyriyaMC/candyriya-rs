@@ -11,9 +11,8 @@ console (the terminal the proxy was started from). Both go through the same
 command tree, built on a Brigadier-style model: literal nodes (`/candyriya`,
 `info`, `servers`, ...), argument nodes (`<player>`, `<server>`), and per-node
 requirements. This page is the reference for the built-in commands the
-proxy ships. The `/candyriya plugin` subcommands specified below are not in
-the tree yet - they land with phase 2 of the native-plugins epic, see
-[`/candyriya plugin`](#candyriya-plugin). There are no other commands;
+proxy ships. The `/candyriya plugin` subcommands are not in the tree yet -
+they land with phase 2 of the native-plugins epic, see [Plugin commands](plugin-commands). There are no other commands;
 anything else you type is either rejected or forwarded to your backend,
 depending on the source (see below).
 
@@ -99,7 +98,7 @@ is not a valid command. The nodes are:
 
 The upcoming `/candyriya plugin` subcommands add their own nodes in the
 `candyriya.command.plugin.*` namespace - see
-[`/candyriya plugin`](#candyriya-plugin). None of them exist in the tree
+[Plugin commands](plugin-commands). None of them exist in the tree
 yet.
 
 Because the check lives on the tree nodes themselves, a source without the
@@ -283,222 +282,16 @@ Requires `candyriya.command.tree`.
 ### `/candyriya plugin`
 
 > **Upcoming - not yet implemented.** The `/candyriya plugin` subcommands
-> are specified on this page but do not exist in the running proxy yet. They
 > land with phase 2 of the native-plugins epic (tracked in
 > [issue #310](https://github.com/CandyriyaMC/candyriya-rs/issues/310));
-> until then, typing `/candyriya plugin` is an unknown command. The syntax,
-> nodes and output formats below are the contract phase 2 implements
-> against, not a description of current behavior.
-
-Native plugins run next to the existing WebAssembly runtime and are
-supervised as `plugin-<id>` units under the `plugins` group node of the
-supervision tree (see
-[Architecture](architecture#the-supervision-tree-and-the-ps-surface)).
-`/candyriya plugin` is the operator surface for that subsystem. Every
-subcommand carries its own node, and all of them fall through to default-deny
-for sources without a grant - exactly like the rest of the gated tree; the
-console's `*` covers them. A bare `/candyriya plugin` is not a valid command.
-
-All subcommands take the plugin id as `<plugin>`, matched against the
-discovered set, exactly first, then case-insensitively (`[a-z0-9_.-]{1,64}` -
-ids are lowercase by construction). An unknown `<plugin>` is rejected with a
-line naming the known plugin ids, and the command does not run.
-
-Expected nodes (phase 2; none implied by the root literal, all default-deny):
-
-- `candyriya.command.plugin.list` - `/candyriya plugin list`
-- `candyriya.command.plugin.info` - `/candyriya plugin info <plugin>`
-- `candyriya.command.plugin.load` - `/candyriya plugin load <plugin>`
-- `candyriya.command.plugin.enable` - `/candyriya plugin enable <plugin>`
-- `candyriya.command.plugin.disable` - `/candyriya plugin disable <plugin>`
-- `candyriya.command.plugin.unload` - `/candyriya plugin unload <plugin>`
-- `candyriya.command.plugin.restart` - `/candyriya plugin restart <plugin>`
-- `candyriya.command.plugin.inspect` - `/candyriya plugin inspect <plugin>`
-- `candyriya.command.plugin.logs` - `/candyriya plugin logs <plugin>`
-- `candyriya.command.plugin.tree` - `/candyriya plugin tree`
-
-`candyriya.command.plugin.*` covers the whole namespace; `candyriya.command.*`
-and `*` cover it as well. State names in the output are the lowercase rendering
-of the phase-2 state machine - `discovered`, `loading`, `loaded`, `starting`,
-`running`, `stopping`, `disabled`, `failed`, `unloaded` - and phase 2 owns the
-final machine and its transitions. On failure, a single red line with the
-reason is printed and the plugin keeps its previous state. Command output never
-carries live counters; those are the Prometheus exporter's job (see
-[Output formats](#output-formats)).
-
-#### `/candyriya plugin list`
-
-Prints one line per discovered plugin: id, version, state and, when running,
-the uptime since it was enabled. With nothing discovered, prints
-`No plugins found.` instead.
-
-Requires `candyriya.command.plugin.list`.
-
-```shell
-candyriya > /candyriya plugin list
-Plugins: 3 (2 running, 1 disabled)
-ID               VERSION  STATE     UPTIME
-greeting         0.1.0    running   3h 12m
-economy          1.4.2    running   5h 41m
-quests           0.3.0    disabled  -
-```
-
-#### `/candyriya plugin info <plugin>`
-
-Prints a one-shot summary of the plugin: id, version, state, the library path,
-the uptime since it was enabled, the restart count and the last exit when
-present. Fields absent from the manifest are omitted; `Last exit` prints `-`
-when there is none.
-
-Requires `candyriya.command.plugin.info`.
-
-```shell
-candyriya > /candyriya plugin info greeting
-Plugin: greeting
-Version: 0.1.0
-State: running
-Library: plugins/greeting/greeting.dll
-Uptime: 3h 12m
-Restarts: 0
-Last exit: -
-```
-
-#### `/candyriya plugin load <plugin>`
-
-Loads a discovered (or previously unloaded) plugin: the library is mapped,
-the ABI handshake is validated, the plugin is instantiated and `on_load` is
-called. It does **not** call `on_enable` - the plugin ends `loaded`, not
-`running`.
-
-Requires `candyriya.command.plugin.load`.
-
-```shell
-candyriya > /candyriya plugin load greeting
-Plugin 'greeting' loaded.
-```
-
-Failure (library missing, ABI mismatch, missing plugin_main, dependency
-cycle) prints a red line with the reason; the plugin stays unloaded.
-
-#### `/candyriya plugin enable <plugin>`
-
-Calls `on_enable` and moves the plugin to `running`. Re-enabling a running
-plugin is a no-op that reports success.
-
-Requires `candyriya.command.plugin.enable`.
-
-```shell
-candyriya > /candyriya plugin enable greeting
-Plugin 'greeting' enabled.
-```
-
-When the plugin is already enabled, the output is
-`Plugin 'greeting' is already enabled.` instead.
-
-#### `/candyriya plugin disable <plugin>`
-
-Requests a cooperative stop, drains the plugin's tasks within a bounded
-budget and calls `on_disable`. The library stays mapped; the plugin ends up
-`disabled`, not `unloaded`. Disabling an already disabled plugin is a no-op
-that reports success.
-
-Requires `candyriya.command.plugin.disable`.
-
-```shell
-candyriya > /candyriya plugin disable greeting
-Plugin 'greeting' disabled.
-```
-
-When the plugin is already disabled, the output is
-`Plugin 'greeting' is already disabled.` instead.
-
-#### `/candyriya plugin unload <plugin>`
-
-Stops the plugin if it is running (as `disable` does), then unmaps the
-library and reaps the supervision unit. The plugin disappears from `list`; if
-its files are still present, the next discovery pass (a `list`, a `reload`)
-re-finds it as `discovered`.
-
-Requires `candyriya.command.plugin.unload`.
-
-```shell
-candyriya > /candyriya plugin unload greeting
-Plugin 'greeting' unloaded.
-```
-
-#### `/candyriya plugin restart <plugin>`
-
-Stop then start - `disable` followed by `enable` as one operation. If the
-re-enable fails, a red line is printed and the plugin stays `disabled`.
-
-Requires `candyriya.command.plugin.restart`.
-
-```shell
-candyriya > /candyriya plugin restart greeting
-Plugin 'greeting' restarted.
-```
-
-#### `/candyriya plugin inspect <plugin>`
-
-Prints the static facts about the plugin: the manifest (id, version,
-description when present, `api`, `depends`, `softdepend`, `exports`), the
-library path, the ABI version, the supervision unit (name, pid, parent,
-state) and the configured resource limits. It never prints live counters -
-those are the exporter's job (see [Output formats](#output-formats)).
-`Depends`, `Softdepend` and `Exports` print `(none)` when empty.
-
-Requires `candyriya.command.plugin.inspect`.
-
-```shell
-candyriya > /candyriya plugin inspect greeting
-Plugin: greeting
-Version: 0.1.0
-Description: says hello on startup
-API: 0.1
-Depends: (none)
-Softdepend: (none)
-Exports: candyriya_plugin_init
-Library: plugins/greeting/greeting.dll
-ABI: v1
-Unit: plugin-greeting (pid 42, parent plugins)
-State: running
-Restarts: 0
-Max memory pages: 64
-Fuel: 0 (unlimited)
-Call timeout: 5s
-Max calls per window: 2000
-Cache quota: 16 MiB
-```
-
-#### `/candyriya plugin logs <plugin>`
-
-Prints the captured log lines for the plugin, oldest first, each prefixed
-with the plugin id. The buffer is bounded and per-plugin, lives for the
-process lifetime and is cleared on `unload`. With nothing captured, prints
-`No log lines captured for plugin 'greeting'.` instead.
-
-Requires `candyriya.command.plugin.logs`.
-
-```shell
-candyriya > /candyriya plugin logs greeting
-greeting: hello from on_enable
-greeting: hooked command /hello
-```
-
-#### `/candyriya plugin tree`
-
-Prints the `plugins` subtree of the supervision tree in the same box-drawing
-format as `/candyriya tree` - no table, no columns, no summary line: the
-root `plugins` group node, then one line per `plugin-<id>` unit with its
-kind caption (and `frozen` / the last exit when present). When nothing is
-loaded, the bare root line is printed.
-
-Requires `candyriya.command.plugin.tree`.
-
-```text
-plugins (long-lived)
-└── plugin-greeting (plugin)
-```
+> until then, typing `/candyriya plugin` is an unknown command.
+>
+> The contract phase 2 implements is not duplicated here; see
+> [Plugin commands](plugin-commands) for the full surface, the permission
+> nodes, the output formats and the failure behavior. The short version:
+> `list`, `info`, `enable`, `disable`, `reload`, `unload` and `tree`, one
+> node per subcommand in the `candyriya.command.plugin.*` namespace,
+> default-deny, console `*` covers.
 
 ### `/server <server>`
 
@@ -602,7 +395,7 @@ an empty roster, not placeholder output.
 **"command not registered" / unknown command.** Only the commands on this
 page exist. Check the spelling; `/candyriya` requires a subcommand
 (`info`, `servers`, `switch`, `end`, `reload`, `ps`, `tree`; the `plugin`
-subcommands land in phase 2, see [`/candyriya plugin`](#candyriya-plugin)) - a
+subcommands land in phase 2, see [Plugin commands](plugin-commands)) - a
 bare `/candyriya` does not parse.
 In the console you get one red `command failed: ...` line. In chat the
 message is forwarded to the backend, which answers with its own
@@ -647,7 +440,7 @@ you need from the config and logs today).
 There is no plugin command framework yet. Plugins cannot register commands,
 slash or otherwise; the built-in set is complete, and adding
 a command today means building from source against `candyriya-command`.
-The upcoming [`/candyriya plugin`](#candyriya-plugin) surface manages native
+The upcoming [`/candyriya plugin`](plugin-commands) surface manages native
 plugins - it is not a plugin command framework either, and plugins still
 cannot register their own proxy commands.
 The tree is assembled by a registry that validates literals, rejects

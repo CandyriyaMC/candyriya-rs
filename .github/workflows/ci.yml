@@ -142,6 +142,8 @@ jobs:
         run: cargo test -p candyriya-native-abi
       - name: Build the reference plugin cdylib
         run: cargo build --release -p greeting
+      - name: dlopen the reference cdylib (ignored loader tests)
+        run: cargo test -p candyriya-native-instance -- --ignored
 
   fuzz-check:
     name: fuzz targets (check)
