@@ -40,6 +40,7 @@ use std::sync::Arc;
 
 use candyriya_cache::CacheManager;
 
+use crate::health::PluginHealthSet;
 use crate::host_ipc::HostIpc;
 use crate::host_state::HostState;
 use crate::instance::PluginInstance;
@@ -88,7 +89,9 @@ pub struct LoadReport {
 /// The shared i18n machines are likewise injectable via
 /// [`PluginLoader::with_locales`]; without them, plugin host functions
 /// resolve against a private embedded-defaults pair and plugin locale
-/// files are never registered.
+/// files are never registered. The per-plugin health registry goes
+/// through [`PluginLoader::with_plugin_health`]; without it the
+/// supervision units never observe an unrecoverable plugin.
 pub struct PluginLoader<'a> {
     plugins_dir: PathBuf,
     libraries_dir: PathBuf,
@@ -97,6 +100,7 @@ pub struct PluginLoader<'a> {
     services: crate::service_registry::ServiceRegistry,
     locales: Option<SharedLocales>,
     host_ipc: HostIpc,
+    health: Option<PluginHealthSet>,
 }
 
 impl<'a> PluginLoader<'a> {
@@ -120,6 +124,7 @@ impl<'a> PluginLoader<'a> {
             services: crate::service_registry::ServiceRegistry::new(),
             locales: None,
             host_ipc: HostIpc::new(),
+            health: None,
         }
     }
 
@@ -159,6 +164,19 @@ impl<'a> PluginLoader<'a> {
     #[must_use]
     pub fn with_host_ipc(mut self, host_ipc: HostIpc) -> Self {
         self.host_ipc = host_ipc;
+        self
+    }
+
+    /// The shared per-plugin health registry this loader's instances flag
+    /// into.
+    ///
+    /// The composition root installs one process-wide registry (shared
+    /// with the reloader and the `plugin-<id>` supervision units). Every
+    /// instance this loader builds then clears its plugin's conviction;
+    /// without it the units park on a flag nothing can raise.
+    #[must_use]
+    pub fn with_plugin_health(mut self, health: PluginHealthSet) -> Self {
+        self.health = Some(health);
         self
     }
 
@@ -404,6 +422,9 @@ impl<'a> PluginLoader<'a> {
                 .with_host_ipc(self.host_ipc.clone());
         if let Some(locales) = &self.locales {
             host_state = host_state.with_locales(locales.clone());
+        }
+        if let Some(health) = &self.health {
+            host_state = host_state.with_plugin_health(health.clone());
         }
         let instance = match PluginInstance::new(&wasm_path, host_state, &id, &self.limits) {
             Ok(instance) => instance,

@@ -59,6 +59,7 @@ use parking_lot::Mutex;
 use candyriya_scheduler::TaskService;
 
 use crate::error::PluginError;
+use crate::health::PluginHealthSet;
 use crate::host_ipc::HostIpc;
 use crate::host_state::HostState;
 use crate::instance::PluginInstance;
@@ -158,6 +159,7 @@ pub struct PluginReloader {
     limits: Limits,
     locales: Option<SharedLocales>,
     host_ipc: HostIpc,
+    health: Option<PluginHealthSet>,
 }
 
 impl PluginReloader {
@@ -188,6 +190,7 @@ impl PluginReloader {
             limits,
             locales: None,
             host_ipc: HostIpc::new(),
+            health: None,
         }
     }
 
@@ -211,6 +214,17 @@ impl PluginReloader {
     #[must_use]
     pub fn with_host_ipc(mut self, host_ipc: HostIpc) -> Self {
         self.host_ipc = host_ipc;
+        self
+    }
+
+    /// The shared per-plugin health registry staged replacements flag
+    /// into. Same slot the loader used; every fresh instance this reloader
+    /// builds clears its plugin's conviction. Without it a restaged plugin
+    /// is invisible to the supervision units until its first call, and a
+    /// supervision-driven restage leaves the old conviction in place.
+    #[must_use]
+    pub fn with_plugin_health(mut self, health: PluginHealthSet) -> Self {
+        self.health = Some(health);
         self
     }
 
@@ -277,6 +291,9 @@ impl PluginReloader {
             .with_host_ipc(self.host_ipc.clone());
         if let Some(locales) = &self.locales {
             host_state = host_state.with_locales(locales.clone());
+        }
+        if let Some(health) = &self.health {
+            host_state = host_state.with_plugin_health(health.clone());
         }
         let instance = PluginInstance::new(&wasm_path, host_state, id, &self.limits)?;
         match instance.function_exists(manifest.plugin_main()) {

@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 
 use candyriya_plugin_api::OutcomeReport;
 
+use crate::health::{PluginHealth, PluginHealthSet};
 use crate::host_ipc::HostIpc;
 use crate::limits::InstanceSlots;
 use crate::locales::SharedLocales;
@@ -67,6 +68,13 @@ use crate::service_registry::ServiceRegistry;
 /// unit exists, and every host state cloned from the same slot sees them.
 /// A host function called before the installation answers with the honest
 /// `host unit link is not installed` error instead of a fabricated value.
+///
+/// `health` is the shared registry of per-plugin health cells the wasm
+/// worker flags on genuinely abnormal outcomes (fuel exhaustion,
+/// manifest-timeout interruption, host-side panic). The composition root
+/// installs one process-wide registry; every fresh instance build clears
+/// the plugin's conviction there — a restage is a request for a clean
+/// slate. See [`crate::PluginHealthSet`].
 #[derive(Clone)]
 pub struct HostState {
     /// The directory this plugin owns (the same path as `config_dir`).
@@ -101,6 +109,9 @@ pub struct HostState {
     /// The shared link to the supervised `host` unit; see the module docs.
     pub host_ipc: HostIpc,
     instance_slots: Arc<InstanceSlots>,
+    /// The shared per-plugin health registry, when the host opted into
+    /// supervision. `None` for standalone host states and tests.
+    health: Option<PluginHealthSet>,
 }
 
 impl std::fmt::Debug for HostState {
@@ -147,6 +158,7 @@ impl HostState {
             host_ipc: HostIpc::new(),
             locales: SharedLocales::embedded().ok(),
             instance_slots,
+            health: None,
         }
     }
 
@@ -164,6 +176,27 @@ impl HostState {
     pub fn with_locale(self, locale: &str) -> Self {
         *self.i18n_locale.lock() = locale.to_owned();
         self
+    }
+
+    /// Install the shared per-plugin health registry.
+    ///
+    /// The loader, reloader and supervision units all clone the same
+    /// registry; every fresh instance build then clears the plugin's
+    /// conviction in it (see the module docs). Without this call the
+    /// worker never flags a health cell and the `plugin-<id>` unit parks
+    /// on a flag nothing can raise.
+    #[must_use]
+    pub fn with_plugin_health(mut self, health: PluginHealthSet) -> Self {
+        self.health = Some(health);
+        self
+    }
+
+    /// Resolve this build's health cell: get-or-create, then clear any
+    /// conviction left by a previous instance. `None` only when no
+    /// registry was installed — the worker then behaves as if the cell
+    /// does not exist.
+    pub(crate) fn health_cell(&self, plugin_id: &str) -> Option<Arc<PluginHealth>> {
+        self.health.as_ref().map(|set| set.fresh_cell(plugin_id))
     }
 
     /// Point this host state at the shared link to the supervised `host`

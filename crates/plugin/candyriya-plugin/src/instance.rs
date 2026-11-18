@@ -42,6 +42,7 @@ use parking_lot::Mutex;
 use candyriya_plugin_api::OutcomeReport;
 
 use crate::error::PluginError;
+use crate::health::PluginHealth;
 use crate::host_functions;
 use crate::host_state::HostState;
 use crate::limits::{
@@ -124,7 +125,9 @@ impl PluginInstance {
     ///
     /// `plugin_id` must be a validated plugin id (the loader guarantees this
     /// for manifest-derived ids; tests pass their own ids). It is used for
-    /// the thread name and error messages only.
+    /// the thread name and error messages only. A host state carrying a
+    /// health registry gets a fresh conviction reset here on every build —
+    /// a restage is an explicit request for a clean slate.
     ///
     /// # Errors
     ///
@@ -157,6 +160,12 @@ impl PluginInstance {
         let slots = host_state.instance_slots();
         slots.try_acquire(plugin_id, limits.max_instances)?;
 
+        // every fresh instance build clears the plugin's health conviction:
+        // a restage is an explicit "give it another shot" (initial load,
+        // `/candyriya reload`, or a supervision-driven restart), and the
+        // old instance's flag must not condemn the fresh one
+        let health_cell = host_state.health_cell(plugin_id);
+
         match Self::spawn(
             wasm_path,
             wasm_bytes,
@@ -164,6 +173,7 @@ impl PluginInstance {
             plugin_id,
             limits,
             Arc::clone(&slots),
+            health_cell,
         ) {
             Ok(instance) => {
                 crate::metrics::plugin_loaded(plugin_id);
@@ -183,6 +193,7 @@ impl PluginInstance {
         plugin_id: &str,
         limits: &Limits,
         slots: Arc<InstanceSlots>,
+        health_cell: Option<Arc<PluginHealth>>,
     ) -> Result<Self, PluginError> {
         let manifest = extism::Manifest::new([extism::Wasm::data(wasm_bytes)])
             .with_memory_max(limits.max_memory_pages)
@@ -214,8 +225,18 @@ impl PluginInstance {
         // move the host state in too: the worker needs the caller identity
         // bookkeeping; the host functions hold their own clones inside the plugin
         let worker = std::thread::Builder::new()
+            // a plugin that burns its fuel or traps flags its health cell
+            // from inside worker_loop; every other plugin sees no change
             .name(thread_name)
-            .spawn(move || worker_loop(plugin, host_state, command_rx, worker_plugin_id))
+            .spawn(move || {
+                worker_loop(
+                    plugin,
+                    host_state,
+                    command_rx,
+                    worker_plugin_id,
+                    health_cell,
+                )
+            })
             .map_err(|e| PluginError::PluginThread {
                 plugin_id: plugin_id_owned,
                 reason: e.to_string(),
@@ -493,6 +514,7 @@ fn worker_loop(
     _host_state: HostState,
     command_rx: std::sync::mpsc::Receiver<PluginCommand>,
     plugin_id: String,
+    health_cell: Option<Arc<PluginHealth>>,
 ) {
     while let Ok(command) = command_rx.recv() {
         match command {
@@ -513,6 +535,20 @@ fn worker_loop(
                 let result = match result {
                     Ok(Ok(bytes)) => Ok(bytes),
                     Ok(Err(message)) => {
+                        // unambiguously abnormal outcomes flag the plugin as
+                        // unrecoverable; an ordinary guest error does not
+                        let broken = if message.contains("ran out of fuel") {
+                            Some("wasm ran out of fuel")
+                        } else if message == "timeout" {
+                            // the epoch interrupt surfaces with exactly this
+                            // message; the 30s manifest budget was exceeded
+                            Some("wasm call exceeded the manifest timeout and was interrupted")
+                        } else {
+                            None
+                        };
+                        if let (Some(cell), Some(reason)) = (&health_cell, broken) {
+                            cell.mark_broken(reason);
+                        }
                         // extism surfaces a drained fuel store as an error
                         // whose message contains this string (via
                         // catch_out_of_fuel! and raw_call); the epoch timer
@@ -530,11 +566,16 @@ fn worker_loop(
                             })
                         }
                     }
-                    Err(_) => Err(PluginError::CallFailed {
-                        plugin_id: plugin_id.clone(),
-                        export,
-                        message: "plugin panicked during the call".to_owned(),
-                    }),
+                    Err(_) => {
+                        if let Some(cell) = &health_cell {
+                            cell.mark_broken("plugin panicked during the call");
+                        }
+                        Err(PluginError::CallFailed {
+                            plugin_id: plugin_id.clone(),
+                            export,
+                            message: "plugin panicked during the call".to_owned(),
+                        })
+                    }
                 };
                 // if the caller gave up waiting, nobody reads this — fine
                 let _ = respond.send(result);

@@ -24,6 +24,12 @@
 //!   topological) with cycle and missing-hard-dependency diagnostics.
 //! - [`PluginSet`] — the ordered, shared set of loaded plugins every other
 //!   piece of host code operates on.
+//! - [`PluginHealthSet`] — one sticky per-plugin cell raised by the wasm
+//!   worker on genuinely abnormal outcomes (fuel exhaustion, manifest-timeout
+//!   interruption, host-side panic). The `plugin-<id>` supervision unit parks
+//!   on its cell; the flag is what turns a contained trap into a tree-visible
+//!   exit, and [`sync_plugin_units`] keeps one unit per record in the set,
+//!   under the composition root's `plugins` group.
 //! - [`ServiceRegistry`] — global, type-safe `Arc<dyn Any>` service
 //!   registry. Today it carries plugin-owned services only (entries tagged
 //!   with the owning plugin id, revoked in bulk on reload); the
@@ -55,6 +61,7 @@
 mod dep_resolution;
 mod dispatch;
 mod error;
+mod health;
 mod host_functions;
 mod host_ipc;
 mod host_state;
@@ -69,6 +76,7 @@ mod metrics;
 mod plugin_loader;
 mod plugin_set;
 mod service_registry;
+mod units;
 
 pub use crate::dep_resolution::{
     DependencyFailure, DependencyResolution, SoftDependency, resolve_plugin_order, resolve_plugins,
@@ -79,6 +87,7 @@ pub use crate::dispatch::{
     ProxyEventDispatcher,
 };
 pub use crate::error::PluginError;
+pub use crate::health::{PluginHealth, PluginHealthSet};
 pub use crate::host_functions::{PLAYERS_PING_SINK_KEY, PlayerPingSink};
 pub use crate::host_ipc::{HostIpc, HostIpcError};
 pub use crate::host_state::HostState;
@@ -94,4 +103,5 @@ pub use crate::manifest::{DuplicateId, DuplicatePluginIds, PluginManifest, valid
 pub use crate::plugin_loader::{LoadIssue, LoadReport, PluginLoader};
 pub use crate::plugin_set::PluginSet;
 pub use crate::service_registry::ServiceRegistry;
+pub use crate::units::{PluginUnitContext, PluginUnitsReport, sync_plugin_units};
 pub use candyriya_plugin_api::EventDispatcher;

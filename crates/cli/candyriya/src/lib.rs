@@ -41,11 +41,13 @@
 //!    `proxy.accept` (long-lived, the unit body drives the
 //!    listener), `host` (the plugin-facing core services), `players` (the
 //!    group node every connection unit hangs under — accounting and
-//!    shutdown scoping, no work of its own), `stats.every-60s`
+//!    shutdown scoping, no work of its own), `plugins` (the group node for
+//!    the plugin subsystem), `stats.every-60s`
 //!    (periodic), `console` (the interactive REPL) and, at shutdown,
 //!    `cache.shutdown` and `metrics.shutdown` (one-shot finalizers, the
 //!    last units to run, in order). Connections accepted by `proxy.accept`
-//!    are `conn-<n>` units under `players`. Ctrl-C or
+//!    are `conn-<n>` units under `players`; every loaded plugin rides a
+//!    `plugin-<id>` unit under `plugins`. Ctrl-C or
 //!    `/candyriya end` fires both the shutdown watch and a tree-wide
 //!    cancel sweep; the serving units are waited on through the tree, the
 //!    finalizers run last, the task service drains as the final safety
@@ -55,7 +57,14 @@
 //!
 //! Plugins under `plugins/` and `libraries/` are loaded at startup; the
 //! same machinery is exposed through `/candyriya reload` for a restart-free
-//! refresh. What never moves on a reload: the listener socket, live
+//! refresh. Each loaded plugin rides a `plugin-<id>` unit under the
+//! `plugins` group unit: the wasm worker flags genuinely unrecoverable
+//! outcomes (out of fuel, the manifest timeout, a host-side panic) into a
+//! health cell, the unit's parked body observes the flag, reports
+//! `ExitStatus::Failure`, and the tree's `OnFailure` policy re-stages the
+//! plugin through the same machinery `/candyriya reload` uses — bounded by
+//! the start limit, after which the unit goes `FailedTerminal` and stays
+//! visible. What never moves on a reload: the listener socket, live
 //! sessions, and the forwarding secret — those are restart-only.
 
 #![forbid(unsafe_code)]
@@ -80,8 +89,9 @@ use candyriya_init::{
     ExitStatus, Init, Pid, ReapOutcome, RestartPolicy, ServiceKind, UnitKind, UnitSpec,
 };
 use candyriya_plugin::{
-    HostIpc, LimitBuilder, PluginLoader, PluginReloader, PluginSet, ProxyEventDispatcher,
-    ServiceRegistry, SharedLocales, resolve_plugins,
+    HostIpc, LimitBuilder, Limits, PluginHealthSet, PluginLoader, PluginReloader, PluginSet,
+    PluginUnitContext, ProxyEventDispatcher, ServiceRegistry, SharedLocales, resolve_plugins,
+    sync_plugin_units,
 };
 use candyriya_plugin_api::EventDispatcher;
 use candyriya_proxy::{
@@ -280,34 +290,48 @@ fn unit_failure_detail(tree: &Init) -> Option<String> {
         })
 }
 
+/// The group units that carry children for shutdown-scan purposes.
+///
+/// `players` carries the `conn-<n>` units, `plugins` carries the
+/// `plugin-<id>` units. Both are reaped while their parent is still
+/// alive during teardown so their zombies are harvested (and pids leave
+/// the registry) before the final wait; a dead conn or plugin unit must
+/// never linger unreaped into the finalizers.
+const GROUP_UNIT_NAMES: &[&str] = &["players", "plugins"];
+
+/// Reap the zombie children of every group unit currently in the
+/// registry.
+///
+/// Group names are unique by construction, so a registry scan finds at
+/// most one of each; a group that was already reaped is simply absent.
+/// Children exit constantly (conns, plugin units) and stay zombies until
+/// harvested — the mid-run tick, the boot abort, the cascade and the
+/// shutdown wait all close that window through this one call.
+fn reap_group_children(tree: &Init) {
+    for unit in tree.units() {
+        if GROUP_UNIT_NAMES.contains(&unit.name.as_str()) {
+            let _ = tree.reap_children(unit.pid);
+        }
+    }
+}
+
 /// Unwind a boot that is not allowed to continue serving.
 ///
 /// Cancels every unit in the tree through the kernel's sweep — newest
-/// first, including connection units the caller's list does not name —
-/// harvests whatever already exited, drains the kernel and hands the
-/// reason back for the caller to report. The `spawned` list is used only
-/// to locate the `players` group (so zombie children of it get reaped
-/// while it is still alive); the cancellation itself is tree-wide and
-/// does not depend on it. Boot-adopted units cannot appear here; they
-/// are reaped as they adopt. The drain is the same safety net the normal
+/// first, including connection and plugin units the spawn sites do not
+/// track by name —
+/// harvests whatever already exited (both group units' children and
+/// the root's), drains the kernel and hands the reason back for the
+/// caller to report. Boot-adopted units cannot appear here; they are
+/// reaped as they adopt. The drain is the same safety net the normal
 /// shutdown uses, so a unit wedged mid-await still gets bounded by it.
-async fn boot_abort(
-    tree: &Init,
-    service: &TaskService,
-    spawned: &[(Pid, &'static str)],
-    error: CliError,
-) -> CliError {
+async fn boot_abort(tree: &Init, service: &TaskService, error: CliError) -> CliError {
     let swept = tree.cancel_all();
     debug!(
         swept = swept.len(),
         "tree-wide cancel sweep requested stops"
     );
-    // conns that exited under a still-live players stay zombies until
-    // reaped; players re-parents them to the root at its own exit, and
-    // this closes the window while it is still running
-    if let Some((players_pid, _)) = spawned.iter().find(|(_, name)| *name == "players") {
-        let _ = tree.reap_children(*players_pid);
-    }
+    reap_group_children(tree);
     let _ = tree.reap_children(Pid::INIT);
     let report = service.drain(Duration::from_secs(10)).await;
     info!(?report, "task service drained after boot abort");
@@ -315,11 +339,13 @@ async fn boot_abort(
 }
 
 /// Wait until every pid in `pids` has left the registry (harvested by the
-/// reaper) or the budget runs out. Returns the pids still tracked.
+/// reaper) or the budget runs out. Group children are reaped alongside
+/// the root's while they are still alive; returns the pids still tracked.
 async fn wait_units_gone(tree: &Init, pids: &[Pid], budget: Duration) -> Vec<Pid> {
     let start = Instant::now();
     let mut pending: Vec<Pid> = pids.to_vec();
     while !pending.is_empty() && start.elapsed() < budget {
+        reap_group_children(tree);
         let _ = tree.reap_children(Pid::INIT);
         pending.retain(|pid| tree.unit(*pid).is_some());
         if !pending.is_empty() {
@@ -384,17 +410,14 @@ where
 ///
 /// Sequence: flip the watch (bridge for the accept loop and the REPL),
 /// cancel every unit in the tree through the kernel's sweep (newest
-/// first: console, stats, proxy.accept, conns under players, players,
-/// host, route.health, cache, route, config — connection units the boot
-/// list does not name are reached like the rest), wait for them through
-/// the tree, run the finalizers in order (`cache.shutdown` then
-/// `metrics.shutdown`), and drain the kernel as the final safety net.
-/// The exit ring keeps every unit exit for the post-mortem.
+/// first), wait for them through the tree, run the finalizers in order
+/// (`cache.shutdown` then `metrics.shutdown`), and drain the kernel as the
+/// final safety net. The exit ring keeps every unit exit for the
+/// post-mortem.
 async fn cascade_shutdown(
     tree: &Init,
     service: &TaskService,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
-    boot_units: &[(Pid, &'static str)],
     cache: Arc<CacheManager>,
     metrics_handle: candyriya_metrics::MetricsHandle,
 ) {
@@ -402,23 +425,24 @@ async fn cascade_shutdown(
     let _ = shutdown_tx.send(true);
 
     // tree-wide sweep: every non-root unit, newest first, one call. A
-    // connection accepted a second ago and the players group are ordinary
-    // units to this walk — the boot list no longer bounds what gets
-    // stopped. route.health (child of route) is reached directly; when
-    // route exits, orphaned children re-parent to the root and the wait
-    // below reaps them there. connections die at their next loop boundary:
-    // pump cancel = client disconnect; players re-parents whatever is left
-    // to the root at its exit, and the drain accounts stragglers by contract
+    // connection accepted a second ago, a plugin supervision unit and the
+    // players/plugins groups are ordinary units to this walk — spawn
+    // order bounds nothing. route.health (child of route)
+    // is reached directly; when route exits, orphaned children re-parent to
+    // the root and the wait below reaps them there. Connections die at
+    // their next loop boundary: pump cancel = client disconnect. Plugin
+    // units die at the parked await inside their body, plugin threads keep
+    // running until the set is dropped — the drain accounts stragglers by
+    // contract
     let swept = tree.cancel_all();
     debug!(
         swept = swept.len(),
         "tree-wide cancel sweep requested stops"
     );
-    // conn zombies under a still-live players re-parent to the root only
-    // at players' exit; close the window explicitly before waiting
-    if let Some((players_pid, _)) = boot_units.iter().find(|(_, name)| *name == "players") {
-        let _ = tree.reap_children(*players_pid);
-    }
+    // children of a still-live group stay zombies until reaped; the group
+    // re-parents them to the root only at its own exit — close the window
+    // explicitly before waiting
+    reap_group_children(tree);
 
     // wait for the swept units to exit; the reaper stays warm
     let pending = wait_units_gone(tree, &swept, UNIT_STOP_TIMEOUT).await;
@@ -603,16 +627,11 @@ async fn run_async(
             return Err(boot_abort(
                 &tree,
                 &service,
-                &[],
                 CliError::Runtime(format!("failed to spawn config: {error}")),
             )
             .await);
         }
     };
-    // the config unit alone in the first phase of boot: unwinds with the
-    // other early failures so it never outlives an aborted boot
-    let config_unwind = [(config_pid, "config")];
-
     // ---- the route unit: the single owner of runtime routing reads. The
     // store it serves is the same object the reload path swaps through, so
     // /candyriya reload works unchanged; nobody calls the registry
@@ -627,26 +646,20 @@ async fn run_async(
             return Err(boot_abort(
                 &tree,
                 &service,
-                &config_unwind,
                 CliError::Runtime(format!("failed to spawn route: {error}")),
             )
             .await);
         }
     };
-    // the route unit joins the first boot phase too: early boot failures
-    // unwind it alongside the config unit
-    let config_unwind = [(config_pid, "config"), (route_pid, "route")];
-
     // ---- the route.health child: the health-check loop lives with the
     // route unit. Spawned only when [servers] is non-empty at boot — with
     // nothing to check the child would be dead weight. If a later
     // /candyriya reload adds servers, nothing watches them here; the
     // reload phase owns routing changes and does not start health checks
-    // (that belongs to the reload phase, not this slice).
-    let health_boot: Option<(Pid, &'static str)> = if config.servers.servers.is_empty() {
-        info!("no [servers] configured; backend health checks are not wired");
-        None
-    } else {
+    // (that belongs to the reload phase, not this slice). The health
+    // child belongs to the route unit and stays with it — no list
+    // bookkeeping; the tree is the list.
+    if !config.servers.servers.is_empty() {
         match tree.spawn_unit(
             route_pid,
             health_spec(Arc::clone(&router_store), DEFAULT_HEALTH_CHECK_INTERVAL),
@@ -657,19 +670,19 @@ async fn run_async(
                     interval_secs = DEFAULT_HEALTH_CHECK_INTERVAL.as_secs(),
                     "route.health unit spawned"
                 );
-                Some((pid, "route.health"))
             }
             Err(error) => {
                 return Err(boot_abort(
                     &tree,
                     &service,
-                    &config_unwind,
                     CliError::Runtime(format!("failed to spawn route.health: {error}")),
                 )
                 .await);
             }
         }
-    };
+    } else {
+        info!("no [servers] configured; backend health checks are not wired");
+    }
 
     // the registry now carries plugin-owned services only (entries tagged
     // with an owning plugin id, revoked in bulk on reload); it is shared
@@ -692,13 +705,7 @@ async fn run_async(
                 "cache.manager",
                 ExitStatus::failure(error.to_string()),
             );
-            return Err(boot_abort(
-                &tree,
-                &service,
-                &config_unwind,
-                CliError::Cache(error.to_string()),
-            )
-            .await);
+            return Err(boot_abort(&tree, &service, CliError::Cache(error.to_string())).await);
         }
     };
 
@@ -717,20 +724,11 @@ async fn run_async(
             return Err(boot_abort(
                 &tree,
                 &service,
-                &config_unwind,
                 CliError::Runtime(format!("failed to spawn cache: {error}")),
             )
             .await);
         }
     };
-    // the cache unit joins the early boot phase like config and route: a
-    // boot abort after this point unwinds it alongside them
-    let config_unwind = [
-        (config_pid, "config"),
-        (route_pid, "route"),
-        (cache_pid, "cache"),
-    ];
-
     // the favicon handle is a thin IPC shim over the cache unit: the proxy
     // holds `Init + cache_pid`, never a namespace handle. Always wired at
     // boot; the `Option` is the wiring contract the reload path was built
@@ -753,7 +751,7 @@ async fn run_async(
                     "metrics.exporter",
                     ExitStatus::failure(error.to_string()),
                 );
-                return Err(boot_abort(&tree, &service, &config_unwind, error).await);
+                return Err(boot_abort(&tree, &service, error).await);
             }
         }
     } else {
@@ -770,13 +768,7 @@ async fn run_async(
                 "metrics.exporter",
                 ExitStatus::failure(error.to_string()),
             );
-            return Err(boot_abort(
-                &tree,
-                &service,
-                &config_unwind,
-                CliError::Metrics(error.to_string()),
-            )
-            .await);
+            return Err(boot_abort(&tree, &service, CliError::Metrics(error.to_string())).await);
         }
     };
 
@@ -800,14 +792,14 @@ async fn run_async(
         Ok(pair) => pair,
         Err(error) => {
             adopt_bootstrap(&tree, "i18n.build", ExitStatus::failure(error.to_string()));
-            return Err(boot_abort(&tree, &service, &config_unwind, error).await);
+            return Err(boot_abort(&tree, &service, error).await);
         }
     };
     let kick_i18n = match build_kick_i18n(data_dir, &config) {
         Ok(i18n) => i18n,
         Err(error) => {
             adopt_bootstrap(&tree, "i18n.build", ExitStatus::failure(error.to_string()));
-            return Err(boot_abort(&tree, &service, &config_unwind, error).await);
+            return Err(boot_abort(&tree, &service, error).await);
         }
     };
     adopt_bootstrap(&tree, "i18n.build", ExitStatus::Success);
@@ -821,15 +813,80 @@ async fn run_async(
     let host_ipc = HostIpc::new();
 
     // ---- plugins: startup load (before the proxy state is built: the
-    // shared dispatcher gets wired into it at construction time)
+    // shared dispatcher gets wired into it at construction time). The
+    // health registry is created first: every instance build clears its
+    // plugin's conviction in it, and the supervision units spawned right
+    // after the load park on the same cells.
+    let plugin_health = PluginHealthSet::new();
+    let plugin_limits = LimitBuilder::from_config(&config).build();
     let plugin_set = load_plugins(
         data_dir,
-        &config,
         &cache,
         plugin_locales.clone(),
         host_ipc.clone(),
+        plugin_limits.clone(),
+        plugin_health.clone(),
     );
     adopt_bootstrap(&tree, "plugins.load", ExitStatus::Success);
+    // ---- the `plugins` group unit: the supervisor-group node for the
+    // whole plugin subsystem. A supervisor-group node — it holds no work
+    // and owns no resources (a pending body is the honest shape); it
+    // exists so the plugin units have a subtree: accounting, shutdown
+    // scoping and restart attribution all ride it. LongLived + Never: it
+    // does not come back and it is not re-creatable. Spawned right after
+    // the load step completes (and before `players`/`host`/`accept`), so
+    // the plugin subtree is accounted from birth; the `plugins.load`
+    // marker stays as the bootstrap-step record.
+    let plugins_spec = UnitSpec::new(
+        "plugins",
+        UnitKind::LongLived,
+        RestartPolicy::Never,
+        std::future::pending::<ExitStatus>,
+    )
+    .with_service_kind(ServiceKind::Plugins);
+    let plugins_pid = match tree.spawn_unit(Pid::INIT, plugins_spec) {
+        Ok(pid) => {
+            info!(pid = %pid, "plugins group unit spawned");
+            pid
+        }
+        Err(error) => {
+            return Err(boot_abort(
+                &tree,
+                &service,
+                CliError::Runtime(format!("failed to spawn plugins: {error}")),
+            )
+            .await);
+        }
+    };
+    // one child per loaded plugin (libraries and plugins alike): the set
+    // is the source of truth for what exists, the tree for how it behaves.
+    // Spawn failures are loud but never abort the boot — a plugin whose
+    // unit cannot spawn still runs, just unsupervised.
+    let restage_reloader = PluginReloader::with_limits(
+        (*plugin_set).clone(),
+        data_dir.to_path_buf(),
+        registry.clone(),
+        plugin_limits.clone(),
+    )
+    .with_locales(plugin_locales.clone())
+    .with_host_ipc(host_ipc.clone())
+    .with_plugin_health(plugin_health.clone());
+    let plugin_units = sync_plugin_units(
+        &tree,
+        plugins_pid,
+        &plugin_set,
+        &PluginUnitContext {
+            service: service.clone(),
+            reloader: restage_reloader,
+            health: plugin_health.clone(),
+        },
+    );
+    if !plugin_units.failed.is_empty() {
+        error!(
+            failed = ?plugin_units.failed,
+            "some plugin supervision units failed to spawn; those plugins run unsupervised"
+        );
+    }
     // one dispatcher per process: the `host` unit carries it for the
     // plugin→plugin callApi fan-out, the proxy state carries it for the
     // lifecycle events — both hold handles to the same instance, so
@@ -864,11 +921,6 @@ async fn run_async(
             return Err(boot_abort(
                 &tree,
                 &service,
-                &[
-                    (config_pid, "config"),
-                    (route_pid, "route"),
-                    (cache_pid, "cache"),
-                ],
                 CliError::Runtime(format!("failed to spawn players: {error}")),
             )
             .await);
@@ -917,17 +969,9 @@ async fn run_async(
             pid
         }
         Err(error) => {
-            // players precedes the host in spawn order; it rides the unwind
-            let host_unwind = [
-                (config_pid, "config"),
-                (route_pid, "route"),
-                (cache_pid, "cache"),
-                (players_pid, "players"),
-            ];
             return Err(boot_abort(
                 &tree,
                 &service,
-                &host_unwind,
                 CliError::Runtime(format!("failed to spawn host: {error}")),
             )
             .await);
@@ -939,13 +983,6 @@ async fn run_async(
         return Err(boot_abort(
             &tree,
             &service,
-            &[
-                (config_pid, "config"),
-                (route_pid, "route"),
-                (cache_pid, "cache"),
-                (players_pid, "players"),
-                (host_pid, "host"),
-            ],
             CliError::Runtime("host IPC link was installed twice".to_owned()),
         )
         .await);
@@ -988,6 +1025,10 @@ async fn run_async(
         data_dir,
         plugin_locales,
         tokio::runtime::Handle::current(),
+        tree.clone(),
+        plugins_pid,
+        service.clone(),
+        plugin_health.clone(),
     );
     let command_registry =
         CommandRegistry::new(command_state, shutdown.clone()).with_reload(reload_fn);
@@ -1010,20 +1051,14 @@ async fn run_async(
         Ok(addr) => addr,
         Err(error) => {
             adopt_bootstrap(&tree, "proxy.bind", ExitStatus::failure(error.to_string()));
-            return Err(boot_abort(&tree, &service, &config_unwind, error).await);
+            return Err(boot_abort(&tree, &service, error).await);
         }
     };
     let socket = match ProxySocket::bind(bind_addr, &SocketConfig::from(&config.advanced)) {
         Ok(socket) => socket,
         Err(error) => {
             adopt_bootstrap(&tree, "proxy.bind", ExitStatus::failure(error.to_string()));
-            return Err(boot_abort(
-                &tree,
-                &service,
-                &config_unwind,
-                CliError::Proxy(error.to_string()),
-            )
-            .await);
+            return Err(boot_abort(&tree, &service, CliError::Proxy(error.to_string())).await);
         }
     };
     adopt_bootstrap(&tree, "proxy.bind", ExitStatus::Success);
@@ -1036,29 +1071,15 @@ async fn run_async(
     debug!(adopted, "bootstrap steps adopted and reaped");
 
     // ---- spawn the serving units, in boot order; a failure of any of
-    // them unwinds the ones before it in reverse order (fail-fast boot).
-    // The config and route units are already up (spawned before the boot
-    // abort machinery needs them) and ride in the list so a runtime
-    // collapse is caught by the same watchdog as a serving unit dying;
-    // route.health rides along too and is cancelled before its parent
-    // (reverse spawn order). The cache unit rides in the list as well: a
-    // unit that dies permanently mid-run is an operator-relevant event,
-    // the same trade config and route make, and the sweep must cancel it
-    // before the cache.shutdown finalizer closes the manager. The host
-    // unit rides in the list too: a plugins-kind unit that dies silently
-    // would strand every plugin's cross-subsystem calls mid-run. The
-    // players group unit rides in the list so the runtime watchdog sees
-    // it too — its death means live sessions lost their subtree.
-    let mut boot_units: Vec<(Pid, &'static str)> = vec![
-        (config_pid, "config"),
-        (route_pid, "route"),
-        (cache_pid, "cache"),
-        (host_pid, "host"),
-    ];
-    if let Some((pid, name)) = health_boot {
-        boot_units.push((pid, name));
-    }
-    boot_units.push((players_pid, "players"));
+    // them unwinds everything through the tree-wide sweep (fail-fast
+    // boot). Spawn order is enforced by code order — the tree is the
+    // hierarchy, so there is no list to keep in sync: cancel_all reaches
+    // every non-root unit, group units and their children included, and
+    // the mid-run watchdog watches the root's direct children for
+    // failures (plugin units are deliberately NOT watchdog material — a
+    // crashed plugin must never abort the proxy, it degrades to
+    // FailedTerminal and stays visible in ps; the mid-run tick reaps
+    // them and the restart policy fires).
 
     // proxy.accept: the unit body drives listener.accept(); the connections
     // it accepts are registered as `conn-<n>` units under the `players`
@@ -1099,14 +1120,12 @@ async fn run_async(
     .with_grant(cache_pid);
     match tree.spawn_unit(Pid::INIT, accept_spec) {
         Ok(pid) => {
-            boot_units.push((pid, "proxy.accept"));
             info!(bind = %local_addr, pid = %pid, "proxy listening");
         }
         Err(error) => {
             return Err(boot_abort(
                 &tree,
                 &service,
-                &boot_units,
                 CliError::Proxy(format!("failed to spawn proxy.accept: {error}")),
             )
             .await);
@@ -1136,12 +1155,11 @@ async fn run_async(
     // rides its spawn like an inherited fd
     .with_grant(route_pid);
     match tree.spawn_unit(Pid::INIT, stats_spec) {
-        Ok(pid) => boot_units.push((pid, "stats.every-60s")),
+        Ok(pid) => debug!(pid = %pid, "stats.every-60s unit spawned"),
         Err(error) => {
             return Err(boot_abort(
                 &tree,
                 &service,
-                &boot_units,
                 CliError::Runtime(format!("failed to spawn stats.every-60s: {error}")),
             )
             .await);
@@ -1158,12 +1176,11 @@ async fn run_async(
         use_ansi,
     );
     match tree.spawn_unit(Pid::INIT, console_spec) {
-        Ok(pid) => boot_units.push((pid, "console")),
+        Ok(pid) => debug!(pid = %pid, "console unit spawned"),
         Err(error) => {
             return Err(boot_abort(
                 &tree,
                 &service,
-                &boot_units,
                 CliError::Runtime(format!("failed to spawn console: {error}")),
             )
             .await);
@@ -1178,7 +1195,6 @@ async fn run_async(
         return Err(boot_abort(
             &tree,
             &service,
-            &boot_units,
             CliError::Proxy(format!("supervision tree aborted during boot: {detail}")),
         )
         .await);
@@ -1206,9 +1222,10 @@ async fn run_async(
                 break None;
             }
             _ = unit_tick.tick() => {
-                // conns exit constantly; harvest their zombies here so the
-                // registry stays flat and ps tells the truth mid-run
-                let _ = tree.reap_children(players_pid);
+                // conns and plugin units exit; harvest their zombies here
+                // so the registry stays flat, ps tells the truth mid-run
+                // and the restart policy of plugin units actually fires
+                reap_group_children(&tree);
                 if let Some(detail) = unit_failure_detail(&tree) {
                     break Some(detail);
                 }
@@ -1219,7 +1236,6 @@ async fn run_async(
         return Err(boot_abort(
             &tree,
             &service,
-            &boot_units,
             CliError::Proxy(format!("supervision tree aborted: {detail}")),
         )
         .await);
@@ -1227,15 +1243,7 @@ async fn run_async(
 
     // ---- the cascade: watch + tree-wide cancel sweep, serving units,
     // finalizers last (cache then metrics), drain as the final safety net
-    cascade_shutdown(
-        &tree,
-        &service,
-        &shutdown_tx,
-        &boot_units,
-        cache,
-        metrics_handle,
-    )
-    .await;
+    cascade_shutdown(&tree, &service, &shutdown_tx, cache, metrics_handle).await;
 
     Ok(())
 }
@@ -1402,42 +1410,76 @@ fn reload_config_phase(
     Ok(notes.join("; "))
 }
 
+/// Wiring the plugin reload phase drives: the reload-time handles plus
+/// the supervision plumbing. One bundle instead of a dozen loose handles —
+/// boot and `/candyriya reload` both go through the same names.
+struct PluginReloadWiring<'a> {
+    store: &'a ConfigStore,
+    data_dir: &'a Path,
+    plugin_set: &'a PluginSet,
+    cache: &'a CacheManager,
+    services: &'a ServiceRegistry,
+    host_ipc: &'a HostIpc,
+    plugin_locales: &'a SharedLocales,
+    tree: &'a Init,
+    plugins_pid: Pid,
+    service: &'a TaskService,
+    plugin_health: PluginHealthSet,
+}
+
 /// Reload the plugin phase: re-stage every running plugin from disk and
 /// register newcomers found under the roots. The running set survives
 /// any failure — broken replacements never evict a working instance.
 /// Reloaded plugins resolve their host functions through the same
-/// `host` unit the startup-loaded ones do.
+/// `host` unit the startup-loaded ones do. After the reload, the
+/// supervision tree is brought back in line: units appear for plugins
+/// that entered the set and disappear for ids that left it — the tree
+/// is the hierarchy, never a forked one.
 // ipc-migration: Plugins.Reload — the phase reaches the plugin set, the shared registry and the cache across subsystem boundaries
-fn reload_plugins_phase(
-    store: &ConfigStore,
-    data_dir: &Path,
-    plugin_set: &PluginSet,
-    cache: &CacheManager,
-    services: &ServiceRegistry,
-    host_ipc: &HostIpc,
-    plugin_locales: &SharedLocales,
-) -> candyriya_command::PluginPhaseReport {
+fn reload_plugins_phase(wiring: &PluginReloadWiring<'_>) -> candyriya_command::PluginPhaseReport {
+    let plugin_health = wiring.plugin_health.clone();
     // limits come from the current configuration, i.e. the post-config-reload
     // one when both phases run — a raised [plugins] cap applies immediately
-    let config = store.get();
+    let config = wiring.store.get();
     let limits = LimitBuilder::from_config(&config).build();
     let reloader = PluginReloader::with_limits(
-        plugin_set.clone(),
-        data_dir.to_path_buf(),
-        services.clone(),
+        wiring.plugin_set.clone(),
+        wiring.data_dir.to_path_buf(),
+        wiring.services.clone(),
         limits.clone(),
     )
-    .with_locales(plugin_locales.clone())
-    .with_host_ipc(host_ipc.clone());
+    .with_locales(wiring.plugin_locales.clone())
+    .with_host_ipc(wiring.host_ipc.clone())
+    .with_plugin_health(plugin_health.clone());
     let loader = PluginLoader::with_limits(
-        data_dir.join("plugins"),
-        data_dir.join("libraries"),
-        cache,
+        wiring.data_dir.join("plugins"),
+        wiring.data_dir.join("libraries"),
+        wiring.cache,
         limits.clone(),
     )
-    .with_locales(plugin_locales.clone())
-    .with_host_ipc(host_ipc.clone());
+    .with_locales(wiring.plugin_locales.clone())
+    .with_host_ipc(wiring.host_ipc.clone())
+    .with_plugin_health(plugin_health.clone());
     let report = reloader.reload_all(&loader);
+    // the tree is the hierarchy: a newly discovered plugin gets its unit,
+    // an id that left the set loses it; spawn failures are loud but do
+    // not fail the reload — the plugin still runs, just unsupervised
+    let units = sync_plugin_units(
+        wiring.tree,
+        wiring.plugins_pid,
+        wiring.plugin_set,
+        &PluginUnitContext {
+            service: wiring.service.clone(),
+            reloader: reloader.clone(),
+            health: plugin_health,
+        },
+    );
+    for id in &units.spawned {
+        info!(plugin = %id, "plugin supervision unit spawned by reload");
+    }
+    for id in &units.cancelled {
+        info!(plugin = %id, "plugin supervision unit cancelled by reload");
+    }
 
     let mut details = Vec::new();
     for missing in &report.missing {
@@ -1466,6 +1508,10 @@ fn reload_plugins_phase(
     for (id, reason) in &report.new_failed {
         error!(plugin = %id, %reason, "new plugin failed to load");
         details.push(format!("{id}: {reason}"));
+    }
+    for (id, why) in &units.failed {
+        error!(plugin = %id, %why, "plugin supervision unit failed to spawn");
+        details.push(format!("{id}: supervision unit failed to spawn: {why}"));
     }
 
     let reloaded = report.reloaded.len() + report.loaded.len();
@@ -1500,6 +1546,10 @@ fn build_reload_fn(
     data_dir: &Path,
     plugin_locales: SharedLocales,
     runtime: tokio::runtime::Handle,
+    tree: Init,
+    plugins_pid: Pid,
+    service: TaskService,
+    plugin_health: PluginHealthSet,
 ) -> candyriya_command::ReloadFn {
     use candyriya_command::{ReloadReport, ReloadScope};
 
@@ -1519,15 +1569,19 @@ fn build_reload_fn(
             )
         });
         let plugins = plugin_phase.then(|| {
-            reload_plugins_phase(
-                &store,
-                &data_dir,
-                &plugin_set,
-                &cache,
-                &services,
-                &host_ipc,
-                &plugin_locales,
-            )
+            reload_plugins_phase(&PluginReloadWiring {
+                store: &store,
+                data_dir: &data_dir,
+                plugin_set: &plugin_set,
+                cache: &cache,
+                services: &services,
+                host_ipc: &host_ipc,
+                plugin_locales: &plugin_locales,
+                tree: &tree,
+                plugins_pid,
+                service: &service,
+                plugin_health: plugin_health.clone(),
+            })
         });
 
         ReloadReport { config, plugins }
@@ -1618,10 +1672,11 @@ fn build_locales(data_dir: &Path) -> Result<(candyriya_command::Locales, SharedL
 /// must not take the proxy down.
 fn load_plugins(
     data_dir: &Path,
-    config: &Config,
     cache: &CacheManager,
     plugin_locales: SharedLocales,
     host_ipc: HostIpc,
+    limits: Limits,
+    plugin_health: PluginHealthSet,
 ) -> Arc<PluginSet> {
     let plugins_dir = data_dir.join("plugins");
     let libraries_dir = data_dir.join("libraries");
@@ -1632,10 +1687,10 @@ fn load_plugins(
             warn!(path = %dir.display(), %error, "failed to create the plugin directory");
         }
     }
-    let limits = LimitBuilder::from_config(config).build();
     let loader = PluginLoader::with_limits(plugins_dir, libraries_dir, cache, limits)
         .with_locales(plugin_locales)
-        .with_host_ipc(host_ipc);
+        .with_host_ipc(host_ipc)
+        .with_plugin_health(plugin_health);
     let report = loader.load();
     for (where_, why) in &report.issues {
         warn!(path = %where_.display(), "plugin: {why}");
@@ -1775,5 +1830,80 @@ mod tests {
 
         assert!(unit_failure_detail(&tree).is_none());
         assert_eq!(tree.zombie_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reap_group_children_harvests_group_zombies() {
+        let tree = test_tree();
+        let group_pid = tree
+            .spawn_unit(
+                Pid::INIT,
+                UnitSpec::new(
+                    "plugins",
+                    UnitKind::LongLived,
+                    RestartPolicy::Never,
+                    std::future::pending::<ExitStatus>,
+                ),
+            )
+            .expect("plugins group spawns");
+        let child_pid = tree
+            .spawn_unit(
+                group_pid,
+                UnitSpec::new(
+                    "plugin-x",
+                    UnitKind::Oneshot,
+                    RestartPolicy::Never,
+                    || async { ExitStatus::Success },
+                ),
+            )
+            .expect("group child spawns");
+        wait_zombies(&tree, 1).await;
+
+        reap_group_children(&tree);
+        assert_eq!(tree.zombie_count(), 0);
+        assert!(
+            tree.unit(child_pid).is_none(),
+            "the group reaper removed the harvested child"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_group_child_failure_does_not_trip_the_boot_watch() {
+        // a crashed plugin must never abort the proxy: the fail-fast
+        // watchdog looks at the root's direct children only, so a failure
+        // inside a group stays inside the group and never becomes a boot
+        // abort detail
+        let tree = test_tree();
+        let group_pid = tree
+            .spawn_unit(
+                Pid::INIT,
+                UnitSpec::new(
+                    "plugins",
+                    UnitKind::LongLived,
+                    RestartPolicy::Never,
+                    std::future::pending::<ExitStatus>,
+                ),
+            )
+            .expect("plugins group spawns");
+        tree.spawn_unit(
+            group_pid,
+            UnitSpec::new(
+                "plugin-x",
+                UnitKind::Oneshot,
+                RestartPolicy::Never,
+                || async { ExitStatus::failure("a crashed plugin") },
+            ),
+        )
+        .expect("group child spawns");
+        wait_zombies(&tree, 1).await;
+
+        assert!(
+            unit_failure_detail(&tree).is_none(),
+            "a group child's failure must not reach the root's fail-fast watch"
+        );
+        // the group reaper harvests it instead, like the mid-run tick does
+        reap_group_children(&tree);
+        assert_eq!(tree.zombie_count(), 0);
+        assert!(unit_failure_detail(&tree).is_none());
     }
 }
