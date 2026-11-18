@@ -480,7 +480,7 @@ impl PluginInstance {
     /// The library at `descriptor.path` is mapped (`LibraryLoader::open`,
     /// `OpenFlags::Now`), the opaque per-instance token is minted and the
     /// V1 table is built, then `candyriya_plugin_init` runs through
-    /// `init_plugin` (the same fail-closed handshake [`initialize`] performs,
+    /// `init_plugin` (the same fail-closed handshake [`candyriya_native_instance::initialize`] performs,
     /// with the table taken by shared reference). On success the plugin
     /// receives `candyriya_plugin_on_load` and then
     /// `candyriya_plugin_on_enable`. All of this happens on the calling

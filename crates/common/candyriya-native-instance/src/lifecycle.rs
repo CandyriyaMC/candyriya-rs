@@ -253,6 +253,6 @@ mod tests {
         let table = CandyriyaPluginApiV1::new(token.handle());
         let args = PluginInitArgs::new(&table);
         assert_eq!(args.abi_version, 1);
-        assert_eq!(args.api as *const CandyriyaPluginApiV1, &table);
+        assert_eq!(args.api, &table as *const CandyriyaPluginApiV1);
     }
 }
