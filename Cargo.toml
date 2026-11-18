@@ -22,6 +22,7 @@ members = [
     "crates/common/candyriya-scheduler",
     "crates/common/candyriya-cache",
     "crates/common/candyriya-native-abi",
+    "crates/common/candyriya-native-instance",
     "crates/common/candyriya-plugin-controller",
     "crates/messaging/candyriya-messaging",
     "crates/messaging/candyriya-messaging-bungeecord",
