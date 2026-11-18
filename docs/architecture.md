@@ -261,7 +261,8 @@ and the storage trait the store crate implements. No I/O.
 **candyriya-player-store** — file-backed persistence for the historical
 records: one JSON file, atomic rewrite on every save (temp file +
 `sync_all` + rename), validated on open (size cap, per-record decode,
-duplicate UUIDs are a hard error), human-readable format. Single-process
+duplicate UUIDs are a hard error), compact JSON (pretty-printed files from
+older versions still load). Single-process
 ownership; multi-process writers are explicitly out of scope.
 
 ### Configuration
