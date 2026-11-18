@@ -534,6 +534,15 @@ name = "candyriya-native-abi"
 version = "0.1.1"
 
 [[package]]
+name = "candyriya-native-instance"
+version = "0.1.1"
+dependencies = [
+ "candyriya-native-abi",
+ "libloading",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "candyriya-permissions"
 version = "0.1.1"
 dependencies = [
@@ -2498,6 +2507,16 @@ checksum = "a9fd2f41a1cba099f79a0b6b6c35656cf7c03351a7bae8ff0f28f25270f929d2"
 dependencies = [
  "arbitrary",
  "cc",
+]
+
+[[package]]
+name = "libloading"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1832accd5a4ca2795ace4d05d15c4039be15b62d3b950eff99746a990e3cc10"
+dependencies = [
+ "cfg-if",
+ "windows-link",
 ]
 
 [[package]]
