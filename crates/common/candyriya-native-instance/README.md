@@ -29,7 +29,15 @@ supervisor/controller side of the native plugin machinery. It gives you:
 - [`validate_handshake`] / [`validate_init_output`] — fail-closed checks of
   both sides of the init handshake;
 - [`initialize`] — call the plugin's `candyriya_plugin_init` and copy the
-  reported identity out before the buffers stop being valid.
+  reported identity out before the buffers stop being valid;
+- [`init_plugin`] — the same handshake, table by shared reference, for
+  callers that carry no unsafe;
+- [`on_load`] / [`on_enable`] — call the two mandatory lifecycle exports
+  with the same pre-flight validation, equally safe for non-unsafe crates;
+- [`export_exists`] — answer "does this library export X?" without unsafe
+  at the call site;
+- [`PluginToken`] — mint the opaque per-instance token the V1 table hands
+  out, keeping the backing allocation alive for the plugin's lifetime.
 
 Do **not** use it to:
 
@@ -131,4 +139,9 @@ library.close()?;
 [`validate_handshake`]: https://docs.rs/candyriya-native-instance
 [`validate_init_output`]: https://docs.rs/candyriya-native-instance
 [`initialize`]: https://docs.rs/candyriya-native-instance
+[`init_plugin`]: https://docs.rs/candyriya-native-instance
+[`on_load`]: https://docs.rs/candyriya-native-instance
+[`on_enable`]: https://docs.rs/candyriya-native-instance
+[`export_exists`]: https://docs.rs/candyriya-native-instance
+[`PluginToken`]: https://docs.rs/candyriya-native-instance
 [`libloading::Symbol`]: https://docs.rs/libloading

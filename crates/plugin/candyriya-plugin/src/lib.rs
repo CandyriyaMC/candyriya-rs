@@ -8,9 +8,17 @@
 //! - [`PluginLoader`] — directory discovery across `plugins/` and
 //!   `libraries/`, per-plugin records, and [`LoadReport`] issues as
 //!   `(where, why)` tuples.
-//! - [`PluginInstance`] — a wasm module living on its dedicated,
-//!   named OS thread (`candyriya-plugin-<id>`), reachable through a bounded
-//!   mailbox; calls never run on async workers.
+//! - [`PluginInstance`] — a plugin living on its dedicated, named OS thread
+//!   (`candyriya-plugin-<id>`), reachable through a bounded mailbox; calls
+//!   never run on async workers. Wasm plugins compile a module through
+//!   extism; native ABI v1 plugins are mapped and brought up through
+//!   [`PluginInstance::native`] (dlopen/`LoadLibraryW` → fail-closed init
+//!   handshake → `on_load` → `on_enable`), with their lifecycle tracked in a
+//!   [`PluginRegistry`] from `candyriya-plugin-controller` (records walk
+//!   `DISCOVERED` → … → `RUNNING`; a refusal anywhere is a bring-up failure
+//!   and the record lands terminally in `UNLOADED` with the reason
+//!   preserved). Both paths share the thread, the mailbox, the supervision
+//!   shape and [`PluginDescriptor`].
 //! - [`LibraryPlugin`] / [`PluginState`] — per-plugin records and lifecycle
 //!   (`Loaded` / `Failed` / `Disabled`).
 //! - [`HostState`] — host-side state handed to each instance, carrying the
@@ -93,7 +101,7 @@ pub use crate::host_ipc::{HostIpc, HostIpcError};
 pub use crate::host_state::HostState;
 pub use crate::host_wire::{HostMsg, HostResp};
 pub use crate::hot_reload::{HotReloadError, PluginReloader, ReloadAllReport, ReloadReport, Watch};
-pub use crate::instance::PluginInstance;
+pub use crate::instance::{NativeLoadError, PluginDescriptor, PluginFormat, PluginInstance};
 pub use crate::library_plugin::{LibraryPlugin, PluginOrigin, PluginState};
 pub use crate::limits::{
     CALL_WINDOW, HandleTable, HostHandle, InstanceSlots, LimitBuilder, Limits, LogBudget,
@@ -105,3 +113,6 @@ pub use crate::plugin_set::PluginSet;
 pub use crate::service_registry::ServiceRegistry;
 pub use crate::units::{PluginUnitContext, PluginUnitsReport, sync_plugin_units};
 pub use candyriya_plugin_api::EventDispatcher;
+// the native lifecycle bookkeeping: records for the supervision tree to
+// render, and the registry that owns them
+pub use candyriya_plugin_controller::{PluginRegistry, PluginWireState};
