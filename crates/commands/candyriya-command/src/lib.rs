@@ -19,21 +19,23 @@
 //!   permission node get a `requires` clause on their node, backed by the
 //!   `candyriya-permissions` engine — no per-handler after-the-fact checking.
 //! - **The built-in commands.** [`CommandRegistry`] assembles the whole set:
-//!   `/candyriya` (`info`, `servers`, `switch`, `end`, `reload`), `/glist`,
-//!   `/send` and its `/server` and `/goto` aliases. Output goes through the
-//!   [`OutputSender`] seam as MiniMessage lines built from the embedded
-//!   locales ([`Locales`]); live effects (switching a player) go through
-//!   [`ProxyEffects`]; the shutdown flag (`/candyriya end`) is a shared
-//!   [`ShutdownHandle`]; `/candyriya reload` runs through a [`ReloadFn`]
-//!   wired with [`CommandRegistry::with_reload`]. See the `registry`
-//!   module docs for the wiring model.
+//!   `/candyriya` (`info`, `servers`, `switch`, `end`, `reload`, `ps`,
+//!   `tree`), `/glist`, `/send` and its `/server` and `/goto` aliases.
+//!   Output goes through the [`OutputSender`] seam as MiniMessage lines
+//!   built from the embedded locales ([`Locales`]); live effects (switching
+//!   a player) go through [`ProxyEffects`]; the shutdown flag (`/candyriya
+//!   end`) is a shared [`ShutdownHandle`]; `/candyriya reload` runs through
+//!   a [`ReloadFn`] wired with [`CommandRegistry::with_reload`]. See the
+//!   `registry` module docs for the wiring model.
 //!
 //! ## What this crate is not
 //!
 //! - No network, no async, no I/O. Parsing and tree building are pure; the
 //!   commands read the world through [`NetworkDirectory`] and mutate it
 //!   through [`ProxyEffects`] — both implemented by the composition root
-//!   (the cli), never here.
+//!   (the cli), never here. The `ps`/`tree` rendering is likewise pure: it
+//!   takes a [`PsSnapshot`] of the supervision tree (filled by the cli) and
+//!   produces MiniMessage lines.
 //! - No proxy-crate dependency. The registry is assembled over traits
 //!   precisely so this crate builds standalone.
 //! - No Java-like class hierarchies. Brigadier's literal/argument builders
@@ -67,11 +69,13 @@ mod dispatcher;
 mod effects;
 mod error;
 mod locales;
+mod ps;
 mod registry;
 mod snapshot;
 mod source;
 mod state;
 mod text;
+mod tree;
 
 pub mod commands;
 
@@ -87,6 +91,7 @@ pub use effects::{
 };
 pub use error::CommandError;
 pub use locales::Locales;
+pub use ps::{PsConn, PsExitStatus, PsSnapshot, PsUnit, PsUnitKind, PsUnitState};
 pub use registry::CommandRegistry;
 pub use snapshot::{BackendSnapshot, BackendState, ConnectionStats, ProxySnapshot};
 pub use source::{CommandOrigin, CommandSource, PlayerRef, SourceKind};

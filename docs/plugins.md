@@ -483,9 +483,10 @@ Start the proxy. At startup you will see:
   service registry (`plugins.set`) - it is never silent, but it never runs
   either.
 
-That is all. **`/candyriya` does not list plugins today** - the command
-set is `info|servers|switch|end|reload`, and the plugin set is not surfaced
-through it. `/candyriya reload plugins` is the way to (re)load a plugin
+That is all. **`/candyriya` does not list plugins as plugins today** — the
+command set is `info|servers|switch|end|reload|ps|tree`; `/candyriya ps`
+shows `plugin-<id>` units and the `plugins` group, but there is no per-plugin
+detail view. `/candyriya reload plugins` is the way to (re)load a plugin
 without a full restart; see [Hot reload](#hot-reload). If a plugin fails to
 load, fix the files (or, for a new plugin, place them) and reload - you will
 see either the issue line, or `loaded` increment.

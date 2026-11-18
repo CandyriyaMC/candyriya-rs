@@ -5,8 +5,8 @@
 //!
 //! - the [`Locales`] pair, always from `candyriya-i18n` (never a hardcoded
 //!   string outside this crate's MiniMessage locale files);
-//! - a read-only view over the proxy's configured servers, online players
-//!   and status snapshot ([`NetworkDirectory`]);
+//! - a read-only view over the proxy's configured servers, online players,
+//!   status snapshot and supervision tree ([`NetworkDirectory`]);
 //! - the effects sink ([`ProxyEffects`](crate::ProxyEffects)), which doubles
 //!   as the single output path
 //!   ([`OutputSender`](crate::OutputSender)).
@@ -93,6 +93,16 @@ pub trait NetworkDirectory: Send + Sync {
     /// per-backend table. Cheap for the same reason the other two methods
     /// are cheap; never fresher than the last health check.
     fn snapshot(&self) -> ProxySnapshot;
+
+    /// A consistent view of the supervision tree for `/candyriya ps` and
+    /// `/candyriya tree`.
+    ///
+    /// Carries every unit in the registry plus the per-connection counters,
+    /// ascending by pid, and the tree's own zombie gauges so the summary
+    /// line reports exactly what the tree tracks. Cheap for the same reason
+    /// the other methods are cheap: a clone of small vectors, never a
+    /// round trip anywhere.
+    fn ps_snapshot(&self) -> crate::PsSnapshot;
 }
 
 /// Everything a command implementation needs, built once and cloned into it.

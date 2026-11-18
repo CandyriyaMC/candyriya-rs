@@ -183,7 +183,7 @@ fn usage_hint(line: &str) -> Option<&'static str> {
         "server" => "/server <server>",
         "goto" => "/goto <server>",
         "glist" => "/glist",
-        "candyriya" => "/candyriya <info|servers|switch|end|reload>",
+        "candyriya" => "/candyriya <info|servers|switch|end|reload|ps|tree>",
         _ => return None,
     })
 }
@@ -216,7 +216,7 @@ mod tests {
         assert_eq!(usage_hint("glist"), Some("/glist"));
         assert_eq!(
             usage_hint("  /candyriya  "),
-            Some("/candyriya <info|servers|switch|end|reload>")
+            Some("/candyriya <info|servers|switch|end|reload|ps|tree>")
         );
         assert_eq!(usage_hint("notacommand"), None);
         assert_eq!(usage_hint("   "), None);

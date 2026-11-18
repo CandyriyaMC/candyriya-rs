@@ -29,10 +29,11 @@ use tracing::error;
 
 use candyriya_command::{
     BackendSnapshot, BackendState as CmdBackendState, ConnectionStats, NetworkDirectory,
-    OnlinePlayer, ProxySnapshot, ServerInfo,
+    OnlinePlayer, ProxySnapshot, PsConn, PsExitStatus, PsSnapshot, PsUnit, PsUnitKind, PsUnitState,
+    ServerInfo,
 };
 use candyriya_config::Config;
-use candyriya_init::{Init, Pid};
+use candyriya_init::{ExitStatus, Init, Pid, UnitKind, UnitState};
 use candyriya_proxy::ProxyState;
 
 /// The handles a live directory needs to talk to the supervision tree.
@@ -249,5 +250,81 @@ impl NetworkDirectory for CliDirectory {
             players,
             backends,
         }
+    }
+
+    fn ps_snapshot(&self) -> PsSnapshot {
+        // reads straight off the registry; no unit calls, no IPC — the
+        // operator view is allowed to look at the kernel's books directly
+        let units = self.links.init.units().into_iter().map(unit_info).collect();
+        let conns = self
+            .links
+            .init
+            .connections()
+            .into_iter()
+            .map(|counters| PsConn {
+                pid: counters.pid.as_u64(),
+                bytes_rx: counters.bytes_rx,
+                bytes_tx: counters.bytes_tx,
+                connected_at: counters.connected_at,
+                last_activity: counters.last_activity,
+            })
+            .collect();
+        let snapshot = self.links.init.snapshot();
+        PsSnapshot {
+            units,
+            conns,
+            zombies: snapshot.zombies as u64,
+            stuck_zombies: snapshot.stuck_zombies as u64,
+        }
+    }
+}
+
+fn ps_kind(kind: UnitKind) -> PsUnitKind {
+    match kind {
+        UnitKind::Oneshot => PsUnitKind::Oneshot,
+        UnitKind::LongLived => PsUnitKind::LongLived,
+        UnitKind::Every => PsUnitKind::Every,
+        UnitKind::Connection => PsUnitKind::Connection,
+        UnitKind::Plugin => PsUnitKind::Plugin,
+    }
+}
+
+fn ps_state(state: UnitState) -> PsUnitState {
+    match state {
+        UnitState::Running => PsUnitState::Running,
+        UnitState::Zombie => PsUnitState::Zombie,
+        UnitState::Restarting => PsUnitState::Restarting,
+        UnitState::FailedTerminal => PsUnitState::FailedTerminal,
+    }
+}
+
+fn ps_exit(status: &ExitStatus) -> PsExitStatus {
+    match status {
+        ExitStatus::Success => PsExitStatus::Success,
+        ExitStatus::Failure(message) => PsExitStatus::Failure(message.clone()),
+        ExitStatus::Panicked => PsExitStatus::Panicked,
+        ExitStatus::Cancelled => PsExitStatus::Cancelled,
+        ExitStatus::TimedOut => PsExitStatus::TimedOut,
+    }
+}
+
+fn unit_info(unit: candyriya_init::UnitInfo) -> PsUnit {
+    PsUnit {
+        pid: unit.pid.as_u64(),
+        // Pid::NONE (the root's missing parent) renders as 0; the table's
+        // "0 means none" convention lives in one place
+        ppid: if unit.ppid == Pid::NONE {
+            0
+        } else {
+            unit.ppid.as_u64()
+        },
+        name: unit.name,
+        kind: ps_kind(unit.kind),
+        state: ps_state(unit.state),
+        parked: unit.parked,
+        started_at: unit.started_at,
+        restart_count: unit.restart_count,
+        last_exit: unit.last_exit.as_ref().map(ps_exit),
+        exited_at: unit.exited_at,
     }
 }

@@ -1,6 +1,6 @@
 //! The built-in command set: `/candyriya` (info, servers, switch, end,
-//! reload), `/glist`, `/send`, and its `/server` and `/goto` sender-switch
-//! aliases.
+//! reload, ps, tree), `/glist`, `/send`, and its `/server` and `/goto`
+//! sender-switch aliases.
 //!
 //! `/candyriya` is the admin-facing root; its subcommands are permission
 //! gated. The player-facing commands are ungated, velocity-style: listing

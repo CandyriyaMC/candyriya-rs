@@ -1,8 +1,8 @@
 //! `/candyriya` — the proxy admin root.
 //!
-//! Subcommands: `info`, `servers`, `switch`, `end`, `reload`. The root
-//! itself carries no permission; each subcommand carries its own gate,
-//! so an unauthorized source cannot even parse the subtree it may not use.
+//! Subcommands: `info`, `servers`, `switch`, `end`, `reload`, `ps`, `tree`.
+//! The root itself carries no permission; each subcommand carries its own
+//! gate, so an unauthorized source cannot even parse the subtree it may not use.
 //!
 //! Output goes through the shared effects sink as i18n'd MiniMessage lines;
 //! `/candyriya end` flips the shared
@@ -13,7 +13,7 @@
 //! renders — never the mechanism itself.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use azalea_brigadier::arguments::string_argument_type::{get_string, word};
 use azalea_brigadier::builder::argument_builder::ArgumentBuilder;
@@ -32,7 +32,9 @@ use super::common::{out, switch_to};
 use super::reload::handle_reload;
 use super::suggest::{PlayerNames, ServerNames};
 use crate::effects::{ReloadFn, ReloadScope};
+use crate::ps::render_ps;
 use crate::snapshot::{BackendSnapshot, BackendState};
+use crate::tree::render_tree;
 
 fn permission_check(node: &'static str) -> impl Fn(&CommandSource) -> bool + Send + Sync + 'static {
     move |source: &CommandSource| source.has_permission(node)
@@ -170,6 +172,24 @@ fn handle_end(
     }
 }
 
+fn handle_ps(state: &CommandState, source: &CommandSource, full: bool) -> i32 {
+    let t = state.locales.pick(source);
+    let snapshot = state.directory.ps_snapshot();
+    for line in render_ps(&snapshot, full, Instant::now(), t) {
+        out(state, source, line);
+    }
+    1
+}
+
+fn handle_tree(state: &CommandState, source: &CommandSource) -> i32 {
+    let t = state.locales.pick(source);
+    let snapshot = state.directory.ps_snapshot();
+    for line in render_tree(&snapshot, t) {
+        out(state, source, line);
+    }
+    1
+}
+
 /// `/candyriya` — the proxy admin root. Subcommands carry their own gates.
 pub(crate) struct CandyriyaCommand {
     state: CommandState,
@@ -205,6 +225,9 @@ impl CandyCommand for CandyriyaCommand {
         let reload_parts = parts.clone();
         let reload_config_parts = parts.clone();
         let reload_plugins_parts = parts.clone();
+        let ps_parts = parts.clone();
+        let ps_full_parts = parts.clone();
+        let tree_parts = parts.clone();
         let end_shutdown = self.shutdown.clone();
         let reload_all = self.reload.clone();
         let reload_config = self.reload.clone();
@@ -260,6 +283,25 @@ impl CandyCommand for CandyriyaCommand {
                 .requires(permission_check("candyriya.command.end"))
                 .executes(move |ctx: &BrigadierContext<CommandSource>| {
                     handle_end(&end_parts, &ctx.source, &end_shutdown)
+                }),
+        )
+        .then(
+            literal::<CommandSource>("ps")
+                .requires(permission_check("candyriya.command.ps"))
+                .executes(move |ctx: &BrigadierContext<CommandSource>| {
+                    handle_ps(&ps_parts, &ctx.source, false)
+                })
+                .then(literal::<CommandSource>("--full").executes(
+                    move |ctx: &BrigadierContext<CommandSource>| {
+                        handle_ps(&ps_full_parts, &ctx.source, true)
+                    },
+                )),
+        )
+        .then(
+            literal::<CommandSource>("tree")
+                .requires(permission_check("candyriya.command.tree"))
+                .executes(move |ctx: &BrigadierContext<CommandSource>| {
+                    handle_tree(&tree_parts, &ctx.source)
                 }),
         )
         .then(

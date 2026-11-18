@@ -16,8 +16,9 @@ use uuid::Uuid;
 use candyriya_command::{
     BackendSnapshot, BackendState, CommandError, CommandRegistry, CommandSource, CommandState,
     ConnectionStats, Dispatcher, Locales, NetworkDirectory, OnlinePlayer, PlayerRef,
-    PluginPhaseReport, ProxyEffects, ProxySnapshot, ReloadReport, ReloadScope, ServerInfo,
-    ShutdownHandle, SwitchRequest, SwitchResult,
+    PluginPhaseReport, ProxyEffects, ProxySnapshot, PsConn, PsExitStatus, PsSnapshot, PsUnit,
+    PsUnitKind, PsUnitState, ReloadReport, ReloadScope, ServerInfo, ShutdownHandle, SwitchRequest,
+    SwitchResult,
 };
 use candyriya_i18n::I18n;
 use candyriya_permissions::{Grant, PermissionNode};
@@ -62,6 +63,7 @@ struct TestDirectory {
     servers: Vec<ServerInfo>,
     players: Vec<OnlinePlayer>,
     backends: Vec<BackendSnapshot>,
+    ps: PsSnapshot,
 }
 
 impl NetworkDirectory for TestDirectory {
@@ -88,6 +90,118 @@ impl NetworkDirectory for TestDirectory {
             backends: self.backends.clone(),
         }
     }
+
+    fn ps_snapshot(&self) -> PsSnapshot {
+        self.ps.clone()
+    }
+}
+
+fn ps_unit(
+    pid: u64,
+    ppid: u64,
+    name: &str,
+    kind: PsUnitKind,
+    started_at: std::time::Instant,
+) -> PsUnit {
+    PsUnit {
+        pid,
+        ppid,
+        name: name.to_owned(),
+        kind,
+        state: PsUnitState::Running,
+        parked: false,
+        started_at,
+        restart_count: 0,
+        last_exit: None,
+        exited_at: None,
+    }
+}
+
+fn default_ps_snapshot() -> PsSnapshot {
+    let now = std::time::Instant::now();
+    let units = vec![
+        ps_unit(
+            1,
+            0,
+            "init",
+            PsUnitKind::LongLived,
+            now - Duration::from_secs(3600),
+        ),
+        ps_unit(
+            2,
+            1,
+            "config",
+            PsUnitKind::LongLived,
+            now - Duration::from_secs(3599),
+        ),
+        ps_unit(
+            3,
+            1,
+            "proxy.accept",
+            PsUnitKind::LongLived,
+            now - Duration::from_secs(3598),
+        ),
+        ps_unit(
+            4,
+            1,
+            "players",
+            PsUnitKind::LongLived,
+            now - Duration::from_secs(3597),
+        ),
+        ps_unit(
+            5,
+            4,
+            "conn-1",
+            PsUnitKind::Connection,
+            now - Duration::from_secs(600),
+        ),
+        ps_unit(
+            6,
+            4,
+            "conn-2",
+            PsUnitKind::Connection,
+            now - Duration::from_secs(300),
+        ),
+        ps_unit(
+            7,
+            1,
+            "plugins",
+            PsUnitKind::LongLived,
+            now - Duration::from_secs(3590),
+        ),
+        PsUnit {
+            restart_count: 2,
+            ..ps_unit(
+                8,
+                7,
+                "plugin-doom",
+                PsUnitKind::Plugin,
+                now - Duration::from_secs(3000),
+            )
+        },
+    ];
+    let conns = vec![
+        PsConn {
+            pid: 5,
+            bytes_rx: 1024,
+            bytes_tx: 2048,
+            connected_at: now - Duration::from_secs(600),
+            last_activity: now - Duration::from_secs(3),
+        },
+        PsConn {
+            pid: 6,
+            bytes_rx: 4096,
+            bytes_tx: 8192,
+            connected_at: now - Duration::from_secs(300),
+            last_activity: now - Duration::from_secs(1),
+        },
+    ];
+    PsSnapshot {
+        units,
+        conns,
+        zombies: 0,
+        stuck_zombies: 0,
+    }
 }
 
 fn fixture_directory() -> TestDirectory {
@@ -103,6 +217,16 @@ fn fixture_directory() -> TestDirectory {
             OnlinePlayer::new(alex().uuid, "Alex", Some("pvp".to_owned())),
         ],
         backends: default_backends(),
+        ps: default_ps_snapshot(),
+    }
+}
+
+fn empty_ps_snapshot() -> PsSnapshot {
+    PsSnapshot {
+        units: Vec::new(),
+        conns: Vec::new(),
+        zombies: 0,
+        stuck_zombies: 0,
     }
 }
 
@@ -339,6 +463,7 @@ fn info_without_backends_says_so() {
             servers: vec![],
             players: vec![],
             backends: vec![],
+            ps: default_ps_snapshot(),
         },
         Capture::switched(),
     );
@@ -440,6 +565,7 @@ fn servers_table_without_servers() {
             servers: vec![],
             players: vec![],
             backends: vec![],
+            ps: default_ps_snapshot(),
         },
         Capture::switched(),
     );
@@ -597,6 +723,7 @@ fn server_sender_offline_rejected() {
             servers: vec![ServerInfo::new("lobby", 0), ServerInfo::new("pvp", 1)],
             players: vec![player("jeb_", "pvp", 2)], // Notch is not online
             backends: default_backends(),
+            ps: default_ps_snapshot(),
         },
         Capture::switched(),
     );
@@ -674,6 +801,7 @@ fn glist_counts_players_on_unregistered_backends_in_total_only() {
             servers: vec![ServerInfo::new("lobby", 0)],
             players: vec![player("Notch", "survival", 1)],
             backends: vec![backend("lobby", BackendState::Online, 0, Some(10))],
+            ps: default_ps_snapshot(),
         },
         Capture::switched(),
     );
@@ -700,6 +828,7 @@ fn glist_on_empty_network_reports_zero() {
             servers: vec![ServerInfo::new("lobby", 0)],
             players: vec![],
             backends: default_backends(),
+            ps: default_ps_snapshot(),
         },
         Capture::switched(),
     );
@@ -771,6 +900,7 @@ fn send_all_with_nobody_online() {
             servers: vec![ServerInfo::new("lobby", 0), ServerInfo::new("pvp", 1)],
             players: vec![],
             backends: default_backends(),
+            ps: default_ps_snapshot(),
         },
         Capture::switched(),
     );
@@ -824,6 +954,7 @@ fn send_partial_failure_reports_and_returns_zero() {
             servers: fixture_directory().servers,
             players: vec![player("Notch", "lobby", 1), player("jeb_", "lobby", 2)],
             backends: default_backends(),
+            ps: default_ps_snapshot(),
         },
         Capture::fail_for("jeb_", "backend blew up"),
     );
@@ -909,6 +1040,7 @@ fn roster_names_with_markup_are_escaped_in_output() {
             servers: fixture_directory().servers,
             players: vec![player("<gold>evil", "lobby", 9)],
             backends: default_backends(),
+            ps: default_ps_snapshot(),
         },
         Capture::fail_for("<gold>evil", "backend blew up"),
     );
@@ -1138,4 +1270,265 @@ fn reload_swaps_the_config_store_atomically() {
         .expect("reload config executes");
     assert_eq!(code, 1);
     assert_eq!(store.get().motd, "<aqua>after");
+}
+
+// --- /candyriya ps and /candyriya tree ---
+
+#[test]
+fn ps_aggregate_collapses_connections_and_counts_everything() {
+    let fixture = standard();
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya ps", CommandSource::console())
+        .expect("ps executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    // the two conns collapse into one aggregate row
+    assert!(joined.contains("conn × 2"), "aggregate row in {joined}");
+    assert!(
+        !joined.contains("conn-1"),
+        "conns must stay collapsed in {joined}"
+    );
+    assert!(
+        !joined.contains("conn-2"),
+        "conns must stay collapsed in {joined}"
+    );
+    // non-connection units keep their rows
+    assert!(joined.contains("proxy.accept"), "{joined}");
+    assert!(joined.contains("plugin-doom"), "{joined}");
+    // summary line reports the tree's own counters
+    assert!(
+        joined.contains("units: <gold>8<reset>"),
+        "units count in {joined}"
+    );
+    assert!(
+        joined.contains("conn: <gold>2<reset>"),
+        "conn count in {joined}"
+    );
+    assert!(
+        joined.contains("plugins: <gold>1<reset>"),
+        "plugins count in {joined}"
+    );
+    assert!(
+        joined.contains("zombies: <gold>0<reset>"),
+        "zombies count in {joined}"
+    );
+    // the legend is there, plain and complete
+    assert!(joined.contains("R=running"), "legend in {joined}");
+    // byte sums land on the aggregate row (1 KiB + 4 KiB = 5 KiB)
+    assert!(joined.contains("5 KiB"), "rx sum in {joined}");
+    assert!(joined.contains("10 KiB"), "tx sum in {joined}");
+}
+
+#[test]
+fn ps_full_expands_every_row() {
+    let fixture = standard();
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya ps --full", CommandSource::console())
+        .expect("ps --full executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("conn-1"), "full expands conns in {joined}");
+    assert!(joined.contains("conn-2"), "full expands conns in {joined}");
+    assert!(
+        !joined.contains("conn × 2"),
+        "no aggregate row in --full: {joined}"
+    );
+    assert!(
+        joined.contains("units: <gold>8<reset>"),
+        "summary still honest in --full: {joined}"
+    );
+}
+
+#[test]
+fn ps_full_is_the_same_table_with_every_row() {
+    // both modes share the header and the summary shape; --full only expands
+    let full = standard();
+    let code = full
+        .dispatcher
+        .execute("/candyriya ps --full", CommandSource::console())
+        .expect("ps --full executes");
+    assert_eq!(code, 1);
+    let lines = full.lines();
+    assert!(lines[0].contains("PID"), "header in {:?}", lines);
+    assert!(lines.join("\n").contains("units: <gold>8<reset>"));
+}
+
+#[test]
+fn tree_renders_box_drawing_guides() {
+    let fixture = standard();
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya tree", CommandSource::console())
+        .expect("tree executes");
+    assert_eq!(code, 1);
+    let lines = fixture.lines();
+    let joined = lines.join("\n");
+    assert!(joined.contains("init"), "{joined}");
+    assert!(joined.contains("├──"), "branch guides in {joined}");
+    assert!(joined.contains("└──"), "tail guides in {joined}");
+    assert!(
+        joined.contains("conn-1"),
+        "tree names all units in {joined}"
+    );
+    assert!(joined.contains("plugin-doom"), "{joined}");
+    // the root line carries no guide
+    let root_line = lines
+        .iter()
+        .find(|line| line.contains("init"))
+        .expect("root line");
+    assert!(!root_line.contains("──"), "root has no guide: {root_line}");
+    // plugin caption carries restarts-relevant facts only (kind), and exit when present
+    assert_eq!(lines.len(), 8, "one line per unit in {joined}");
+}
+
+#[test]
+fn tree_marks_parked_and_failed_units() {
+    let now = std::time::Instant::now();
+    let mut ps = default_ps_snapshot();
+    ps.units.push(PsUnit {
+        pid: 9,
+        ppid: 4,
+        name: "conn-frozen".to_owned(),
+        kind: PsUnitKind::Connection,
+        state: PsUnitState::Running,
+        parked: true,
+        started_at: now - Duration::from_secs(60),
+        restart_count: 0,
+        last_exit: None,
+        exited_at: None,
+    });
+    ps.units.push(PsUnit {
+        pid: 10,
+        ppid: 7,
+        name: "plugin-dead".to_owned(),
+        kind: PsUnitKind::Plugin,
+        state: PsUnitState::FailedTerminal,
+        parked: false,
+        started_at: now - Duration::from_secs(30),
+        restart_count: 5,
+        last_exit: Some(PsExitStatus::Failure("boom".to_owned())),
+        exited_at: Some(now - Duration::from_secs(5)),
+    });
+    ps.conns.push(PsConn {
+        pid: 9,
+        bytes_rx: 1,
+        bytes_tx: 1,
+        connected_at: now - Duration::from_secs(60),
+        last_activity: now,
+    });
+    let fixture = fixture_with(
+        TestDirectory {
+            servers: vec![],
+            players: vec![],
+            backends: vec![],
+            ps,
+        },
+        Capture::switched(),
+    );
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya tree", CommandSource::console())
+        .expect("tree executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("frozen"), "parked marker in {joined}");
+    assert!(joined.contains("conn-frozen"), "{joined}");
+    assert!(joined.contains("plugin-dead"), "{joined}");
+    assert!(joined.contains("failure(boom)"), "last exit in {joined}");
+}
+
+#[test]
+fn ps_denied_for_deny_all_player() {
+    let fixture = standard();
+    for input in ["/candyriya ps", "/candyriya ps --full", "/candyriya tree"] {
+        let err = fixture
+            .dispatcher
+            .execute(input, deny_all_player())
+            .expect_err("deny-all player cannot run the ps surface");
+        assert!(matches!(err, CommandError::Brigadier(_)));
+    }
+    assert!(fixture.lines().is_empty());
+}
+
+#[test]
+fn ps_grant_opens_only_the_ps_surface() {
+    let fixture = standard();
+    let player = player_with(&["candyriya.command.ps"]);
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya ps", player)
+        .expect("granted player may run ps");
+    assert_eq!(code, 1);
+    let tree_err = fixture
+        .dispatcher
+        .execute("/candyriya tree", player_with(&["candyriya.command.ps"]))
+        .expect_err("ps grant must not open tree");
+    assert!(matches!(tree_err, CommandError::Brigadier(_)));
+}
+
+#[test]
+fn ps_empty_tree_renders_honest_empty_state() {
+    let fixture = fixture_with(
+        TestDirectory {
+            servers: vec![],
+            players: vec![],
+            backends: vec![],
+            ps: empty_ps_snapshot(),
+        },
+        Capture::switched(),
+    );
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya ps", CommandSource::console())
+        .expect("ps executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("No units"), "empty state in {joined}");
+    assert!(
+        joined.contains("units: <gold>0<reset>"),
+        "zeros in the summary in {joined}"
+    );
+    assert!(!joined.contains("HTTP"), "nothing invented in {joined}");
+}
+
+#[test]
+fn tree_empty_tree_renders_empty_state() {
+    let fixture = fixture_with(
+        TestDirectory {
+            servers: vec![],
+            players: vec![],
+            backends: vec![],
+            ps: empty_ps_snapshot(),
+        },
+        Capture::switched(),
+    );
+    let code = fixture
+        .dispatcher
+        .execute("/candyriya tree", CommandSource::console())
+        .expect("tree executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(joined.contains("No units"), "empty state in {joined}");
+}
+
+#[test]
+fn ps_outputs_ex_girl_summary_for_ex_girl_source() {
+    let fixture = standard();
+    let code = fixture
+        .dispatcher
+        .execute(
+            "/candyriya ps",
+            CommandSource::console().with_locale("ex_girl"),
+        )
+        .expect("ps executes");
+    assert_eq!(code, 1);
+    let joined = fixture.lines().join("\n");
+    assert!(
+        joined.contains("юнитов: <gold>8<reset>"),
+        "ex_girl summary in {joined}"
+    );
+    assert!(joined.contains("АПТАЙМ"), "ex_girl header in {joined}");
+    assert!(!joined.contains("UPTIME"), "no en header leak in {joined}");
 }
