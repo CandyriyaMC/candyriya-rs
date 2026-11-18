@@ -43,14 +43,22 @@ fn ensure_size_within_cap(path: &Path, size: u64) -> Result<(), StoreError> {
 
 /// Parse and validate the raw bytes of a store file.
 ///
-/// A zero-length or all-whitespace file is treated as an empty store (a
-/// fresh proxy that never saved anything); anything else must be a JSON
-/// array of [`OfflinePlayer`] records with unique UUIDs. Duplicate UUIDs
-/// are a hard error carrying every 0-based index at which the duplicated
-/// UUID appears.
+/// A zero-length or all-whitespace file is *not* an empty store. This
+/// crate only ever writes complete JSON documents, so a file like that
+/// is almost certainly destroyed or truncated — it fails as
+/// [`StoreError::DestroyedFile`] instead of quietly yielding an empty
+/// map. Anything else must be a JSON array of [`OfflinePlayer`] records
+/// with unique UUIDs. Duplicate UUIDs are a hard error carrying every
+/// 0-based index at which the duplicated UUID appears.
 fn parse_records(path: &Path, bytes: &[u8]) -> Result<BTreeMap<Uuid, OfflinePlayer>, StoreError> {
+    // note: an empty slice passes the `all` check, so a zero-length file
+    // and an all-whitespace file take the same failure path — which is
+    // what we want, they are the same accident
     if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
-        return Ok(BTreeMap::new());
+        return Err(StoreError::destroyed_file(
+            path,
+            "empty or all-whitespace (likely truncated or destroyed)",
+        ));
     }
 
     let records: Vec<OfflinePlayer> =
@@ -98,6 +106,17 @@ fn read_and_validate(path: &Path) -> Result<BTreeMap<Uuid, OfflinePlayer>, Store
 /// step fails the temporary file is removed best-effort so no `.tmp-*`
 /// litter is left behind.
 ///
+/// Before any of that, the target is checked and the save is refused as
+/// [`StoreError::DestroyedFile`] when it exists but cannot be a store
+/// this crate wrote: a zero-length file, a non-regular path (FIFO,
+/// socket, device, dangling symlink), or anything the metadata call
+/// cannot make sense of. This crate never writes an empty file, so such
+/// a target is almost certainly a destroyed store — atomically replacing
+/// it would erase the evidence. A missing target is fine, the rename
+/// creates it. Note the check is metadata-only: an all-whitespace file
+/// with `len > 0` slips past it (the full whitespace check lives in
+/// `open()`), and that is a deliberate trade to keep saves cheap.
+///
 /// Directory fsync is deliberately skipped: the standard library has no
 /// portable directory fsync on Windows, and the rename is what keeps
 /// `players.json` from being torn open. Durability of the rename itself
@@ -109,6 +128,39 @@ fn persist(path: &Path, players: &BTreeMap<Uuid, OfflinePlayer>) -> Result<(), S
         && !parent.exists()
     {
         std::fs::create_dir_all(parent).map_err(|source| StoreError::io(parent, source))?;
+    }
+
+    // anti-clobber: never rename over a path that exists but cannot hold
+    // a store this crate wrote (zero-length, non-regular, or unstatable).
+    // a missing target is fine — the rename creates it
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            let (is_regular_file, is_zero_length) = if meta.file_type().is_symlink() {
+                // follow the link; a dangling symlink is not a store
+                match std::fs::metadata(path) {
+                    Ok(followed) if followed.is_file() => (true, followed.len() == 0),
+                    // symlink to a directory/device/socket, or a dangling
+                    // one: not a regular file
+                    _ => (false, false),
+                }
+            } else {
+                (meta.is_file(), meta.is_file() && meta.len() == 0)
+            };
+            if !is_regular_file || is_zero_length {
+                let detail = if is_regular_file {
+                    // regular file, but zero-length: truncation signature
+                    "empty or all-whitespace (likely truncated or destroyed)"
+                } else {
+                    "exists, but is not a regular file"
+                };
+                return Err(StoreError::destroyed_file(path, detail));
+            }
+        }
+        // target is genuinely gone: the rename will create it
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        // cannot tell what is there (permissions, transient IO error):
+        // be loud instead of clobbering
+        Err(source) => return Err(StoreError::io(path, source)),
     }
 
     // serialize the full map as compact JSON; records come out in UUID
@@ -235,8 +287,19 @@ impl JsonPlayerStore {
     /// - UUIDs must be unique — duplicates are a hard error reporting
     ///   every 0-based index at which the duplicated UUID appears.
     ///
+    /// A present-but-unusable file is a hard error, never silently
+    /// adopted as a fresh store:
+    ///
+    /// - an empty or all-whitespace file is almost certainly destroyed or
+    ///   truncated (this crate never writes one) —
+    ///   [`StoreError::DestroyedFile`];
+    /// - a path that exists but is not a regular file (FIFO, socket,
+    ///   device, dangling symlink) — [`StoreError::DestroyedFile`];
+    /// - a directory is an [`StoreError::Io`] with `IsADirectory`.
+    ///
     /// Errors don't overwrite or truncate anything: a refused file is left
-    /// untouched on disk.
+    /// untouched on disk, and the save path is guarded the same way, so a
+    /// destroyed file is never atomically replaced either.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
         if path.file_name().is_none() {
@@ -263,8 +326,24 @@ impl JsonPlayerStore {
                 std::io::Error::new(std::io::ErrorKind::IsADirectory, "path is a directory"),
             ));
         } else {
-            // missing file: fresh store
-            BTreeMap::new()
+            match std::fs::symlink_metadata(&path) {
+                // present (no-follow metadata says so), but not a regular
+                // file or directory: FIFO, socket, device, dangling symlink.
+                // dangling symlinks land here because is_file() follows
+                // links and fails on them, so something IS on disk and
+                // adopting a fresh store would silently erase it
+                Ok(_) => {
+                    return Err(StoreError::destroyed_file(
+                        &path,
+                        "exists, but is not a regular file",
+                    ));
+                }
+                // genuinely missing: fresh store, nothing to destroy
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+                // cannot tell what's there (permissions, transient IO
+                // error): be loud instead of guessing fresh
+                Err(source) => return Err(StoreError::io(&path, source)),
+            }
         };
 
         Ok(Self {
@@ -368,9 +447,26 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_only_parses_as_empty() {
+    fn whitespace_only_is_destroyed_error() {
         let path = Path::new("players.json");
-        let map = parse_records(path, b"  \n\t\n").unwrap();
-        assert!(map.is_empty());
+        match parse_records(path, b"  \n\t\n") {
+            Err(StoreError::DestroyedFile { path: got, detail }) => {
+                assert_eq!(got, path);
+                assert!(detail.contains("whitespace"));
+            }
+            other => panic!("expected DestroyedFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_byte_is_destroyed_error() {
+        let path = Path::new("players.json");
+        match parse_records(path, b"") {
+            Err(StoreError::DestroyedFile { path: got, detail }) => {
+                assert_eq!(got, path);
+                assert!(detail.contains("empty"));
+            }
+            other => panic!("expected DestroyedFile, got {other:?}"),
+        }
     }
 }

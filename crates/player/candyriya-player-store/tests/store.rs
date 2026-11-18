@@ -335,24 +335,46 @@ fn duplicate_uuids_reports_earliest_first_occurrence_first() {
 }
 
 #[test]
-fn empty_file_yields_empty_map() {
+fn empty_file_is_destroyed_error_and_stays_untouched() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = store_path(dir.path());
     std::fs::write(&path, b"").expect("write empty");
 
-    let store = JsonPlayerStore::open(&path).expect("empty file opens");
-    assert!(store.is_empty());
+    let result = JsonPlayerStore::open(&path);
+    let err = result.expect_err("empty file must error");
+    match &err {
+        StoreError::DestroyedFile { path: got, .. } => {
+            assert_eq!(got, &path);
+        }
+        other => panic!("expected DestroyedFile, got {other:?}"),
+    }
+    let rendered = err.to_string();
+    assert!(rendered.contains(&path.display().to_string()));
+    assert!(rendered.contains("destroyed"));
+    assert!(rendered.contains("not a regular file"));
+    // the refused file is left untouched
+    assert_eq!(std::fs::read(&path).expect("read back"), b"");
 }
 
 #[test]
-fn whitespace_only_file_yields_empty_map() {
+fn whitespace_only_file_is_destroyed_error_and_stays_untouched() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = store_path(dir.path());
-    std::fs::write(&path, b"  \n\n  \t\n").expect("write whitespace");
+    let whitespace = b"  \n\n  \t\n";
+    std::fs::write(&path, whitespace).expect("write whitespace");
 
-    let store = JsonPlayerStore::open(&path).expect("whitespace file opens");
-    assert!(store.is_empty());
-    assert_eq!(store.len(), 0);
+    let err = JsonPlayerStore::open(&path).expect_err("whitespace file must error");
+    match &err {
+        StoreError::DestroyedFile { path: got, .. } => {
+            assert_eq!(got, &path);
+        }
+        other => panic!("expected DestroyedFile, got {other:?}"),
+    }
+    // the refused file is left untouched, byte for byte
+    assert_eq!(
+        std::fs::read(&path).expect("read back"),
+        whitespace.as_slice()
+    );
 }
 
 #[test]
@@ -565,6 +587,42 @@ fn map_order_is_stable_across_reloads() {
         sorted
     };
     assert_eq!(keys, expected);
+}
+
+#[test]
+fn save_refuses_to_clobber_destroyed_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(dir.path());
+
+    let mut store = JsonPlayerStore::open(&path).expect("open");
+    PlayerStore::save(&mut store, record(1, "Stable")).expect("initial save");
+
+    // external accident truncates the file to zero bytes while the
+    // proxy keeps running
+    std::fs::write(&path, b"").expect("truncate");
+
+    let result = PlayerStore::save(&mut store, record(2, "Lost"));
+    match result {
+        Err(candyriya_player::PlayerStoreError::Backend(message)) => {
+            assert!(message.contains("destroyed"), "loud error: {message}");
+        }
+        other => panic!("expected Backend failure, got {other:?}"),
+    }
+    // the destroyed file is left in place as evidence
+    assert_eq!(std::fs::read(&path).expect("read back"), b"");
+    // no tmp litter from the refused save
+    assert_eq!(tmp_litter(dir.path()), Vec::<String>::new());
+    // the failed save rolled back: the lost record is not visible
+    assert!(
+        PlayerStore::load(&store, Uuid::from_u128(2))
+            .expect("load")
+            .is_none()
+    );
+    // the pre-existing record survives the rollback
+    assert_eq!(
+        PlayerStore::load(&store, Uuid::from_u128(1)).expect("load"),
+        Some(record(1, "Stable"))
+    );
 }
 
 #[test]

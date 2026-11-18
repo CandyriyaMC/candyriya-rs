@@ -40,8 +40,13 @@
 //! validates size (hard cap, see [`MAX_FILE_SIZE_BYTES`]), that every
 //! record deserializes, and that UUIDs are unique (duplicates are a hard
 //! error reporting the offending indices). A missing file yields an empty
-//! store. A store instance is meant to be owned by one proxy process;
-//! concurrent access from multiple processes is out of scope.
+//! store. A present-but-empty or all-whitespace file — almost certainly
+//! destroyed or truncated — and a path that exists but is not a regular
+//! file are refused with [`StoreError::DestroyedFile`]: never silently
+//! adopted as a fresh store, never overwritten; the bytes are left in
+//! place for forensics. A store instance is meant to be owned by one
+//! proxy process; concurrent access from multiple processes is out of
+//! scope.
 //!
 //! No network I/O, no unsafe code, no panics in API paths.
 #![forbid(unsafe_code)]
