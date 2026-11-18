@@ -42,7 +42,7 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -55,7 +55,7 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -69,7 +69,7 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Grep for task/thread spawns outside the kernel
         shell: bash
         run: |
@@ -115,7 +115,7 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
@@ -127,7 +127,7 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Type-check fuzz targets
@@ -141,7 +141,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build documentation
@@ -153,7 +153,7 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # EmbarkStudios/cargo-deny-action v2.1.2, pinned by commit SHA
       - name: cargo deny check advisories
         uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9
@@ -187,7 +187,7 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # RustSec/audit-check v2.0.0, pinned by commit SHA
       - name: Scan Cargo.lock for vulnerabilities
         uses: RustSec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
