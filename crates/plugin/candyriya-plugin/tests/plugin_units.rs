@@ -154,15 +154,21 @@ async fn poll_until(
     step: Duration,
 ) -> bool {
     let start = std::time::Instant::now();
+    let mut heartbeats = 0u64;
     loop {
         if predicate() {
             return true;
         }
+        let elapsed_ms = start.elapsed().as_millis();
+        heartbeats += 1;
+        if elapsed_ms % 5000 < step.as_millis() * 2 {
+            eprintln!(
+                "[diag] poll_until heartbeat #{heartbeats}: elapsed={:?}",
+                start.elapsed()
+            );
+        }
         if start.elapsed() > deadline {
             return false;
-        }
-        if start.elapsed() % Duration::from_secs(5) < step {
-            eprintln!("[diag] poll_until heartbeat: elapsed={:?}", start.elapsed());
         }
         tokio::time::sleep(step).await;
     }
@@ -369,13 +375,16 @@ async fn repeated_traps_reach_the_start_limit_and_stay_visible() {
 
     // two restarts are allowed, the third failure is terminal
     for expected_attempt in 1..=3u32 {
-        eprintln!("[diag] plugin state before dispatch: {:?}", set.state("spinner"));
+        eprintln!(
+            "[diag] plugin state before dispatch: {:?}",
+            set.state("spinner")
+        );
         let outcome = dispatcher.dispatch_event(&login_event());
         eprintln!("[diag] attempt {expected_attempt} dispatch outcome: {outcome:?}");
-// CI ubuntu runners are shared/throttled and each restart restages a
-// WAT-compiled wasm instance; attempts 1+2 alone can consume most of a
-// minute before the third trap lands. The assertions are unchanged;
-// only the wait ceiling is generous.
+        // CI ubuntu runners are shared/throttled and each restart restages a
+        // WAT-compiled wasm instance; attempts 1+2 alone can consume most of a
+        // minute before the third trap lands. The assertions are unchanged;
+        // only the wait ceiling is generous.
         let saw_zombie = poll_until(
             || tree.unit(pid).is_some_and(|u| u.state == UnitState::Zombie),
             Duration::from_secs(180),
