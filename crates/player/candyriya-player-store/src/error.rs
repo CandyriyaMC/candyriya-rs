@@ -60,6 +60,26 @@ pub enum StoreError {
         source: serde_json::Error,
     },
 
+    /// The path exists but cannot serve as a store. Either it is a regular
+    /// file that is empty or all-whitespace — almost certainly destroyed
+    /// or truncated, since this crate only ever writes complete JSON
+    /// documents — or it exists but is not a regular file at all (FIFO,
+    /// socket, device, dangling symlink; a directory is reported as
+    /// [`StoreError::Io`]). The path is left untouched so the original
+    /// bytes survive for forensics; an operator must inspect, repair or
+    /// remove it manually. Never returned for a missing path, which yields
+    /// a fresh store instead.
+    #[error(
+        "player store file '{}' appears to be destroyed or is not a regular file: {detail}; the file was left untouched",
+        .path.display()
+    )]
+    DestroyedFile {
+        /// The path that was refused.
+        path: PathBuf,
+        /// What was wrong with the path, in operator-facing words.
+        detail: &'static str,
+    },
+
     /// Two records in the backing file carry the same UUID. Store files are
     /// keyed by UUID, so duplicates make the file ambiguous and are a hard
     /// error. Carries every index (0-based, array order) at which the UUID
@@ -84,6 +104,14 @@ impl StoreError {
         Self::Io {
             path: path.to_path_buf(),
             source,
+        }
+    }
+
+    /// Wrap a destroyed/unusable-path refusal with the path it happened on.
+    pub(crate) fn destroyed_file(path: &std::path::Path, detail: &'static str) -> Self {
+        Self::DestroyedFile {
+            path: path.to_path_buf(),
+            detail,
         }
     }
 
