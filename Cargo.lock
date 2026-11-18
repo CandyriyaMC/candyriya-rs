@@ -465,8 +465,6 @@ dependencies = [
  "candyriya-config",
  "candyriya-forwarding",
  "candyriya-init",
- "candyriya-native-abi",
- "candyriya-native-instance",
  "candyriya-player",
  "candyriya-protocol",
  "candyriya-protocol-registry",
