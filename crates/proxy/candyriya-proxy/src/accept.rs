@@ -1,10 +1,11 @@
-//! The accept loop, the shared proxy state and the per-connection task.
+//! The accept loop, the shared proxy state and the per-connection unit.
 //!
 //! [`serve`] registers the loop as the named task `proxy.accept-loop`
-//! on the [`candyriya_scheduler::TaskService`]; connections are
-//! [`TaskService::spawn_named`]d as `proxy.conn.<id>`. There is no
-//! ad-hoc `tokio::spawn` anywhere in this module — the service is the
-//! only place tasks are born, watching, getting cancelled and drained.
+//! on the [`candyriya_scheduler::TaskService`]; every connection it hands
+//! out is registered as a supervised unit named `conn-<id>` under the
+//! `players` group unit, spawned through the tree — never through an
+//! ad-hoc `spawn_named` and never out of the tree's sight. There is no
+//! ad-hoc `tokio::spawn` anywhere in this module.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use tracing::{debug, error, info, warn};
 
 use candyriya_auth::AuthConfig;
 use candyriya_config::Config;
-use candyriya_init::{CallError, Init, Pid, current_unit};
+use candyriya_init::{CallError, ExitStatus, Init, Pid, current_unit};
 use candyriya_plugin_api::{EventDispatcher, EventIdRegistry};
 use candyriya_ratelimit::ConnectionLimiter;
 use candyriya_route::{BackendRef, BackendRegistry, RouteMsg, RouteResp, RouterStore, route_call};
@@ -57,6 +58,10 @@ pub struct ProxyState {
     /// The `route` unit's pid. Like the config pid, sibling units would need
     /// a grant to reach it; the root and per-connection tasks do not.
     route_pid: Pid,
+    /// The `players` group unit's pid. Every connection unit is spawned as
+    /// its child: the group owns the sessions as a subtree — accounting,
+    /// shutdown scoping and the parent rule for grants ride it.
+    players_pid: Pid,
     /// Monotonic connection-id counter. Starts at 0; handed out ids
     /// start at 1.
     pub conn_counter: AtomicU64,
@@ -108,6 +113,7 @@ impl core::fmt::Debug for ProxyState {
         f.debug_struct("ProxyState")
             .field("config_pid", &self.config_pid)
             .field("route_pid", &self.route_pid)
+            .field("players_pid", &self.players_pid)
             .field("conn_counter", &self.conn_counter.load(Ordering::Relaxed))
             .field(
                 "connection_rejections",
@@ -132,11 +138,22 @@ impl ProxyState {
     /// handed to [`candyriya_route::route_spec`] as well); this state keeps
     /// one handle so the reload path can swap the registry through it. The
     /// option inside the store starts as the caller seeded it.
-    pub fn new(init: Init, config_pid: Pid, route_pid: Pid, router_store: RouterStore) -> Self {
+    ///
+    /// `players_pid` is the pid of the group unit connection units hang
+    /// under — the composition root spawns it (parent [`Pid::INIT`]) and
+    /// hands the pid in; tests build their own.
+    pub fn new(
+        init: Init,
+        config_pid: Pid,
+        route_pid: Pid,
+        players_pid: Pid,
+        router_store: RouterStore,
+    ) -> Self {
         Self::with_limits(
             init,
             config_pid,
             route_pid,
+            players_pid,
             router_store,
             crate::DEFAULT_PER_IP_MAX,
         )
@@ -150,6 +167,7 @@ impl ProxyState {
         init: Init,
         config_pid: Pid,
         route_pid: Pid,
+        players_pid: Pid,
         router_store: RouterStore,
         per_ip_max: u64,
     ) -> Self {
@@ -161,6 +179,7 @@ impl ProxyState {
             init,
             config_pid,
             route_pid,
+            players_pid,
             conn_counter: AtomicU64::new(0),
             limiter,
             favicon_cache: None,
@@ -218,12 +237,14 @@ impl ProxyState {
     /// # Capability
     ///
     /// Unit bodies attribute the call to themselves and need a spawn-time
-    /// grant to the config unit (installed on `proxy.accept` by the
-    /// composition root). Code outside a unit body attributes to the root.
+    /// grant to the config unit — installed on `proxy.accept` by the
+    /// composition root, and on each connection unit by the accept loop,
+    /// which passes the handle down like an inherited fd. Code outside a
+    /// unit body attributes to the root.
     pub async fn config(&self) -> Result<Arc<Config>, CallError> {
-        // per-connection tasks are not units yet (phase 3); they attribute
-        // to the root, which is an ancestor of every unit, so the subtree
-        // rule authorizes the call. Unit bodies attribute to themselves.
+        // connection units are units: they attribute to themselves and hold
+        // the grant the accept loop installed on their spawn; outside a
+        // body, the root answers as the ancestor of everything
         let caller = current_unit().unwrap_or(Pid::INIT);
         config_unit::config(&self.init, caller, self.config_pid).await
     }
@@ -251,12 +272,13 @@ impl ProxyState {
     /// # Capability
     ///
     /// Unit bodies attribute the call to themselves and need a spawn-time
-    /// grant to the route unit (installed on `stats.every-60s` by the
-    /// composition root). Code outside a unit body attributes to the root.
+    /// grant to the route unit — installed on `stats.every-60s` by the
+    /// composition root, and on each connection unit by the accept loop.
+    /// Code outside a unit body attributes to the root.
     pub async fn route(&self, msg: RouteMsg) -> Result<RouteResp, CallError> {
-        // per-connection tasks are not units yet (phase 3); they attribute
-        // to the root, which is an ancestor of every unit, so the subtree
-        // rule authorizes the call. Unit bodies attribute to themselves.
+        // connection units are units: they attribute to themselves and hold
+        // the grant the accept loop installed on their spawn; outside a
+        // body, the root answers as the ancestor of everything
         let caller = current_unit().unwrap_or(Pid::INIT);
         route_call(&self.init, caller, self.route_pid, msg).await
     }
@@ -336,6 +358,26 @@ impl ProxyState {
         self
     }
 
+    /// The tree handle the state was built with.
+    pub(crate) fn init(&self) -> Init {
+        self.init.clone()
+    }
+
+    /// The `players` group unit's pid (see the struct docs).
+    pub(crate) fn players_pid(&self) -> Pid {
+        self.players_pid
+    }
+
+    /// The `config` unit's pid.
+    pub(crate) fn config_pid(&self) -> Pid {
+        self.config_pid
+    }
+
+    /// The `route` unit's pid.
+    pub(crate) fn route_pid(&self) -> Pid {
+        self.route_pid
+    }
+
     /// Allocate the next connection id.
     fn next_conn_id(&self) -> u64 {
         self.conn_counter.fetch_add(1, Ordering::Relaxed) + 1
@@ -346,7 +388,8 @@ impl ProxyState {
 ///
 /// Accepts connections from `listener` until `shutdown` flips to `true`
 /// (or the sending half of the watch channel is dropped), and hands each
-/// one to the limit checks and [`handle_connection`].
+/// one to the limit checks; every connection that passes them is registered
+/// as a supervised [`crate::conn`] unit through the tree.
 ///
 /// The global-connection cap is sized from the `config` unit at loop start.
 /// If the unit cannot produce a snapshot, the loop refuses to serve and
@@ -360,7 +403,7 @@ impl ProxyState {
 ///
 /// The loop applies a short backoff after a failed `accept(2)` so a
 /// transient kernel-side condition (e.g. `EMFILE`) cannot spin the
-/// worker. Accepted connections keep running in their own tasks after
+/// worker. Accepted connections keep running as their own units after
 /// this function returns.
 ///
 /// This is normally driven through [`serve`], which registers the loop
@@ -373,7 +416,6 @@ pub async fn accept_loop(
     state: Arc<ProxyState>,
     listener: TcpListener,
     shutdown: watch::Receiver<bool>,
-    service: TaskService,
 ) -> bool {
     let semaphore = Arc::new(Semaphore::new(match state.config().await {
         Ok(config) => usize::try_from(config.advanced.max_connections).unwrap_or(usize::MAX),
@@ -438,11 +480,18 @@ pub async fn accept_loop(
                     }
                 };
 
-                let state = Arc::clone(&state);
-                service.spawn_named(
-                    format!("proxy.conn.{conn_id}"),
-                    handle_connection(state, stream, peer, conn_id, slot),
-                );
+                // registered before any byte is read: an unregistered
+                // connection is one ps cannot see and shutdown cannot
+                // reach — refused instead of served
+                match crate::conn::spawn_conn_unit(&state, stream, peer, conn_id, slot) {
+                    Ok(pid) => {
+                        debug!(conn = conn_id, pid = %pid, "connection registered as a supervised unit");
+                    }
+                    Err(error) => {
+                        state.connection_rejections.fetch_add(1, Ordering::Relaxed);
+                        error!(conn = conn_id, %peer, %error, "failed to register the connection as a supervised unit; closing it");
+                    }
+                }
             }
         }
     }
@@ -456,32 +505,39 @@ pub async fn accept_loop(
 /// the `watch<bool>` shutdown signal, not the task service's own
 /// cancellation tokens, so for a clean drain the composition root
 /// must flip the watch to `true` first and only then call
-/// `TaskService::drain`. Finite connection tasks that are still parked
+/// `TaskService::drain`. Finite connection units that are still parked
 /// when the drain deadline passes are reported `timed_out` by the
 /// service — that is the service's documented contract, not a leak.
 ///
 /// The accept loop is the only task this function registers. Connections
-/// it accepts are registered by the loop itself as `proxy.conn.<id>`.
+/// it accepts are registered by the loop itself as `conn-<id>` units,
+/// children of the `players` group unit.
 pub fn serve(
     state: Arc<ProxyState>,
     listener: TcpListener,
     shutdown: watch::Receiver<bool>,
     service: &TaskService,
 ) -> TaskId {
-    let service_in_task = service.clone();
     service.spawn_named("proxy.accept-loop", async move {
-        accept_loop(state, listener, shutdown, service_in_task).await;
+        accept_loop(state, listener, shutdown).await;
     })
 }
 
-/// The per-connection task body.
+/// The per-connection unit body.
 ///
 /// Holds the connection's [`ConnectionSlot`] (per-IP guard and global
 /// permit) for the entire lifetime of the connection: the slot is
-/// released exactly when the task ends, no matter how it ends.
+/// released exactly when the body ends, no matter how it ends.
 ///
 /// `TCP_NODELAY` is applied here rather than only on the listener,
 /// because accepted sockets do not reliably inherit it.
+///
+/// Freeze: the body honors the cooperative park gate before touching the
+/// socket — a frozen connection reads nothing, starts no handshake and
+/// burns no deadline until it is unfrozen. Once past that boundary, the
+/// play-state pump re-checks the gate at every loop boundary; the login
+/// phase itself is not interposable (see the pump's module docs for what
+/// exactly parks where).
 ///
 /// The body reads the client's handshake, routes on its intent and takes
 /// over the connection from there. A status-intent handshake is served by
@@ -491,14 +547,30 @@ pub fn serve(
 /// handler yet, and the connection is closed instead of held open.
 /// Any handshake failure closes the connection with a debug log — a peer
 /// that cannot complete a frame is never tolerated.
+///
+/// # Outcome
+///
+/// Returns the exit status the tree records when the body ends:
+/// [`ExitStatus::Success`] for every client-driven ending (a status served,
+/// a session that ended for any reason, a dropped or mistyped frame),
+/// [`ExitStatus::Failure`] only when the proxy itself could not proceed
+/// (the configuration was unavailable before the handshake). Neither is a
+/// restart-worthy condition; the unit runs under [`RestartPolicy::Never`].
 pub async fn handle_connection(
     state: Arc<ProxyState>,
     mut stream: TcpStream,
     peer: SocketAddr,
     conn_id: u64,
     slot: ConnectionSlot,
-) {
-    let slot = slot; // held until the end of the task: releases both slots on drop
+) -> ExitStatus {
+    let slot = slot; // held until the end of the body: releases both slots on drop
+
+    // freeze first: while parked, nothing is read and the handshake
+    // deadline has not started, so a frozen session resumes into a fresh
+    // window instead of dying of one it slept through
+    if let Some(mut gate) = candyriya_init::park_gate() {
+        gate.wait_open().await;
+    }
 
     if let Err(error) = stream.set_nodelay(true) {
         warn!(conn = conn_id, %peer, %error, "failed to set TCP_NODELAY; continuing");
@@ -508,7 +580,9 @@ pub async fn handle_connection(
         Ok(config) => HandshakeLimits::from_config(&config),
         Err(error) => {
             error!(conn = conn_id, %peer, %error, "configuration unavailable; dropping the connection before the handshake");
-            return;
+            return ExitStatus::failure(format!(
+                "configuration unavailable at connection start: {error}"
+            ));
         }
     };
     match read_handshake(&mut stream, &limits).await {
@@ -556,6 +630,7 @@ pub async fn handle_connection(
         connections_in_flight = state.limiter.current_connections(),
         "connection closed"
     );
+    ExitStatus::Success
 }
 
 #[cfg(test)]
@@ -573,7 +648,25 @@ pub(crate) mod test_helpers {
 
     use super::ProxyState;
 
-    /// A state wired to a live config unit over a real tree.
+    /// Spawn the `players` group unit parented to the root, holding the
+    /// grants connection units may inherit at spawn.
+    pub(crate) fn spawn_players(init: &Init, grants: &[Pid]) -> Pid {
+        let mut spec = candyriya_init::UnitSpec::new(
+            "players",
+            candyriya_init::UnitKind::LongLived,
+            candyriya_init::RestartPolicy::Never,
+            std::future::pending::<candyriya_init::ExitStatus>,
+        );
+        for &grant in grants {
+            spec = spec.with_grant(grant);
+        }
+        init.spawn_unit(Pid::INIT, spec)
+            .expect("players unit spawns")
+    }
+
+    /// A state wired to a live config unit over a real tree; the players
+    /// group unit rides in the same tree, parented to the root, like in
+    /// production.
     pub(crate) fn test_state(config: Config) -> ProxyState {
         test_state_with_config_unit(config).0
     }
@@ -604,8 +697,15 @@ pub(crate) mod test_helpers {
         let route_pid = init
             .spawn_unit(Pid::INIT, route_spec(Arc::clone(&router_store)))
             .expect("route unit spawns");
+        let players_pid = spawn_players(&init, &[config_pid, route_pid]);
         (
-            ProxyState::new(init.clone(), config_pid, route_pid, router_store),
+            ProxyState::new(
+                init.clone(),
+                config_pid,
+                route_pid,
+                players_pid,
+                router_store,
+            ),
             init,
             config_pid,
             route_pid,

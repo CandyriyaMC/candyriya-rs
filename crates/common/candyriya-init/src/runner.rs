@@ -29,9 +29,23 @@ use candyriya_scheduler::{TaskId, TaskService};
 
 use crate::exit::ExitStatus;
 use crate::ipc::CURRENT_UNIT;
+use crate::park::{PARK, ParkGate};
 use crate::pid::Pid;
 use crate::spec::UnitBody;
+use crate::stats::{CONN, ConnStats};
 use crate::tree::TreeState;
+
+/// Everything the wrapper needs to scope one body run, bundled so the
+/// spawn call site stays readable: the run's exit-classification clone
+/// slot is built inside, and `pid`/`name` arrive alongside.
+pub(crate) struct BodyWire {
+    /// The gate bound to this run (fresh receiver subscribed at spawn / respawn).
+    pub park: ParkGate,
+    /// The connection counters, present only for connection-kind units.
+    pub conn: Option<ConnStats>,
+    /// The per-run timeout, if the unit was built with one.
+    pub timeout: Option<Duration>,
+}
 
 /// Spawn one run of a unit body through the task service and return the id
 /// it assigned.
@@ -40,7 +54,9 @@ use crate::tree::TreeState;
 /// registration time (see `build_run` in `tree.rs`), never inside the spawned
 /// task. This function wraps the body in the exit-classification future and
 /// arms the `CURRENT_UNIT` task-local for the duration of the run, so
-/// [`crate::ipc::current_unit`] works inside unit bodies. Bodies created
+/// [`crate::ipc::current_unit`] works inside unit bodies. The [`crate::ParkGate`]
+/// and (for connection units) the [`crate::ConnStats`] are bound alongside
+/// it: they belong to the run, like the caller pid does. Bodies created
 /// inside this scope inherit nothing beyond their own code; helpers they
 /// spawn belong to them.
 ///
@@ -53,7 +69,7 @@ pub(crate) fn spawn_wrapper(
     pid: Pid,
     name: &str,
     body: UnitBody,
-    timeout: Option<Duration>,
+    wire: BodyWire,
 ) -> TaskId {
     let slot = Arc::new(Mutex::new(None::<ExitStatus>));
     let guard = ExitGuard {
@@ -62,18 +78,29 @@ pub(crate) fn spawn_wrapper(
         slot: slot.clone(),
     };
     let task_name = name.to_string();
-    let future = CURRENT_UNIT.scope(pid, async move {
-        let guard = guard;
-        let status = match timeout {
-            Some(limit) => match tokio::time::timeout(limit, body).await {
-                Ok(status) => status,
-                Err(_) => ExitStatus::TimedOut,
-            },
-            None => body.await,
-        };
-        // normal path: the guard takes over from here and records
-        *guard.slot.lock() = Some(status);
-    });
+    let BodyWire {
+        park,
+        conn,
+        timeout,
+    } = wire;
+    let future = PARK.scope(
+        park,
+        CONN.scope(
+            conn,
+            CURRENT_UNIT.scope(pid, async move {
+                let guard = guard;
+                let status = match timeout {
+                    Some(limit) => match tokio::time::timeout(limit, body).await {
+                        Ok(status) => status,
+                        Err(_) => ExitStatus::TimedOut,
+                    },
+                    None => body.await,
+                };
+                // normal path: the guard takes over from here and records
+                *guard.slot.lock() = Some(status);
+            }),
+        ),
+    );
     service.spawn_named(task_name, future)
 }
 

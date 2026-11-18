@@ -34,6 +34,20 @@
 //!   until it hits its own EOF or an error; only then does the pump stop.
 //!   When either direction errors or stalls, the other is dropped together
 //!   with it and both sockets close with the task.
+//! * **Cooperative freeze.** The unit body's park gate is honored at two
+//!   points of every copy iteration: the pump parks outright when the gate
+//!   is closed, and the pending socket read is raced against a freeze flip,
+//!   so a frozen connection consumes nothing that arrives after the flip —
+//!   not even bytes that were already buffered inside a read that had not
+//!   returned yet. TCP backpressure builds on its own. An in-flight chunk
+//!   write completes first; only the next read waits. The freeze covers
+//!   reads and bytes — it never holds a half-written packet, because a
+//!   parked pump cannot start one.
+//! * **Counters.** Every chunk pulled off a socket is added to the unit's
+//!   byte counters ([`current_conn_stats`](candyriya_init::current_conn_stats)):
+//!   client→backend as `bytes_rx`, backend→client as `bytes_tx`. The pump
+//!   is the only place bytes flow, so the counters are exact for the play
+//!   state and silent about the handshake/login phases by construction.
 //!
 //! Out of scope: switching the backend link to another server
 //! (`/candyriya switch`). That flow needs a fresh backend connection and a
@@ -64,6 +78,15 @@ use crate::wire::Wire;
 /// meaningful memory per connection. Not allocated up front: each pump owns
 /// a stack array that lives as long as the copy loop.
 const PUMP_BUF: usize = 8 * 1024;
+
+/// Which way bytes are flowing on this pump; selects the counter to bump.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Direction {
+    /// Client → backend: bytes received from the client.
+    Rx,
+    /// Backend → client: bytes received from the backend.
+    Tx,
+}
 
 /// The cipher transform applied to a chunk traveling one way.
 ///
@@ -96,12 +119,14 @@ impl Transform {
 /// observes the FIN, and the byte count is returned.
 ///
 /// The counter is monotonic per call; a direction that never finishes
-/// never reports a count.
+/// never reports a count. `direction` selects which byte counter is
+/// bumped (see the module docs for the honesty boundary).
 async fn pump_one_way<R, W>(
     mut reader: R,
     mut writer: W,
     mut transform: Option<Transform>,
     write_stall: Duration,
+    direction: Direction,
 ) -> io::Result<u64>
 where
     R: AsyncRead + Unpin,
@@ -109,11 +134,39 @@ where
 {
     let mut buf = [0u8; PUMP_BUF];
     let mut total = 0u64;
+    // the gate is a view on the unit's park state; outside unit bodies
+    // (tests driving the pump directly) there is none and the pump just runs
+    let mut gate = candyriya_init::park_gate();
     loop {
-        let n = reader.read(&mut buf).await?;
+        // freeze at the loop boundary: parked means no read, no transform,
+        // no write — backpressure is the client's or the backend's problem
+        // to feel, not ours to paper over
+        if let Some(gate) = &mut gate {
+            gate.wait_open().await;
+        }
+        let n = match &mut gate {
+            Some(gate) => {
+                // race the read against the freeze flip: a read that is
+                // already pending when the unit freezes must not consume
+                // bytes that arrive after the flip (see the module docs);
+                // biased so the gate wins over a ready read once closed
+                tokio::select! {
+                    biased;
+                    () = gate.wait_closed() => continue,
+                    read = reader.read(&mut buf) => read?,
+                }
+            }
+            None => reader.read(&mut buf).await?,
+        };
         if n == 0 {
             writer.shutdown().await?;
             return Ok(total);
+        }
+        if let Some(stats) = candyriya_init::current_conn_stats() {
+            match direction {
+                Direction::Rx => stats.add_bytes_rx(n as u64),
+                Direction::Tx => stats.add_bytes_tx(n as u64),
+            }
         }
         let chunk = &mut buf[..n];
         if let Some(transform) = &mut transform {
@@ -166,8 +219,20 @@ pub(crate) async fn run_play_state(
 
     let (client_read, client_write) = client.split();
     let (backend_read, backend_write) = backend.split();
-    let client_to_backend = pump_one_way(client_read, backend_write, to_backend, write_stall);
-    let backend_to_client = pump_one_way(backend_read, client_write, to_client, write_stall);
+    let client_to_backend = pump_one_way(
+        client_read,
+        backend_write,
+        to_backend,
+        write_stall,
+        Direction::Rx,
+    );
+    let backend_to_client = pump_one_way(
+        backend_read,
+        client_write,
+        to_client,
+        write_stall,
+        Direction::Tx,
+    );
 
     // Both pumps are polled in this one task — no spawn, no channel. The
     // first error drops the other pump on the floor and ends the session;
@@ -204,9 +269,15 @@ mod tests {
         sender.write_all(b"hello candyriya").await.unwrap();
         drop(sender); // the pump's read side must observe EOF
 
-        let bytes = pump_one_way(pump_reader, pump_writer, None, Duration::from_secs(1))
-            .await
-            .unwrap();
+        let bytes = pump_one_way(
+            pump_reader,
+            pump_writer,
+            None,
+            Duration::from_secs(1),
+            Direction::Rx,
+        )
+        .await
+        .unwrap();
         assert_eq!(bytes, 15);
 
         let mut got = Vec::new();
@@ -223,9 +294,15 @@ mod tests {
         // an 8-byte pipe that nobody drains: the 512-byte chunk written by
         // the pump fills it instantly and then stalls forever
         let (pump_writer, _keep) = duplex(8);
-        let error = pump_one_way(pump_reader, pump_writer, None, Duration::from_millis(50))
-            .await
-            .expect_err("the write must stall and time out");
+        let error = pump_one_way(
+            pump_reader,
+            pump_writer,
+            None,
+            Duration::from_millis(50),
+            Direction::Rx,
+        )
+        .await
+        .expect_err("the write must stall and time out");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
@@ -249,6 +326,7 @@ mod tests {
             pump_writer,
             Some(Transform::Decrypt(decrypt)),
             Duration::from_secs(1),
+            Direction::Rx,
         )
         .await
         .unwrap();
@@ -274,6 +352,7 @@ mod tests {
             pump_writer,
             Some(Transform::Encrypt(encrypt)),
             Duration::from_secs(1),
+            Direction::Tx,
         )
         .await
         .unwrap();

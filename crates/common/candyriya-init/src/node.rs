@@ -154,4 +154,12 @@ pub struct UnitInfo {
     pub last_exit: Option<ExitStatus>,
     /// When the current run exited, if it has. Used to compute zombie age.
     pub exited_at: Option<Instant>,
+    /// Whether the unit is currently parked by [`crate::Init::freeze`].
+    ///
+    /// The flag flips synchronously with the park gate, so a body that
+    /// honors its gate is parked exactly when this reads `true` (modulo the
+    /// in-flight await it may still be completing). Always `false` for units
+    /// that do not check their gate; the flag reports the request, the body
+    /// decides what to do with it.
+    pub parked: bool,
 }

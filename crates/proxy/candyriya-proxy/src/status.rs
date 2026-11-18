@@ -249,8 +249,8 @@ where
 }
 
 /// The unit the call is attributed to: the calling unit's own pid inside a
-/// unit body, the root everywhere else. The root is an ancestor of every
-/// unit, so the subtree rule authorizes the call either way.
+/// unit body, the root everywhere else. Connection units hold the grant the
+/// accept loop installed on their spawn, so the call authorizes either way.
 fn caller() -> Pid {
     current_unit().unwrap_or(Pid::INIT)
 }
@@ -276,6 +276,14 @@ impl std::fmt::Debug for FaviconCache {
 }
 
 impl FaviconCache {
+    /// The pid of the `cache` unit this handle fronts.
+    ///
+    /// Used by the accept loop to grant the unit to connection units at
+    /// spawn, like an inherited fd.
+    pub(crate) fn cache_pid(&self) -> Pid {
+        self.cache_pid
+    }
+
     /// A handle to the `cache` unit serving the core namespace, with the
     /// given entry TTL.
     ///

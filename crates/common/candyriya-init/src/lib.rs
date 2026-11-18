@@ -15,6 +15,13 @@
 //!   per its policy;
 //! - **orphan re-parenting** — when a unit exits, its children are
 //!   re-parented to the root, which reaps them;
+//! - **cooperative freeze** — a `watch` gate bound to each unit at spawn;
+//!   [`Init::freeze`] / [`Init::unfreeze`] park a conforming body at its
+//!   next loop boundary (see [`park_gate`]); readers learn the state from
+//!   [`UnitInfo::parked`];
+//! - **per-connection accounting** — units of kind
+//!   [`UnitKind::Connection`] carry exact byte counters from spawn to reap
+//!   (see [`current_conn_stats`] / [`Init::connections`]);
 //! - **a bounded ring of recent exits** — bounded history for ps/metrics;
 //! - **stuck-zombie accounting** — zombies older than a configurable
 //!   threshold are counted and exposed via the `candyriya_zombies` /
@@ -59,11 +66,13 @@ mod exit;
 mod ipc;
 mod metrics;
 mod node;
+mod park;
 mod pid;
 mod policy;
 mod ring;
 mod runner;
 mod spec;
+mod stats;
 mod tree;
 
 pub use crate::error::InitError;
@@ -74,7 +83,9 @@ pub use crate::ipc::{
     OUTCOME_TYPE_MISMATCH, ServiceContext, current_unit,
 };
 pub use crate::node::{ServiceKind, UnitInfo, UnitKind, UnitState};
+pub use crate::park::{ParkGate, park_gate};
 pub use crate::pid::Pid;
 pub use crate::policy::{RestartLimits, RestartPolicy};
 pub use crate::spec::{UnitBody, UnitBodyFactory, UnitSpec};
+pub use crate::stats::{ConnStats, ConnectionInfo, current_conn_stats};
 pub use crate::tree::{Init, InitOptions, MAX_UNIT_NAME_BYTES, ReapOutcome, TreeSnapshot};

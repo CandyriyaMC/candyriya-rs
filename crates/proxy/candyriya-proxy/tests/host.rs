@@ -29,6 +29,8 @@ use uuid::Uuid;
 
 use candyriya_proxy::{ProxyState, config_spec, host_spec};
 
+mod common;
+
 /// The fixture target module: `hello_world` always answers `howdy`.
 const TARGET_WAT: &str = r#"(module
   (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
@@ -133,10 +135,12 @@ fn spawn_fixture(seed: Option<RouterStore>, plugins: &[(&str, &str, Vec<u8>)]) -
     let route_pid = init
         .spawn_unit(Pid::INIT, route_spec(Arc::clone(&store)))
         .expect("route unit spawns");
+    let players_pid = common::spawn_players(&init, &[config_pid, route_pid]);
     let state = Arc::new(ProxyState::new(
         init.clone(),
         config_pid,
         route_pid,
+        players_pid,
         Arc::clone(&store),
     ));
 

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use candyriya_scheduler::{TaskId, TaskService};
 
@@ -37,6 +37,7 @@ use crate::pid::Pid;
 use crate::policy::{AttemptWindow, PolicyDecision, RestartLimits, RestartPolicy, evaluate};
 use crate::ring::RecentExits;
 use crate::spec::{UnitBody, UnitBodyFactory, UnitSpec};
+use crate::stats::ConnectionInfo;
 
 /// Upper bound of a unit name, in bytes. Names go into logs, metrics
 /// labels and the process table; 128 bytes is generous and keeps labels sane.
@@ -136,6 +137,14 @@ pub(crate) struct UnitNode {
     pub restart_count: u32,
     pub last_exit: Option<ExitStatus>,
     pub exited_at: Option<Instant>,
+    // cooperative park gate: the sender side, kept for the unit's whole
+    // lifetime so freeze/unfreeze can flip it at any time; each body run
+    // subscribes its own receiver at spawn/respawn
+    park_tx: watch::Sender<bool>,
+    parked: bool,
+    // per-connection counters; only connection-kind units carry them (a
+    // non-connection unit pays exactly one `None`)
+    stats: Option<crate::stats::ConnStats>,
     policy: RestartPolicy,
     factory: UnitBodyFactory,
     timeout: Option<Duration>,
@@ -164,6 +173,7 @@ impl UnitNode {
             restart_count: self.restart_count,
             last_exit: self.last_exit.clone(),
             exited_at: self.exited_at,
+            parked: self.parked,
         }
     }
 }
@@ -186,6 +196,8 @@ impl TreeState {
         // the root owns a mailbox like everyone else; nobody services it
         let (mailbox, dead_rx) = mpsc::channel(DEFAULT_MAILBOX_CAPACITY);
         drop(dead_rx);
+        let (root_park_tx, root_park_rx) = watch::channel(false);
+        drop(root_park_rx);
         let root = UnitNode {
             pid: Pid::INIT,
             ppid: Pid::NONE,
@@ -207,6 +219,9 @@ impl TreeState {
             service_kind: None,
             call_timeout: None,
             service: None,
+            park_tx: root_park_tx,
+            parked: false,
+            stats: None,
         };
         let mut nodes = HashMap::with_capacity(16);
         nodes.insert(Pid::INIT, root);
@@ -450,18 +465,30 @@ impl TreeState {
                         node.service.clone(),
                         node.mailbox_capacity,
                         node.timeout,
+                        crate::park::ParkGate::new(node.park_tx.subscribe()),
+                        node.stats.clone(),
                     ))
                 }
             }
         };
-        let Some((name, factory, wiring, capacity, timeout)) = decision else {
+        let Some((name, factory, wiring, capacity, timeout, gate, stats)) = decision else {
             return false;
         };
         self.restarts_total += 1;
         metrics::counter!("candyriya_services_restarts_total").increment(1);
         let (mailbox, body) = build_run(wiring, capacity, factory, pid);
-        let service_id =
-            crate::runner::spawn_wrapper(service, Arc::clone(tree), pid, &name, body, timeout);
+        let service_id = crate::runner::spawn_wrapper(
+            service,
+            Arc::clone(tree),
+            pid,
+            &name,
+            body,
+            crate::runner::BodyWire {
+                park: gate,
+                conn: stats,
+                timeout,
+            },
+        );
         if let Some(node) = self.nodes.get_mut(&pid) {
             node.mailbox = Some(mailbox);
             node.service_id = Some(service_id);
@@ -599,6 +626,9 @@ impl Init {
         let pid = Pid::new(st.next_raw_pid);
         st.next_raw_pid += 1;
         let capacity = spec.mailbox_capacity.unwrap_or(DEFAULT_MAILBOX_CAPACITY);
+        let (park_tx, park_rx) = watch::channel(false);
+        // connection units get counters bound at spawn; everyone else pays a None
+        let conn_stats = (spec.kind == UnitKind::Connection).then(crate::stats::ConnStats::new);
         let (mailbox, body) = build_run(spec.service.clone(), capacity, spec.factory.clone(), pid);
         // The tree lock is held across the spawn: the wrapper can never run
         // before the node exists (a fast exit would otherwise race the
@@ -613,7 +643,11 @@ impl Init {
             pid,
             &spec.name,
             body,
-            spec.timeout,
+            crate::runner::BodyWire {
+                park: crate::park::ParkGate::new(park_rx),
+                conn: conn_stats.clone(),
+                timeout: spec.timeout,
+            },
         );
         st.nodes.insert(
             pid,
@@ -638,6 +672,9 @@ impl Init {
                 service_kind: spec.service_kind,
                 call_timeout: spec.call_timeout,
                 service: spec.service.clone(),
+                park_tx,
+                parked: false,
+                stats: conn_stats,
             },
         );
         for &grant in &spec.grants {
@@ -712,6 +749,8 @@ impl Init {
         // ever runs against the node
         let (mailbox, dead_rx) = mpsc::channel(DEFAULT_MAILBOX_CAPACITY);
         drop(dead_rx);
+        let (park_tx, park_rx) = watch::channel(false);
+        drop(park_rx);
         st.zombies_current += 1;
         st.exits.push(record);
         st.nodes.insert(
@@ -737,6 +776,10 @@ impl Init {
                 service_kind: None,
                 call_timeout: None,
                 service: None,
+                park_tx,
+                parked: false,
+                // adopted units never run bodies; no counters
+                stats: None,
             },
         );
         st.emit_zombie_metrics();
@@ -763,6 +806,113 @@ impl Init {
             Some(id) => Ok(self.service.cancel(id)),
             None => Ok(false),
         }
+    }
+
+    /// Freeze a unit cooperatively: flip its park gate closed.
+    ///
+    /// A conforming body parks at its next loop boundary and stays parked
+    /// until [`Init::unfreeze`] — no reads, no frame processing, no torn
+    /// await; TCP backpressure builds naturally. This is the operator's
+    /// freeze, not a signal: units that never check the gate (bootstrap
+    /// glue, one-shot steps) are unaffected, which is the honest contract
+    /// of a cooperative gate. Flipping the gate of a unit that already
+    /// exited is accepted as a no-op on the runtime side (the flag still
+    /// lands, like [`Init::cancel`]'s does).
+    ///
+    /// Returns whether the gate changed state: `false` when the unit was
+    /// already frozen.
+    ///
+    /// # Errors
+    ///
+    /// [`InitError::NoSuchUnit`] — no unit with pid `pid` exists.
+    pub fn freeze(&self, pid: Pid) -> Result<bool, InitError> {
+        self.set_parked(pid, true)
+    }
+
+    /// Unfreeze a unit: flip its park gate open.
+    ///
+    /// A parked body resumes at its parked await. Returns whether the gate
+    /// changed state: `false` when the unit was already running.
+    ///
+    /// # Errors
+    ///
+    /// [`InitError::NoSuchUnit`] — no unit with pid `pid` exists.
+    pub fn unfreeze(&self, pid: Pid) -> Result<bool, InitError> {
+        self.set_parked(pid, false)
+    }
+
+    /// Whether the unit is currently parked (see [`Init::freeze`]).
+    ///
+    /// # Errors
+    ///
+    /// [`InitError::NoSuchUnit`] — no unit with pid `pid` exists.
+    pub fn is_parked(&self, pid: Pid) -> Result<bool, InitError> {
+        let st = self.inner.lock();
+        let node = st.nodes.get(&pid).ok_or(InitError::NoSuchUnit(pid))?;
+        Ok(node.parked)
+    }
+
+    /// Flip a unit's park gate, updating the node's bookkeeping and the
+    /// gate in one critical section.
+    ///
+    /// The watch sender never blocks and never fails here — `send_replace`
+    /// works with zero receivers (a parked-until-reaped body may already be
+    /// gone), so a flip on a zombie is recorded, not reported.
+    fn set_parked(&self, pid: Pid, parked: bool) -> Result<bool, InitError> {
+        let mut st = self.inner.lock();
+        let node = st.nodes.get_mut(&pid).ok_or(InitError::NoSuchUnit(pid))?;
+        let changed = node.parked != parked;
+        node.parked = parked;
+        let _ = node.park_tx.send_replace(parked);
+        if changed {
+            tracing::info!(%pid, parked, "unit park gate flipped");
+        }
+        Ok(changed)
+    }
+
+    /// Cancel every non-root unit in the tree, newest first (reverse spawn
+    /// order), and return the pids it actually stopped.
+    ///
+    /// One code path for "stop everything": the shutdown cascade and the
+    /// boot abort both want this, and doing it in the kernel guarantees
+    /// every non-root unit is reached — including units spawned after the
+    /// caller last looked at the registry. The root (pid 1) is skipped:
+    /// its lifecycle is the process's.
+    ///
+    /// Ordering is descending pid, which is reverse spawn order for every
+    /// unit the tree registered: pids are never reused, so a higher pid is
+    /// always a younger unit. Tearing down newest-first means children
+    /// finish before their parents notice, which keeps re-parenting to the
+    /// root meaningful at the end of the process.
+    ///
+    /// Only units whose [`Init::cancel`] reported an actual stop request
+    /// are returned — units already finished (zombies, failed-terminal)
+    /// still get their stop flag lands but are not listed. Callers that
+    /// need the whole tree gone still have to reap (see
+    /// [`Init::reap_children`]).
+    ///
+    /// Cancellation itself is unit-local: a unit dies at its next await,
+    /// not synchronously. Like [`Init::cancel`], this flip is instant and
+    /// total; waiting for the exits is the caller's job.
+    pub fn cancel_all(&self) -> Vec<Pid> {
+        let mut pids: Vec<Pid> = {
+            let st = self.inner.lock();
+            st.nodes
+                .keys()
+                .copied()
+                .filter(|&pid| pid != Pid::INIT)
+                .collect()
+        };
+        pids.sort_unstable_by(|a, b| b.cmp(a));
+        let mut swept = Vec::with_capacity(pids.len());
+        for pid in pids {
+            // a unit that vanished between the snapshot and the flip (or was
+            // already finished) reports false and is not listed
+            if matches!(self.cancel(pid), Ok(true)) {
+                swept.push(pid);
+            }
+        }
+        swept
     }
 
     /// Reap one zombie, evaluating its restart policy inline.
@@ -844,6 +994,32 @@ impl Init {
         self.inner.lock().nodes.get(&pid).map(UnitNode::info)
     }
 
+    /// Snapshot of a single connection unit, if it exists.
+    ///
+    /// Returns `None` for a missing pid and for units that carry no
+    /// counters (anything that is not a [`UnitKind::Connection`] unit), so
+    /// callers never have to special-case kinds themselves.
+    #[must_use]
+    pub fn connection_info(&self, pid: Pid) -> Option<ConnectionInfo> {
+        let st = self.inner.lock();
+        st.nodes.get(&pid).and_then(conn_info)
+    }
+
+    /// Snapshot of every connection unit, ascending pid order.
+    ///
+    /// Ordering is spawn order, deliberately: ps's top-N by traffic is a
+    /// consumer-side sort (N is small, and the honest ordering — by what a
+    /// human asked for — belongs to the view, not the kernel). Zombie
+    /// connection units keep their final counters for the brief reap
+    /// window, so a ps table never shows half-torn numbers.
+    #[must_use]
+    pub fn connections(&self) -> Vec<ConnectionInfo> {
+        let st = self.inner.lock();
+        let mut infos: Vec<ConnectionInfo> = st.nodes.values().filter_map(conn_info).collect();
+        infos.sort_by_key(|info| info.pid);
+        infos
+    }
+
     /// Snapshot of every unit in the registry, ascending pid order.
     #[must_use]
     pub fn units(&self) -> Vec<UnitInfo> {
@@ -912,6 +1088,24 @@ impl Init {
                 st.respawn_locked(pid, &tree, &service);
             });
     }
+}
+
+/// Build the read model for a connection unit, if the node carries
+/// counters. The registry stays the source of truth; the model owns
+/// nothing.
+fn conn_info(node: &UnitNode) -> Option<ConnectionInfo> {
+    let stats = node.stats.as_ref()?;
+    let (bytes_rx, bytes_tx, connected_at, last_activity) = stats.snapshot();
+    Some(ConnectionInfo {
+        pid: node.pid,
+        name: node.name.clone(),
+        state: node.state,
+        parked: node.parked,
+        connected_at,
+        bytes_rx,
+        bytes_tx,
+        last_activity,
+    })
 }
 
 /// Build one body run's mailbox and body.

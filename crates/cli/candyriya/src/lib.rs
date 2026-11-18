@@ -39,10 +39,13 @@
 //!    of truth), `cache` (the supervised owner of the live cache manager,
 //!    a separate record from the `cache.manager` bootstrap adoption),
 //!    `proxy.accept` (long-lived, the unit body drives the
-//!    listener), `host` (the plugin-facing core services), `stats.every-60s`
+//!    listener), `host` (the plugin-facing core services), `players` (the
+//!    group node every connection unit hangs under — accounting and
+//!    shutdown scoping, no work of its own), `stats.every-60s`
 //!    (periodic), `console` (the interactive REPL) and, at shutdown,
 //!    `cache.shutdown` and `metrics.shutdown` (one-shot finalizers, the
-//!    last units to run, in order). Ctrl-C or
+//!    last units to run, in order). Connections accepted by `proxy.accept`
+//!    are `conn-<n>` units under `players`. Ctrl-C or
 //!    `/candyriya end` fires both the shutdown watch and a tree-wide
 //!    cancel sweep; the serving units are waited on through the tree, the
 //!    finalizers run last, the task service drains as the final safety
@@ -279,23 +282,31 @@ fn unit_failure_detail(tree: &Init) -> Option<String> {
 
 /// Unwind a boot that is not allowed to continue serving.
 ///
-/// Cancels the units already spawned in reverse spawn order (newest
-/// first), harvests whatever already exited, drains the kernel and hands
-/// the reason back for the caller to report. Boot-adopted units cannot
-/// appear here; they are reaped as they adopt. The drain is the same
-/// safety net the normal shutdown uses, so a unit wedged mid-await still
-/// gets bounded by it.
+/// Cancels every unit in the tree through the kernel's sweep — newest
+/// first, including connection units the caller's list does not name —
+/// harvests whatever already exited, drains the kernel and hands the
+/// reason back for the caller to report. The `spawned` list is used only
+/// to locate the `players` group (so zombie children of it get reaped
+/// while it is still alive); the cancellation itself is tree-wide and
+/// does not depend on it. Boot-adopted units cannot appear here; they
+/// are reaped as they adopt. The drain is the same safety net the normal
+/// shutdown uses, so a unit wedged mid-await still gets bounded by it.
 async fn boot_abort(
     tree: &Init,
     service: &TaskService,
     spawned: &[(Pid, &'static str)],
     error: CliError,
 ) -> CliError {
-    // newest first, mirroring how the shutdown cascade unwinds
-    for (pid, _) in spawned.iter().rev() {
-        if let Err(cancel_error) = tree.cancel(*pid) {
-            debug!(%cancel_error, %pid, "unit already gone while unwinding the boot abort");
-        }
+    let swept = tree.cancel_all();
+    debug!(
+        swept = swept.len(),
+        "tree-wide cancel sweep requested stops"
+    );
+    // conns that exited under a still-live players stay zombies until
+    // reaped; players re-parents them to the root at its own exit, and
+    // this closes the window while it is still running
+    if let Some((players_pid, _)) = spawned.iter().find(|(_, name)| *name == "players") {
+        let _ = tree.reap_children(*players_pid);
     }
     let _ = tree.reap_children(Pid::INIT);
     let report = service.drain(Duration::from_secs(10)).await;
@@ -372,10 +383,13 @@ where
 /// The cascade: the shutdown cause has already been logged by the caller.
 ///
 /// Sequence: flip the watch (bridge for the accept loop and the REPL),
-/// cancel the serving units in reverse spawn order, wait for them through
+/// cancel every unit in the tree through the kernel's sweep (newest
+/// first: console, stats, proxy.accept, conns under players, players,
+/// host, route.health, cache, route, config — connection units the boot
+/// list does not name are reached like the rest), wait for them through
 /// the tree, run the finalizers in order (`cache.shutdown` then
-/// `metrics.shutdown`), and drain the kernel as the final safety net. The
-/// exit ring keeps every unit exit for the post-mortem.
+/// `metrics.shutdown`), and drain the kernel as the final safety net.
+/// The exit ring keeps every unit exit for the post-mortem.
 async fn cascade_shutdown(
     tree: &Init,
     service: &TaskService,
@@ -387,31 +401,39 @@ async fn cascade_shutdown(
     // bridge: the accept loop and the REPL still watch the flip
     let _ = shutdown_tx.send(true);
 
-    // stop the serving units through the tree, newest first: console,
-    // host, stats.every-60s, proxy.accept, route.health,
-    // cache, route. route.health is a child of route, so cancelling it before
-    // route keeps the order; the cache unit is cancelled in the sweep, so it
-    // is gone by the time the `cache.shutdown` finalizer closes the manager.
-    // when route exits the child re-parents to the root and the wait below
-    // reaps it there
-    for (pid, _) in boot_units.iter().rev() {
-        if let Err(error) = tree.cancel(*pid) {
-            debug!(%error, %pid, "unit already gone in the cancel sweep");
-        }
+    // tree-wide sweep: every non-root unit, newest first, one call. A
+    // connection accepted a second ago and the players group are ordinary
+    // units to this walk — the boot list no longer bounds what gets
+    // stopped. route.health (child of route) is reached directly; when
+    // route exits, orphaned children re-parent to the root and the wait
+    // below reaps them there. connections die at their next loop boundary:
+    // pump cancel = client disconnect; players re-parents whatever is left
+    // to the root at its exit, and the drain accounts stragglers by contract
+    let swept = tree.cancel_all();
+    debug!(
+        swept = swept.len(),
+        "tree-wide cancel sweep requested stops"
+    );
+    // conn zombies under a still-live players re-parent to the root only
+    // at players' exit; close the window explicitly before waiting
+    if let Some((players_pid, _)) = boot_units.iter().find(|(_, name)| *name == "players") {
+        let _ = tree.reap_children(*players_pid);
     }
 
-    // wait for the serving units to exit; the reaper stays warm
-    let pids: Vec<Pid> = boot_units.iter().map(|(pid, _)| *pid).collect();
-    let pending = wait_units_gone(tree, &pids, UNIT_STOP_TIMEOUT).await;
+    // wait for the swept units to exit; the reaper stays warm
+    let pending = wait_units_gone(tree, &swept, UNIT_STOP_TIMEOUT).await;
     if !pending.is_empty() {
-        let names: Vec<&str> = boot_units
+        let names: Vec<String> = pending
             .iter()
-            .filter(|(pid, _)| pending.contains(pid))
-            .map(|(_, name)| *name)
+            .map(|pid| {
+                tree.unit(*pid)
+                    .map(|unit| unit.name)
+                    .unwrap_or_else(|| format!("pid {pid}"))
+            })
             .collect();
         warn!(
             ?names,
-            "serving units did not stop before the cascade deadline; the drain deadline applies"
+            "swept units did not stop before the cascade deadline; the drain deadline applies"
         );
     }
 
@@ -815,6 +837,44 @@ async fn run_async(
     // re-wiring
     let event_dispatcher = Arc::new(ProxyEventDispatcher::new((*plugin_set).clone()));
 
+    // ---- the `players` group unit: the parent of every connection unit.
+    // A supervisor-group node — it holds no sockets and owns no work (a
+    // pending body is the honest shape); it exists so live sessions have a
+    // subtree: accounting, shutdown scoping and the parent rule for grants
+    // all ride it. LongLived + Never: it does not come back and it is not
+    // re-creatable — its children dying with it is a shutdown, not a failure.
+    // The grants ride its spawn because it passes them down to conn units
+    // the way an inherited fd would: config for per-connection fetches,
+    // route for backend resolution, cache for the favicon (when wired).
+    let players_spec = UnitSpec::new(
+        "players",
+        UnitKind::LongLived,
+        RestartPolicy::Never,
+        std::future::pending::<ExitStatus>,
+    )
+    .with_grant(config_pid)
+    .with_grant(route_pid)
+    .with_grant(cache_pid);
+    let players_pid = match tree.spawn_unit(Pid::INIT, players_spec) {
+        Ok(pid) => {
+            info!(pid = %pid, "players group unit spawned");
+            pid
+        }
+        Err(error) => {
+            return Err(boot_abort(
+                &tree,
+                &service,
+                &[
+                    (config_pid, "config"),
+                    (route_pid, "route"),
+                    (cache_pid, "cache"),
+                ],
+                CliError::Runtime(format!("failed to spawn players: {error}")),
+            )
+            .await);
+        }
+    };
+
     // ---- shared proxy state
     // ipc-migration: these fields are cross-subsystem handles (Plugins.Dispatch
     // and I18n.T ride them); the IPC conversion gives each its own unit
@@ -823,6 +883,7 @@ async fn run_async(
         tree.clone(),
         config_pid,
         route_pid,
+        players_pid,
         Arc::clone(&router_store),
     );
     // ipc-migration: ProxyState carries handles across the subsystem boundary
@@ -856,10 +917,17 @@ async fn run_async(
             pid
         }
         Err(error) => {
+            // players precedes the host in spawn order; it rides the unwind
+            let host_unwind = [
+                (config_pid, "config"),
+                (route_pid, "route"),
+                (cache_pid, "cache"),
+                (players_pid, "players"),
+            ];
             return Err(boot_abort(
                 &tree,
                 &service,
-                &config_unwind,
+                &host_unwind,
                 CliError::Runtime(format!("failed to spawn host: {error}")),
             )
             .await);
@@ -875,6 +943,7 @@ async fn run_async(
                 (config_pid, "config"),
                 (route_pid, "route"),
                 (cache_pid, "cache"),
+                (players_pid, "players"),
                 (host_pid, "host"),
             ],
             CliError::Runtime("host IPC link was installed twice".to_owned()),
@@ -977,7 +1046,9 @@ async fn run_async(
     // the same trade config and route make, and the sweep must cancel it
     // before the cache.shutdown finalizer closes the manager. The host
     // unit rides in the list too: a plugins-kind unit that dies silently
-    // would strand every plugin's cross-subsystem calls mid-run.
+    // would strand every plugin's cross-subsystem calls mid-run. The
+    // players group unit rides in the list so the runtime watchdog sees
+    // it too — its death means live sessions lost their subtree.
     let mut boot_units: Vec<(Pid, &'static str)> = vec![
         (config_pid, "config"),
         (route_pid, "route"),
@@ -987,22 +1058,22 @@ async fn run_async(
     if let Some((pid, name)) = health_boot {
         boot_units.push((pid, name));
     }
+    boot_units.push((players_pid, "players"));
 
-    // proxy.accept: the unit body drives listener.accept(); connections
-    // keep their own kernel tasks until phase 3 turns them into units.
-    // The listener and the shutdown receiver are not Clone, so they ride
-    // in a single slot consumed by the one factory invocation a
-    // RestartPolicy::Never unit ever gets; a re-invocation reports a
-    // failure instead of serving on a stolen socket.
+    // proxy.accept: the unit body drives listener.accept(); the connections
+    // it accepts are registered as `conn-<n>` units under the `players`
+    // group unit (spawned above), each carrying a cooperative park gate and
+    // its own byte counters. The listener and the shutdown receiver are not
+    // Clone, so they ride in a single slot consumed by the one factory
+    // invocation a RestartPolicy::Never unit ever gets; a re-invocation
+    // reports a failure instead of serving on a stolen socket.
     let accept_boot = Arc::new(std::sync::Mutex::new(Some((listener, shutdown_rx))));
     let accept_spec = UnitSpec::new("proxy.accept", UnitKind::LongLived, RestartPolicy::Never, {
         let state = Arc::clone(&proxy_state);
-        let service = service.clone();
         let accept_boot = Arc::clone(&accept_boot);
         move || {
             let taken = accept_boot.lock().ok().and_then(|mut slot| slot.take());
             let state = Arc::clone(&state);
-            let service = service.clone();
             async move {
                 let Some((listener, shutdown)) = taken else {
                     debug!("proxy.accept factory ran without a listener; reporting failure");
@@ -1011,7 +1082,7 @@ async fn run_async(
                 // a refusal to serve (the configuration was not readable
                 // when the loop started) reports as a unit failure, which
                 // the boot watchdog turns into a clean boot abort
-                let served = accept_loop(state, listener, shutdown, service).await;
+                let served = accept_loop(state, listener, shutdown).await;
                 if served {
                     ExitStatus::Success
                 } else {
@@ -1135,6 +1206,9 @@ async fn run_async(
                 break None;
             }
             _ = unit_tick.tick() => {
+                // conns exit constantly; harvest their zombies here so the
+                // registry stays flat and ps tells the truth mid-run
+                let _ = tree.reap_children(players_pid);
                 if let Some(detail) = unit_failure_detail(&tree) {
                     break Some(detail);
                 }
